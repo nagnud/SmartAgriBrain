@@ -1,0 +1,32 @@
+# ESP-IDF
+build/
+sdkconfig.old
+managed_components/
+dependencies.lock
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Node / Vue
+node_modules/
+dist/
+
+# VS Code
+.vscode/
+!.vscode/settings.example.json
+
+# System
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Binary large files
+*.zip
+*.rar
+*.7z
