@@ -1,15 +1,18 @@
 # ESP32-C5 智慧农业 Web 前端
 
-这是物联网设计竞赛乐鑫赛道的电脑端 Web 展示平台，重点展示 ESP32-C5 / ESP-SensairShuttle 的采集、联网、AI 建议和远程控制闭环。
+这是智慧农业电脑端 Web 管理平台，面向大棚环境监测、作物健康识别、知识库管理、AI 专家问答和远程设备控制等日常使用场景。
 
 ## 功能
 
-- 首页总览：设备 ID、Wi-Fi / MQTT 状态、核心环境指标、执行设备状态。
-- 实时监测：BME690、BMI270、BMM350 的环境和三轴数据。
-- 历史曲线：温度、湿度、气压、气体阻值趋势图。
-- AI 农事建议：风险等级、建议列表、建议命令。
-- 设备控制：风机、水泵、补光灯、报警器远程控制。
-- 报警记录：通信、环境和空气质量相关报警。
+- 首页总览：设备 ID、Wi-Fi / MQTT 状态、天气、温度、湿度、光照、CO2、土壤湿度、土壤 EC、空气质量、风险等级。
+- 实时监测：农业核心环境指标、目标区间状态、指标详情抽屉和单变量趋势曲线。
+- 历史曲线：温度、湿度、光照、CO2、土壤湿度、土壤 EC、空气质量趋势图。
+- 病害识别：图片上传、检测框、YOLO 风格类别、置信度、解释和建议。
+- AI 农事建议：风险等级、分析依据、建议列表和建议命令。
+- 专家问答：文字输入、图片附件、浏览器语音识别转文字和聊天流程。
+- 设备控制：风机、水泵、补光灯、卷帘、报警器远程控制。
+- 知识库管理：知识库列表、知识条目列表、新建、编辑、删除、RAG 引用片段展示。
+- 报警记录：通信、环境、病害和 AI 风险相关报警。
 
 ## 运行
 
@@ -42,19 +45,11 @@ http://localhost:5173
 npm run build
 ```
 
-## GitHub 推送
-
-推送脚本已经放在 `pro` 文件夹内部：
-
-```text
-scripts/git/push-frontend.bat
-```
-
-网络稳定、GitHub 登录正常时，双击这个脚本即可把当前 `pro` 工程导入到仓库的 `frontend_dashboard/` 目录并推送到 `feature/frontend` 分支。
+如果系统 Node 版本过低，请使用 `scripts/web/start-web.bat` 运行，或安装 Node.js 20.19+。
 
 ## 接口切换
 
-默认使用 Mock 数据。后端完成后复制 `.env.example` 为 `.env`，把 `VITE_USE_MOCK` 改为 `false`，并设置后端地址：
+默认使用本地示例数据。后端完成后复制 `.env.example` 为 `.env`，把 `VITE_USE_MOCK` 改为 `false`，并设置后端地址：
 
 ```text
 VITE_API_BASE_URL=http://localhost:8000
@@ -66,12 +61,25 @@ VITE_USE_MOCK=false
 - `GET /api/device/latest`
 - `GET /api/device/history`
 - `GET /api/device/status`
+- `GET /api/device/alarms`
+- `GET /api/weather/current`
 - `POST /api/ai/analyze`
+- `POST /api/ai/chat`
 - `POST /api/device/command`
+- `POST /api/vision/disease`
+- `GET /api/v1/kb/list`
+- `GET /api/v1/kb/items?kbId=`
+- `POST /api/v1/kb/create`
+- `POST /api/v1/kb/update`
+- `POST /api/v1/kb/delete`
+- `POST /api/v1/kb/add_text`
+- `POST /api/v1/kb/item/update`
+- `POST /api/v1/kb/item/delete`
+- `POST /api/v1/kb/analyze`
 
 ## 数据格式
 
-端侧上传数据以新比赛负责文件为准：
+端侧上传数据建议统一为：
 
 ```json
 {
@@ -82,22 +90,19 @@ VITE_USE_MOCK=false
     "humidity": 62.3,
     "pressure": 101.2,
     "gas_resistance": 15800,
-    "acc_x": 0.01,
-    "acc_y": -0.02,
-    "acc_z": 0.98,
-    "gyro_x": 0.1,
-    "gyro_y": 0.0,
-    "gyro_z": -0.1,
-    "mag_x": 12.3,
-    "mag_y": 8.6,
-    "mag_z": -35.1
+    "light": 18000,
+    "co2": 650,
+    "soil_moisture": 58.5,
+    "soil_ec": 1.8
   },
   "status": {
     "wifi": "connected",
     "mqtt": "connected",
     "fan": 0,
     "pump": 0,
-    "light": 0
+    "light": 0,
+    "alarm": 0,
+    "curtain": 1
   }
 }
 ```
@@ -107,8 +112,10 @@ VITE_USE_MOCK=false
 ```json
 {
   "device_id": "sensairshuttle_001",
-  "command": "fan_on",
+  "command": "curtain_open",
   "value": 1,
-  "reason": "棚内温度偏高，建议开启通风"
+  "reason": "打开卷帘，提高自然光照"
 }
 ```
+
+病害识别真实接口建议使用 `multipart/form-data` 上传图片字段 `image`，返回 `detections`、`summary`、`explanation`、`suggestions` 和 `processed_at`。

@@ -1,19 +1,15 @@
 export type ConnectionState = 'connected' | 'disconnected' | 'warning';
+export type StatusLevel = 'good' | 'watch' | 'danger' | 'neutral';
 
 export interface SensorSnapshot {
   temperature: number;
   humidity: number;
   pressure: number;
   gas_resistance: number;
-  acc_x: number;
-  acc_y: number;
-  acc_z: number;
-  gyro_x: number;
-  gyro_y: number;
-  gyro_z: number;
-  mag_x: number;
-  mag_y: number;
-  mag_z: number;
+  light: number;
+  co2: number;
+  soil_moisture: number;
+  soil_ec: number;
 }
 
 export interface DeviceRuntimeStatus {
@@ -23,6 +19,7 @@ export interface DeviceRuntimeStatus {
   pump: number;
   light: number;
   alarm: number;
+  curtain: number;
 }
 
 export interface TelemetryPayload {
@@ -36,8 +33,26 @@ export interface HistoryPoint {
   timestamp: number;
   temperature: number;
   humidity: number;
-  pressure: number;
   gas_resistance: number;
+  light: number;
+  co2: number;
+  soil_moisture: number;
+  soil_ec: number;
+}
+
+export interface WeatherPayload {
+  location: string;
+  condition: string;
+  temperature: number;
+  humidity: number;
+  wind_direction: string;
+  wind_level: string;
+  updated_at: number;
+}
+
+export interface MetricTargetRange {
+  min: number;
+  max: number;
 }
 
 export interface AiCommand {
@@ -52,6 +67,7 @@ export interface AiAnalysisResponse {
   summary: string;
   suggestions: string[];
   commands: AiCommand[];
+  basis: string[];
   updated_at: number;
 }
 
@@ -78,4 +94,89 @@ export interface AlarmRecord {
   source: string;
   timestamp: number;
   handled: boolean;
+}
+
+export interface DetectionBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DiseaseDetection {
+  id: string;
+  label: string;
+  class_name: string;
+  confidence: number;
+  bbox: DetectionBox;
+  severity: 'healthy' | 'low' | 'medium' | 'high';
+}
+
+export interface DiseaseDetectionResult {
+  image_url: string;
+  crop: string;
+  model: string;
+  detections: DiseaseDetection[];
+  summary: string;
+  explanation: string;
+  suggestions: string[];
+  processed_at: number;
+}
+
+export interface KnowledgeReference {
+  itemId: number;
+  chunkId: number;
+  title: string;
+  content: string;
+  score: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  image_url?: string;
+  created_at: number;
+  references?: KnowledgeReference[];
+  suggested_commands?: AiCommand[];
+}
+
+export interface ExpertChatRequest {
+  question: string;
+  image_url?: string;
+  latest: TelemetryPayload;
+  disease?: DiseaseDetectionResult | null;
+  knowledge_base_id?: number;
+}
+
+export interface ExpertChatResponse {
+  message: ChatMessage;
+}
+
+export interface KnowledgeBaseInfo {
+  kbId: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  updatedAt: string;
+}
+
+export interface KnowledgeItemInfo {
+  itemId: number;
+  kbId: number;
+  title: string;
+  content: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeTextAddResult {
+  itemId: number;
+  chunkCount: number;
+  updatedAt: string;
+}
+
+export interface KnowledgeAnalyzeResult {
+  answer: string;
+  references: KnowledgeReference[];
+  updatedAt: string;
 }

@@ -95,6 +95,7 @@ onBeforeUnmount(() => {
   <section class="chart-panel">
     <div class="section-heading">
       <h2>{{ title }}</h2>
+      <slot name="toolbar"></slot>
     </div>
     <div ref="chartEl" class="chart-panel__canvas"></div>
   </section>
