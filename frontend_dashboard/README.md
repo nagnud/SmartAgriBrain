@@ -54,6 +54,15 @@ npm run build
 ```text
 VITE_API_BASE_URL=http://localhost:8000
 VITE_USE_MOCK=false
+VITE_USE_MOCK_ASSISTANT=false
+```
+
+如果只想让 AI 助手真实接入、其他遥测/设备/视觉功能继续使用 Mock，可以保持：
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
+VITE_USE_MOCK=true
+VITE_USE_MOCK_ASSISTANT=false
 ```
 
 前端预留接口集中在 `src/services/api.ts`：
@@ -64,7 +73,7 @@ VITE_USE_MOCK=false
 - `GET /api/device/alarms`
 - `GET /api/weather/current`
 - `POST /api/ai/analyze`
-- `POST /api/ai/chat`
+- `POST /api/v1/assistant/chat`
 - `POST /api/device/command`
 - `POST /api/vision/disease`
 - `GET /api/v1/kb/list`

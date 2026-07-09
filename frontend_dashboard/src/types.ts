@@ -60,6 +60,30 @@ export interface AiCommand {
   value: number;
 }
 
+export type AssistantActionType =
+  | 'navigate_view'
+  | 'open_panel'
+  | 'device_command'
+  | 'smart_control'
+  | 'knowledge_base'
+  | 'knowledge_item'
+  | 'run_knowledge_analysis'
+  | 'refresh_data';
+
+export type AssistantActionRisk = 'normal' | 'medium' | 'high';
+export type AssistantActionStatus = 'pending' | 'executed' | 'canceled' | 'failed';
+
+export interface AssistantAction {
+  id: string;
+  type: AssistantActionType;
+  title: string;
+  description: string;
+  risk: AssistantActionRisk;
+  payload: Record<string, unknown>;
+  status?: AssistantActionStatus;
+  error?: string;
+}
+
 export interface AiAnalysisResponse {
   device_id: string;
   crop: string;
@@ -154,6 +178,7 @@ export interface ChatMessage {
   created_at: number;
   references?: KnowledgeReference[];
   suggested_commands?: AiCommand[];
+  suggested_actions?: AssistantAction[];
 }
 
 export interface ExpertChatRequest {
@@ -162,10 +187,16 @@ export interface ExpertChatRequest {
   latest: TelemetryPayload;
   disease?: DiseaseDetectionResult | null;
   knowledge_base_id?: number;
+  current_view?: string;
+  knowledge_bases?: KnowledgeBaseInfo[];
+  knowledge_items?: KnowledgeItemInfo[];
+  command_results?: CommandResult[];
 }
 
 export interface ExpertChatResponse {
   message: ChatMessage;
+  references?: KnowledgeReference[];
+  actions?: AssistantAction[];
 }
 
 export interface KnowledgeBaseInfo {

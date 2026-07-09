@@ -36,6 +36,9 @@ import type {
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const useMock = import.meta.env.VITE_USE_MOCK !== 'false';
+const useMockAssistant = import.meta.env.VITE_USE_MOCK_ASSISTANT === undefined
+  ? useMock
+  : import.meta.env.VITE_USE_MOCK_ASSISTANT !== 'false';
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -128,13 +131,23 @@ export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise
 }
 
 export async function sendExpertChatMessage(payload: ExpertChatRequest): Promise<ExpertChatResponse> {
-  if (useMock) {
+  if (useMockAssistant) {
     return buildMockExpertChat(payload);
   }
-  return requestJson<ExpertChatResponse>('/api/ai/chat', {
+  const response = await requestJson<ExpertChatResponse>('/api/v1/assistant/chat', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+  const actions = response.actions ?? response.message.suggested_actions ?? [];
+  return {
+    ...response,
+    message: {
+      ...response.message,
+      references: response.message.references ?? response.references ?? [],
+      suggested_actions: actions.map((action) => ({ ...action, status: action.status ?? 'pending' })),
+    },
+    actions,
+  };
 }
 
 export async function getKnowledgeBases(): Promise<KnowledgeBaseInfo[]> {

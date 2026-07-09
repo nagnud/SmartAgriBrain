@@ -309,6 +309,7 @@ function selectedReferences(kbId?: number): KnowledgeReference[] {
 export function buildMockExpertChat(request: ExpertChatRequest): ExpertChatResponse {
   const sensors = request.latest.sensors;
   const diseaseText = request.disease?.summary ?? lastDiseaseResult?.summary ?? '当前没有新的病害图片检测结果。';
+  const suggestFan = sensors.humidity > 68;
   return {
     message: {
       id: `assistant-${Date.now()}`,
@@ -322,7 +323,18 @@ export function buildMockExpertChat(request: ExpertChatRequest): ExpertChatRespo
           : '建议保持当前策略，继续每 30 分钟观察环境趋势。',
       ].join('\n'),
       references: selectedReferences(request.knowledge_base_id),
-      suggested_commands: sensors.humidity > 68 ? [{ command: 'fan_on', value: 1 }] : [],
+      suggested_commands: suggestFan ? [{ command: 'fan_on', value: 1 }] : [],
+      suggested_actions: suggestFan ? [
+        {
+          id: `mock-action-${Date.now()}`,
+          type: 'device_command',
+          title: '打开风机',
+          description: '棚内湿度偏高，建议先通风降湿，执行前需要确认。',
+          risk: 'high',
+          payload: { command: 'fan_on', value: 1, reason: 'AI助手建议通风降湿' },
+          status: 'pending',
+        },
+      ] : [],
     },
   };
 }

@@ -61,6 +61,8 @@ import {
 import type {
   AiAnalysisResponse,
   AlarmRecord,
+  AssistantAction,
+  AssistantActionRisk,
   ChatMessage,
   CommandResult,
   DeviceCommand,
@@ -184,6 +186,14 @@ const navItems: NavItem[] = [
   { key: 'alarms', label: '报警记录', icon: Bell },
 ];
 
+function isViewKey(value: unknown): value is ViewKey {
+  return typeof value === 'string' && navItems.some((item) => item.key === value);
+}
+
+function isSmartControlParamKey(value: unknown): value is SmartControlParamKey {
+  return typeof value === 'string' && smartControlParamKeys.includes(value as SmartControlParamKey);
+}
+
 const activeView = ref<ViewKey>('overview');
 const latest = ref<TelemetryPayload | null>(null);
 const currentWeather = ref<WeatherPayload | null>(null);
@@ -200,7 +210,8 @@ const chatImageUrl = ref('');
 const chatImageFileName = ref('');
 const chatSending = ref(false);
 const assistantOpen = ref(false);
-const assistantPendingAction = ref<string | null>(null);
+const assistantConfirmActionId = ref<string | null>(null);
+const assistantExecutingActionId = ref<string | null>(null);
 const smartControlPanelOpen = ref(false);
 const smartControlEnabled = ref(true);
 const smartControlAutoDemands = ref<SmartControlDemands>(cloneSmartControlDemands(zeroSmartControlDemands));
@@ -1142,6 +1153,219 @@ function aiCommandText(command: { command: string; value: number }): string {
   });
 }
 
+function actionPayloadText(action: AssistantAction, key: string, fallback = ''): string {
+  const value = action.payload[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
+}
+
+function actionPayloadNumber(action: AssistantAction, key: string, fallback = 0): number {
+  const value = action.payload[key];
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
+}
+
+function assistantActionRiskLabel(risk: AssistantActionRisk): string {
+  if (risk === 'high') {
+    return '高风险';
+  }
+  if (risk === 'medium') {
+    return '需确认';
+  }
+  return '普通';
+}
+
+function assistantActionRiskState(risk: AssistantActionRisk): StatusLevel {
+  if (risk === 'high') {
+    return 'danger';
+  }
+  if (risk === 'medium') {
+    return 'watch';
+  }
+  return 'neutral';
+}
+
+function assistantActionStatusText(action: AssistantAction): string {
+  if (action.status === 'executed') {
+    return '已执行';
+  }
+  if (action.status === 'canceled') {
+    return '已取消';
+  }
+  if (action.status === 'failed') {
+    return action.error ?? '执行失败';
+  }
+  if (assistantExecutingActionId.value === action.id) {
+    return '执行中';
+  }
+  return '';
+}
+
+function assistantActionConfirmText(action: AssistantAction): string {
+  if (assistantExecutingActionId.value === action.id) {
+    return '执行中';
+  }
+  if (action.risk === 'high' && assistantConfirmActionId.value !== action.id) {
+    return '确认风险';
+  }
+  if (action.risk === 'high') {
+    return '再次确认';
+  }
+  return '确认执行';
+}
+
+function setAssistantActionStatus(action: AssistantAction, status: AssistantAction['status'], error = ''): void {
+  action.status = status;
+  action.error = error;
+  chatMessages.value = [...chatMessages.value];
+}
+
+async function executeAssistantAction(action: AssistantAction): Promise<void> {
+  if (assistantExecutingActionId.value || action.status === 'executed' || action.status === 'canceled') {
+    return;
+  }
+  assistantExecutingActionId.value = action.id;
+  try {
+    if (action.type === 'navigate_view') {
+      const view = actionPayloadText(action, 'view');
+      if (!isViewKey(view)) {
+        throw new Error('未知页面');
+      }
+      activeView.value = view;
+    } else if (action.type === 'open_panel') {
+      const panel = actionPayloadText(action, 'panel');
+      if (panel === 'smart_control') {
+        activeView.value = 'control';
+        smartControlPanelOpen.value = true;
+      } else if (panel === 'knowledge') {
+        activeView.value = 'knowledge';
+      } else if (panel === 'disease_upload') {
+        activeView.value = 'disease';
+      } else {
+        assistantOpen.value = true;
+      }
+    } else if (action.type === 'refresh_data') {
+      await loadDashboard(true);
+    } else if (action.type === 'device_command') {
+      await applyCommand(
+        actionPayloadText(action, 'command'),
+        actionPayloadNumber(action, 'value', 1),
+        actionPayloadText(action, 'reason', 'AI助手建议执行设备控制'),
+      );
+    } else if (action.type === 'smart_control') {
+      const operation = actionPayloadText(action, 'operation');
+      const keyText = actionPayloadText(action, 'key');
+      if (operation === 'enable') {
+        await setSmartControlEnabled(true);
+      } else if (operation === 'disable') {
+        await setSmartControlEnabled(false);
+      } else if (operation === 'all_auto') {
+        await setAllSmartParamsAuto();
+      } else if (operation === 'open_panel') {
+        activeView.value = 'control';
+        smartControlPanelOpen.value = true;
+      } else if (isSmartControlParamKey(keyText)) {
+        if (operation === 'set_manual') {
+          await setSmartParamManual(keyText);
+        } else if (operation === 'update_manual') {
+          if (smartControlParamStates.value[keyText].mode !== 'manual') {
+            await setSmartParamManual(keyText);
+          }
+          await updateSmartParamManualValue(keyText, actionPayloadNumber(action, 'value', 0));
+        } else if (operation === 'restore_auto') {
+          await restoreSmartParamAuto(keyText);
+        } else {
+          throw new Error('未知托管操作');
+        }
+      } else {
+        throw new Error('未知托管参数');
+      }
+    } else if (action.type === 'knowledge_base') {
+      activeView.value = 'knowledge';
+      const operation = actionPayloadText(action, 'operation');
+      const kbId = actionPayloadNumber(action, 'kbId', selectedKbId.value);
+      if (operation === 'create') {
+        const saved = await createKnowledgeBase(actionPayloadText(action, 'name'), actionPayloadText(action, 'description'));
+        await refreshKnowledge(saved.kbId);
+      } else if (operation === 'update') {
+        await updateKnowledgeBase(kbId, actionPayloadText(action, 'name'), actionPayloadText(action, 'description'));
+        await refreshKnowledge(kbId);
+      } else if (operation === 'delete') {
+        await deleteKnowledgeBase(kbId);
+        await refreshKnowledge();
+      } else if (operation === 'select') {
+        await selectKnowledgeBase(kbId);
+      } else {
+        throw new Error('未知知识库操作');
+      }
+    } else if (action.type === 'knowledge_item') {
+      activeView.value = 'knowledge';
+      const operation = actionPayloadText(action, 'operation');
+      const kbId = actionPayloadNumber(action, 'kbId', selectedKbId.value);
+      const itemId = actionPayloadNumber(action, 'itemId');
+      if (kbId > 0 && selectedKbId.value !== kbId) {
+        await selectKnowledgeBase(kbId);
+      }
+      if (operation === 'create') {
+        await addKnowledgeItem(kbId, actionPayloadText(action, 'title'), actionPayloadText(action, 'content'));
+        knowledgeItems.value = await getKnowledgeItems(kbId);
+      } else if (operation === 'update') {
+        await updateKnowledgeItem(kbId, itemId, actionPayloadText(action, 'title'), actionPayloadText(action, 'content'));
+        knowledgeItems.value = await getKnowledgeItems(kbId);
+      } else if (operation === 'delete') {
+        await deleteKnowledgeItem(kbId, itemId);
+        knowledgeItems.value = await getKnowledgeItems(kbId);
+      } else if (operation === 'select') {
+        const item = knowledgeItems.value.find((entry) => entry.itemId === itemId);
+        if (item) {
+          beginEditKnowledgeItem(item);
+        }
+      } else {
+        throw new Error('未知知识条目操作');
+      }
+    } else if (action.type === 'run_knowledge_analysis') {
+      activeView.value = 'knowledge';
+      const kbId = actionPayloadNumber(action, 'kbId', selectedKbId.value);
+      if (kbId > 0 && selectedKbId.value !== kbId) {
+        await selectKnowledgeBase(kbId);
+      }
+      const question = actionPayloadText(action, 'question');
+      if (question.length > 0) {
+        knowledgeQuestion.value = question;
+      }
+      await runKnowledgeAnalysis();
+    }
+    assistantConfirmActionId.value = null;
+    setAssistantActionStatus(action, 'executed');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '执行失败';
+    setAssistantActionStatus(action, 'failed', message);
+  } finally {
+    assistantExecutingActionId.value = null;
+  }
+}
+
+async function confirmAssistantAction(action: AssistantAction): Promise<void> {
+  if (action.status !== 'pending' && action.status !== 'failed' && action.status !== undefined) {
+    return;
+  }
+  if (action.risk === 'high' && assistantConfirmActionId.value !== action.id) {
+    assistantConfirmActionId.value = action.id;
+    return;
+  }
+  await executeAssistantAction(action);
+}
+
+function cancelAssistantAction(action: AssistantAction): void {
+  assistantConfirmActionId.value = assistantConfirmActionId.value === action.id ? null : assistantConfirmActionId.value;
+  setAssistantActionStatus(action, 'canceled');
+}
+
 async function handleDiseaseUpload(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -1216,10 +1440,25 @@ async function sendChat(): Promise<void> {
       latest: latest.value,
       disease: diseaseResult.value,
       knowledge_base_id: selectedKbId.value || undefined,
+      current_view: activeView.value,
+      knowledge_bases: knowledgeBases.value,
+      knowledge_items: knowledgeItems.value,
+      command_results: commandResults.value,
     });
     chatMessages.value = [...chatMessages.value, response.message];
     chatInput.value = '';
     clearChatImage();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误';
+    chatMessages.value = [
+      ...chatMessages.value,
+      {
+        id: `assistant-error-${Date.now()}`,
+        role: 'assistant',
+        content: `AI助手暂时没有连上后端服务。\n请确认 FastAPI 后端已启动，并且 http://localhost:8000/api/v1/health 可以访问。\n错误信息：${message}`,
+        created_at: Date.now(),
+      },
+    ];
   } finally {
     chatSending.value = false;
   }
@@ -2036,15 +2275,34 @@ onBeforeUnmount(() => {
                 {{ refItem.title }}：{{ refItem.content }}
               </span>
             </div>
+            <div v-if="message.suggested_actions?.length" class="assistant-actions">
+              <strong>待确认操作</strong>
+              <article
+                v-for="action in message.suggested_actions"
+                :key="action.id"
+                class="assistant-action-card"
+                :class="`assistant-action-card--${action.risk}`"
+              >
+                <div class="assistant-action-card__body">
+                  <b>{{ action.title }}</b>
+                  <span>{{ action.description || 'AI 建议执行该操作，确认后才会生效。' }}</span>
+                  <em v-if="assistantActionStatusText(action)">{{ assistantActionStatusText(action) }}</em>
+                </div>
+                <StatusPill :label="assistantActionRiskLabel(action.risk)" :state="assistantActionRiskState(action.risk)" />
+                <div v-if="action.status === 'pending' || action.status === 'failed' || !action.status" class="assistant-action-card__buttons">
+                  <button
+                    class="primary-button"
+                    type="button"
+                    :disabled="assistantExecutingActionId === action.id"
+                    @click="confirmAssistantAction(action)"
+                  >
+                    {{ assistantActionConfirmText(action) }}
+                  </button>
+                  <button class="text-button" type="button" @click="cancelAssistantAction(action)">取消</button>
+                </div>
+              </article>
+            </div>
           </article>
-        </div>
-        <div v-if="assistantPendingAction" class="assistant-confirm">
-          <strong>待确认操作</strong>
-          <span>{{ assistantPendingAction }}</span>
-          <div>
-            <button class="primary-button" type="button" @click="assistantPendingAction = null">确认执行</button>
-            <button class="text-button" type="button" @click="assistantPendingAction = null">取消</button>
-          </div>
         </div>
         <div v-if="chatImageUrl" class="chat-attachment">
           <img :src="chatImageUrl" alt="待发送图片" />

@@ -1080,6 +1080,67 @@ button:disabled {
   gap: 8px;
 }
 
+.assistant-actions {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.assistant-actions > strong {
+  color: #2f8f4e;
+  font-size: 13px;
+}
+
+.assistant-action-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.assistant-action-card--medium {
+  border-color: #e9c47d;
+  background: #fff9ee;
+}
+
+.assistant-action-card--high {
+  border-color: #efb8b8;
+  background: #fff7f7;
+}
+
+.assistant-action-card__body {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.assistant-action-card__body b,
+.assistant-action-card__body span,
+.assistant-action-card__body em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.assistant-action-card__body span {
+  color: #4f5d55;
+  line-height: 1.45;
+}
+
+.assistant-action-card__body em {
+  color: #7a857d;
+  font-style: normal;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.assistant-action-card__buttons {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr);
+  gap: 8px;
+}
+
 .reference-list {
   display: grid;
   gap: 6px;
