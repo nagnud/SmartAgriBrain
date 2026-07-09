@@ -32,6 +32,7 @@ import type {
   KnowledgeTextAddResult,
   TelemetryPayload,
   VoiceTranscriptionResponse,
+  VoiceTranscriptionStatus,
   WeatherPayload,
 } from '../types';
 
@@ -183,6 +184,35 @@ export async function transcribeVoiceChunk(payload: {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<VoiceTranscriptionResponse>;
+}
+
+export async function getVoiceTranscriptionStatus(): Promise<VoiceTranscriptionStatus> {
+  if (useMockAssistant) {
+    return {
+      ok: true,
+      configured: false,
+      provider: 'browser',
+      model: 'Web Speech API',
+      message: '助手 Mock 模式下使用浏览器语音识别。',
+    };
+  }
+
+  try {
+    const response = await fetch(`${apiBaseUrl}/api/v1/assistant/voice/status`);
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<VoiceTranscriptionStatus>;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown error';
+    return {
+      ok: false,
+      configured: true,
+      provider: 'backend',
+      model: '',
+      message: `语音状态接口不可用，将继续尝试后端识别：${message}`,
+    };
+  }
 }
 
 export async function getKnowledgeBases(): Promise<KnowledgeBaseInfo[]> {

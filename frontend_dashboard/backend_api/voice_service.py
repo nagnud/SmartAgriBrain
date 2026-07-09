@@ -29,6 +29,10 @@ def speech_api_key() -> str:
     )
 
 
+def speech_configured() -> bool:
+    return bool(speech_api_key())
+
+
 def speech_model() -> str:
     return os.getenv("SPEECH_TRANSCRIBE_MODEL", "whisper-1").strip() or "whisper-1"
 

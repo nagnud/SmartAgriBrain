@@ -208,6 +208,14 @@ export interface VoiceTranscriptionResponse {
   message: string;
 }
 
+export interface VoiceTranscriptionStatus {
+  ok: boolean;
+  configured: boolean;
+  provider: string;
+  model: string;
+  message: string;
+}
+
 export interface KnowledgeBaseInfo {
   kbId: number;
   name: string;

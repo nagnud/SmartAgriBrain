@@ -71,3 +71,11 @@ class VoiceTranscriptionResponse(BaseModel):
     partial: bool = True
     final: bool = False
     message: str = ""
+
+
+class VoiceTranscriptionStatus(BaseModel):
+    ok: bool = True
+    configured: bool = False
+    provider: str = "backend"
+    model: str = ""
+    message: str = ""

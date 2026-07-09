@@ -11,8 +11,9 @@ from schemas import (
     HealthResponse,
     KnowledgeReference,
     VoiceTranscriptionResponse,
+    VoiceTranscriptionStatus,
 )
-from voice_service import transcribe_voice_chunk
+from voice_service import speech_configured, speech_model, transcribe_voice_chunk
 
 load_dotenv()
 
@@ -71,6 +72,18 @@ def post_assistant_chat(payload: AssistantChatRequest) -> AssistantChatResponse:
         suggested_actions=[],
     )
     return AssistantChatResponse(message=message, references=references, actions=[])
+
+
+@app.get("/api/v1/assistant/voice/status", response_model=VoiceTranscriptionStatus)
+def get_assistant_voice_status() -> VoiceTranscriptionStatus:
+    configured = speech_configured()
+    return VoiceTranscriptionStatus(
+        ok=True,
+        configured=configured,
+        provider="backend",
+        model=speech_model(),
+        message="后端语音识别 API Key 已配置。" if configured else "后端未配置语音识别 API Key，前端将直接使用浏览器语音识别。",
+    )
 
 
 @app.post("/api/v1/assistant/voice/transcribe", response_model=VoiceTranscriptionResponse)

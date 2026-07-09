@@ -54,6 +54,7 @@ import {
   getKnowledgeBases,
   getKnowledgeItems,
   getLatestTelemetry,
+  getVoiceTranscriptionStatus,
   sendDeviceCommand,
   sendExpertChatMessage,
   transcribeVoiceChunk,
@@ -1802,6 +1803,19 @@ function stopVoiceInput(): void {
   listening.value = false;
 }
 
+function prepareVoiceInputSession(): void {
+  const input = chatInputRef.value;
+  const selectionStart = input?.selectionStart ?? chatInput.value.length;
+  const selectionEnd = input?.selectionEnd ?? chatInput.value.length;
+  voiceInputPrefix = chatInput.value.slice(0, selectionStart);
+  voiceInputSuffix = chatInput.value.slice(selectionEnd);
+  voiceCurrentTranscript = '';
+  voiceSessionId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  voiceSequence = 0;
+  voiceStopping = false;
+  voiceUploadQueue = Promise.resolve();
+}
+
 async function startVoiceInput(): Promise<void> {
   if (listening.value) {
     stopVoiceInput();
@@ -1810,6 +1824,7 @@ async function startVoiceInput(): Promise<void> {
   if (activeBrowserSpeechRecognition) {
     stopBrowserSpeechInput();
   }
+  prepareVoiceInputSession();
   if (!navigator.mediaDevices?.getUserMedia) {
     startBrowserSpeechFallback();
     return;
@@ -1829,6 +1844,14 @@ async function startVoiceInput(): Promise<void> {
   voiceSequence = 0;
   voiceStopping = false;
   voiceUploadQueue = Promise.resolve();
+
+  voiceMessage.value = '正在检查语音识别后端...';
+  const voiceStatus = await getVoiceTranscriptionStatus();
+  if (voiceStatus.configured === false) {
+    voiceMessage.value = voiceStatus.message || '后端未配置语音识别 API Key，正在切换浏览器语音识别';
+    startBrowserSpeechFallback();
+    return;
+  }
 
   try {
     activeVoiceStream = await navigator.mediaDevices.getUserMedia({
