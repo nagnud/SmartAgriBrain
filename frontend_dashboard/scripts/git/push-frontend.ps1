@@ -479,6 +479,11 @@ try {
     throw "Push could not be completed after resyncing the remote branch."
   }
 
+  if ((Test-Path -LiteralPath (Join-Path $repoDir ".git")) -and -not $DryRun -and (Get-LocalAheadCount) -eq 0) {
+    $completed = $true
+    $queued = $false
+  }
+
   Write-Step "Done"
   if ($queued) {
     Write-Host "Saved locally. GitHub is unreachable, so the commit is queued in .push-cache."
