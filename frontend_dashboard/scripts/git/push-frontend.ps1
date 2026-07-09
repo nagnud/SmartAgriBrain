@@ -98,7 +98,8 @@ function Invoke-GitChecked {
   if ($Network) {
     $gitArguments += @(
       "-c", "http.version=HTTP/1.1",
-      "-c", "http.lowSpeedLimit=0",
+      "-c", "http.lowSpeedLimit=1",
+      "-c", "http.lowSpeedTime=15",
       "-c", "http.postBuffer=524288000",
       "-c", "credential.helper=",
       "-c", "core.longpaths=true"
@@ -195,30 +196,73 @@ function Get-PushCredentials {
   }
 }
 
+function Get-AskPassRoot {
+  $roots = @()
+  if ($env:ProgramData) {
+    $roots += (Join-Path $env:ProgramData "CodexGitAskPass")
+  }
+  if ($env:SystemRoot) {
+    $roots += (Join-Path $env:SystemRoot "Temp\CodexGitAskPass")
+  }
+  if ($env:SystemDrive) {
+    $roots += (Join-Path $env:SystemDrive "CodexGitAskPass")
+  }
+
+  foreach ($root in $roots) {
+    if ($root -match "[^\x00-\x7F]") {
+      continue
+    }
+
+    try {
+      New-Item -ItemType Directory -Force -Path $root | Out-Null
+      $probe = Join-Path $root ("write-test-{0}.tmp" -f $PID)
+      Set-Content -LiteralPath $probe -Value "ok" -Encoding ASCII
+      Remove-Item -LiteralPath $probe -Force
+      return (Join-Path $root ("push-frontend-{0}" -f $PID))
+    } catch {
+      continue
+    }
+  }
+
+  throw "Cannot create an ASCII-only askpass directory. Tried ProgramData, Windows Temp, and SystemDrive."
+}
+
 function New-GitAskPass {
   param([Parameter(Mandatory = $true)][string] $Directory)
 
   New-Item -ItemType Directory -Force -Path $Directory | Out-Null
 
-  $scriptPath = Join-Path $Directory "git-askpass.ps1"
   $commandPath = Join-Path $Directory "git-askpass.cmd"
-  $scriptLines = @(
-    'param([string] $Prompt)',
-    'if ($Prompt -match "(?i)username") { [Console]::Out.Write($env:GIT_PUSH_USERNAME); exit 0 }',
-    'if ($Prompt -match "(?i)password|token") { [Console]::Out.Write($env:GIT_PUSH_TOKEN); exit 0 }',
-    '[Console]::Out.Write("")'
-  )
   $commandLines = @(
     '@echo off',
-    "powershell -NoProfile -ExecutionPolicy Bypass -File ""$scriptPath"" %*"
+    'echo %* | findstr /I "username" >nul',
+    'if not errorlevel 1 (',
+    '  <nul set /p=%GIT_PUSH_USERNAME%',
+    '  exit /b 0',
+    ')',
+    '<nul set /p=%GIT_PUSH_TOKEN%',
+    'exit /b 0'
   )
 
-  Set-Content -LiteralPath $scriptPath -Value $scriptLines -Encoding UTF8
   Set-Content -LiteralPath $commandPath -Value $commandLines -Encoding ASCII
 
   [pscustomobject]@{
-    Script = $scriptPath
+    Script = $null
     Command = $commandPath
+  }
+}
+
+function Test-GitAskPass {
+  param([Parameter(Mandatory = $true)][string] $Command)
+
+  $username = & $Command "Username for 'https://github.com':"
+  if ($LASTEXITCODE -ne 0 -or $username -ne $env:GIT_PUSH_USERNAME) {
+    throw "Git askpass username test failed. Command path: $Command"
+  }
+
+  $token = & $Command "Password for 'https://github.com':"
+  if ($LASTEXITCODE -ne 0 -or $token -ne $env:GIT_PUSH_TOKEN) {
+    throw "Git askpass token test failed. Command path: $Command"
   }
 }
 
@@ -237,11 +281,31 @@ function Ensure-RepoCache {
   if (Test-Path -LiteralPath $gitDir) {
     Write-Step "Updating cached repository"
     Invoke-GitChecked @("remote", "set-url", "origin", $repoUrl) -WorkingDirectory $repoDir
-    Invoke-GitChecked @("fetch", "--prune", "origin", $branchName) -WorkingDirectory $repoDir -Network -Attempts $MaxNetworkAttempts
+    Invoke-GitChecked @("checkout", $branchName) -WorkingDirectory $repoDir
+
+    $fetchResult = Invoke-GitChecked @("fetch", "--prune", "origin", $branchName) -WorkingDirectory $repoDir -Network -Attempts $MaxNetworkAttempts -NoThrow
+    $fetchMessage = ($fetchResult.Output | Out-String).Trim()
+    if ($fetchResult.ExitCode -ne 0) {
+      if (Test-TransientGitNetworkError -Message $fetchMessage) {
+        Write-Warning "GitHub is unreachable right now. Continuing with cached checkout; this run will be queued locally if push also fails."
+        if ($fetchMessage) {
+          Write-Host $fetchMessage
+        }
+        return "stale-cache"
+      }
+      throw "Could not update cached repository.`n$fetchMessage"
+    }
+
+    $ahead = Get-LocalAheadCount
+    if ($ahead -gt 0) {
+      Write-Warning "There are $ahead local commit(s) waiting to be pushed. Keeping them and adding this run on top."
+      return "updated-with-pending"
+    }
+
     Invoke-GitChecked @("checkout", "-B", $branchName, "origin/$branchName") -WorkingDirectory $repoDir
     Invoke-GitChecked @("reset", "--hard", "origin/$branchName") -WorkingDirectory $repoDir
     Invoke-GitChecked @("clean", "-fd", "--", "frontend_dashboard") -WorkingDirectory $repoDir
-    return
+    return "updated"
   }
 
   if (Test-Path -LiteralPath $repoDir) {
@@ -251,11 +315,28 @@ function Ensure-RepoCache {
 
   Write-Step "Cloning repository branch $branchName"
   Invoke-GitChecked @("clone", "--single-branch", "--branch", $branchName, $repoUrl, $repoDir) -Network -Attempts $MaxNetworkAttempts
+  return "cloned"
+}
+
+function Get-LocalAheadCount {
+  $result = Invoke-GitCaptured -Arguments @("rev-list", "--count", "origin/$branchName..$branchName") -WorkingDirectory $repoDir
+  if ($result.ExitCode -ne 0) {
+    return 0
+  }
+
+  $text = ($result.Output | Select-Object -First 1)
+  $count = 0
+  if ([int]::TryParse($text, [ref]$count)) {
+    return $count
+  }
+  return 0
 }
 
 function Set-LocalGitIdentity {
   Invoke-GitChecked @("config", "user.name", $env:GIT_PUSH_USERNAME) -WorkingDirectory $repoDir
   Invoke-GitChecked @("config", "user.email", "$($env:GIT_PUSH_USERNAME)@users.noreply.github.com") -WorkingDirectory $repoDir
+  Invoke-GitChecked @("config", "core.autocrlf", "false") -WorkingDirectory $repoDir
+  Invoke-GitChecked @("config", "core.safecrlf", "false") -WorkingDirectory $repoDir
 }
 
 function Copy-ProjectToCheckout {
@@ -322,7 +403,12 @@ function Push-FrontendCommit {
   }
 
   if (Test-TransientGitNetworkError -Message $message) {
-    throw "GitHub network is still unstable after $MaxNetworkAttempts attempts. Nothing was lost; run this script again when the connection is better.`n$message"
+    Write-Warning "GitHub network is still unstable after $MaxNetworkAttempts attempts."
+    Write-Warning "Your commit is saved locally in .push-cache and will be pushed automatically next time the network works."
+    if ($message) {
+      Write-Host $message
+    }
+    return "queued"
   }
 
   throw "Push failed.`n$message"
@@ -337,8 +423,15 @@ try {
   $env:GIT_PUSH_TOKEN = $credentials.Token
   $env:GIT_TERMINAL_PROMPT = "0"
 
+  $askPassRoot = Get-AskPassRoot
+  $askPass = New-GitAskPass -Directory $askPassRoot
+  $askPassScript = $askPass.Script
+  $askPassCommand = $askPass.Command
+  $env:GIT_ASKPASS = $askPassCommand
+  Test-GitAskPass -Command $askPassCommand
+
   if ($ValidateOnly) {
-    Write-Host "Validation OK. Credential file, username, token format, and git executable are available."
+    Write-Host "Validation OK. Credential file, username, token format, git executable, and askpass authentication helper are available."
     exit 0
   }
 
@@ -349,36 +442,50 @@ try {
     throw "Commit message cannot be empty."
   }
 
-  $askPassRoot = Join-Path $env:TEMP ("CodexGitAskPass\push-frontend-{0}" -f $PID)
-  $askPass = New-GitAskPass -Directory $askPassRoot
-  $askPassScript = $askPass.Script
-  $askPassCommand = $askPass.Command
-  $env:GIT_ASKPASS = $askPassCommand
-
   if (Test-Path -LiteralPath $legacyTempRoot) {
     Write-Step "Removing old legacy temporary checkout"
     Remove-Item -LiteralPath $legacyTempRoot -Recurse -Force
   }
 
-  $pushed = $false
-  for ($cycle = 1; $cycle -le 2 -and -not $pushed; $cycle++) {
-    Ensure-RepoCache
+  $completed = $false
+  $queued = $false
+  for ($cycle = 1; $cycle -le 2 -and -not $completed -and -not $queued; $cycle++) {
+    $cacheState = Ensure-RepoCache
     Set-LocalGitIdentity
     Copy-ProjectToCheckout
     $hasCommit = Commit-FrontendChanges
     if (-not $hasCommit) {
-      $pushed = $true
+      if ((Get-LocalAheadCount) -gt 0) {
+        $pushState = Push-FrontendCommit
+        if ($pushState -eq "queued") {
+          $queued = $true
+        } elseif ($pushState -eq $true) {
+          $completed = $true
+        }
+      } else {
+        $completed = $true
+      }
       break
     }
-    $pushed = Push-FrontendCommit
+    $pushState = Push-FrontendCommit
+    if ($pushState -eq "queued") {
+      $queued = $true
+    } elseif ($pushState -eq $true) {
+      $completed = $true
+    }
   }
 
-  if (-not $pushed) {
+  if (-not $completed -and -not $queued) {
     throw "Push could not be completed after resyncing the remote branch."
   }
 
   Write-Step "Done"
-  Write-Host "Frontend dashboard is synchronized with GitHub."
+  if ($queued) {
+    Write-Host "Saved locally. GitHub is unreachable, so the commit is queued in .push-cache."
+    Write-Host "Run this script again when the network is stable; it will push the queued commit automatically."
+  } else {
+    Write-Host "Frontend dashboard is synchronized with GitHub."
+  }
 } finally {
   Remove-Item Env:\GIT_PUSH_USERNAME -ErrorAction SilentlyContinue
   Remove-Item Env:\GIT_PUSH_TOKEN -ErrorAction SilentlyContinue
