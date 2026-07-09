@@ -30,6 +30,14 @@ let runtimeStatus: DeviceRuntimeStatus = {
 };
 
 let tick = 0;
+let lastSmartControlDemands = {
+  water: 0,
+  light: 0,
+  heat: 0,
+  cool: 0,
+  vent: 0,
+  co2: 0,
+};
 let nextKnowledgeBaseId = 4;
 let nextKnowledgeItemId = 9;
 let lastDiseaseResult: DiseaseDetectionResult | null = null;
@@ -163,6 +171,25 @@ export const mockAlarms = [
 
 export function executeMockCommand(command: DeviceCommand): CommandResult {
   const status = { ...runtimeStatus };
+  if (command.command === 'smart_control_update' && command.demands) {
+    lastSmartControlDemands = { ...command.demands };
+    status.pump = command.demands.water > 0 ? 1 : 0;
+    status.light = command.demands.light > 0 ? 1 : 0;
+    status.fan = command.demands.vent > 0 || command.demands.cool > 0 ? 1 : 0;
+  }
+  if (command.command === 'smart_control_stop') {
+    lastSmartControlDemands = {
+      water: 0,
+      light: 0,
+      heat: 0,
+      cool: 0,
+      vent: 0,
+      co2: 0,
+    };
+    status.pump = 0;
+    status.light = 0;
+    status.fan = 0;
+  }
   if (command.command.startsWith('fan_')) {
     status.fan = command.value;
   }

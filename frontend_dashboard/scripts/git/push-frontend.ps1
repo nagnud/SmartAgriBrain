@@ -15,16 +15,82 @@ $credentialPath = Join-Path $PSScriptRoot $credentialFileName
 $askPassRoot = $null
 $askPassScript = $null
 $askPassCommand = $null
+$networkGitAttempts = 3
+$networkGitRetryDelaySeconds = 5
 
-function Invoke-GitChecked {
+function Invoke-GitCaptured {
   param(
     [Parameter(Mandatory = $true)]
     [string[]] $Arguments
   )
 
-  & git @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = & git @Arguments 2>&1 | ForEach-Object { $_.ToString() }
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  [pscustomobject]@{
+    ExitCode = $exitCode
+    Output = @($output)
+  }
+}
+
+function Test-TransientGitNetworkError {
+  param(
+    [string] $Message
+  )
+
+  return $Message -match "Recv failure|Connection was reset|Connection reset|Failed to connect|Couldn't connect|timed out|Could not resolve host|curl 28|curl 35|curl 56|HTTP/2 stream|SSL_read|SSL_ERROR_SYSCALL"
+}
+
+function Invoke-GitChecked {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]] $Arguments,
+
+    [int] $Attempts = 1,
+
+    [switch] $NoThrow
+  )
+
+  $lastResult = $null
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    $lastResult = Invoke-GitCaptured -Arguments $Arguments
+    $message = ($lastResult.Output | Out-String).Trim()
+
+    if ($lastResult.ExitCode -eq 0) {
+      if ($message -and -not $NoThrow) {
+        Write-Host $message
+      }
+      if ($NoThrow) {
+        return $lastResult
+      }
+
+      return
+    }
+
+    if ($attempt -lt $Attempts -and (Test-TransientGitNetworkError -Message $message)) {
+      Write-Warning ("Git network error, retrying in {0}s ({1}/{2})..." -f $networkGitRetryDelaySeconds, $attempt, $Attempts)
+      if ($message) {
+        Write-Host $message
+      }
+      Start-Sleep -Seconds $networkGitRetryDelaySeconds
+      continue
+    }
+
+    if ($NoThrow) {
+      return $lastResult
+    }
+
+    if ($message) {
+      throw "git $($Arguments -join ' ') failed with exit code $($lastResult.ExitCode).`n$message"
+    }
+
+    throw "git $($Arguments -join ' ') failed with exit code $($lastResult.ExitCode)."
   }
 }
 
@@ -119,10 +185,10 @@ function Test-RemoteAccess {
   )
 
   Write-Host "Checking GitHub access for $Branch..."
-  $output = & git -c http.version=HTTP/1.1 ls-remote --heads $RepositoryUrl $Branch 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    $message = ($output | Out-String).Trim()
-    if ($message -match "Could not resolve host|Failed to connect|Couldn't connect|timed out|Connection refused") {
+  $result = Invoke-GitChecked @("-c", "http.version=HTTP/1.1", "ls-remote", "--heads", $RepositoryUrl, $Branch) -Attempts $networkGitAttempts -NoThrow
+  if ($result.ExitCode -ne 0) {
+    $message = ($result.Output | Out-String).Trim()
+    if ($message -match "Recv failure|Connection was reset|Connection reset|Could not resolve host|Failed to connect|Couldn't connect|timed out|Connection refused|curl 28|curl 35|curl 56") {
       throw "Cannot connect to GitHub. Check your network, proxy, VPN, or DNS, then try again.`n$message"
     }
 
@@ -133,7 +199,7 @@ function Test-RemoteAccess {
     throw "Could not access the remote repository.`n$message"
   }
 
-  if (-not $output) {
+  if (-not $result.Output) {
     throw "Remote branch not found: $Branch"
   }
 }
@@ -169,7 +235,7 @@ try {
   Test-RemoteAccess -RepositoryUrl $repoUrl -Branch $branchName
 
   Write-Host "Cloning repository branch $branchName..."
-  Invoke-GitChecked @("-c", "http.version=HTTP/1.1", "clone", "--branch", $branchName, $repoUrl, $repoDir)
+  Invoke-GitChecked @("-c", "http.version=HTTP/1.1", "clone", "--branch", $branchName, $repoUrl, $repoDir) -Attempts $networkGitAttempts
 
   Write-Host "Copying current pro project to frontend_dashboard..."
   New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
@@ -191,7 +257,7 @@ try {
     Write-Host "No changes to commit."
   } else {
     Invoke-GitChecked @("commit", "-m", $Message.Trim())
-    Invoke-GitChecked @("push", "origin", $branchName)
+    Invoke-GitChecked @("-c", "http.version=HTTP/1.1", "push", "origin", $branchName) -Attempts $networkGitAttempts
   }
 
   Write-Host "Done. Frontend dashboard has been pushed."

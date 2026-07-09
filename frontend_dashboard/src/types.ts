@@ -76,6 +76,21 @@ export interface DeviceCommand {
   command: string;
   value: number;
   reason: string;
+  action?: string;
+  fieldId?: string;
+  fieldName?: string;
+  source?: string;
+  demands?: SmartControlDemands;
+  waterDemand?: number;
+  lightDemand?: number;
+  heatDemand?: number;
+  coolDemand?: number;
+  ventDemand?: number;
+  co2Demand?: number;
+  tempDemand?: number;
+  airDemand?: number;
+  mistDemand?: number;
+  timestamp?: number;
 }
 
 export interface CommandResult {
@@ -179,4 +194,32 @@ export interface KnowledgeAnalyzeResult {
   answer: string;
   references: KnowledgeReference[];
   updatedAt: string;
+}
+
+export type SmartControlParamKey = 'water' | 'light' | 'heat' | 'cool' | 'vent' | 'co2';
+export type SmartControlParamMode = 'auto' | 'manual';
+
+export interface SmartControlDemands {
+  water: number;
+  light: number;
+  heat: number;
+  cool: number;
+  vent: number;
+  co2: number;
+}
+
+export interface SmartControlParamState {
+  key: SmartControlParamKey;
+  mode: SmartControlParamMode;
+  value: number;
+  lastManualValue: number;
+}
+
+export interface SmartControlDecision {
+  demands: SmartControlDemands;
+  summary: string;
+  status: string;
+  confidence: number;
+  riskLevel: 'normal' | 'watch' | 'urgent';
+  weatherSummary: string;
 }

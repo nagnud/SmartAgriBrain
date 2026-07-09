@@ -26,6 +26,7 @@ import {
   Save,
   Send,
   ShieldCheck,
+  SlidersHorizontal,
   Sprout,
   Sun,
   Thermometer,
@@ -69,13 +70,29 @@ import type {
   KnowledgeBaseInfo,
   KnowledgeItemInfo,
   MetricTargetRange,
+  SmartControlDecision,
+  SmartControlDemands,
+  SmartControlParamKey,
+  SmartControlParamState,
   StatusLevel,
   TelemetryPayload,
   WeatherPayload,
 } from './types';
 import { airQualityFromGasResistance, formatDateTime, formatTime, numberText } from './utils/format';
+import {
+  applySmartControlOverrides,
+  clampControlValue,
+  cloneSmartControlDemands,
+  computeSmartControlDecision,
+  defaultSmartControlParamStates,
+  smartControlParamColor,
+  smartControlParamKeys,
+  smartControlParamLabel,
+  smartControlValueFromDemands,
+  zeroSmartControlDemands,
+} from './services/smartControl';
 
-type ViewKey = 'overview' | 'realtime' | 'history' | 'disease' | 'ai' | 'chat' | 'control' | 'knowledge' | 'alarms';
+type ViewKey = 'overview' | 'realtime' | 'history' | 'disease' | 'ai' | 'control' | 'knowledge' | 'alarms';
 
 interface NavItem {
   key: ViewKey;
@@ -130,6 +147,15 @@ interface HistoryMetricDefinition {
   value: (point: HistoryPoint) => number;
 }
 
+interface SmartControlParamVm {
+  key: SmartControlParamKey;
+  label: string;
+  color: string;
+  mode: 'auto' | 'manual';
+  value: number;
+  autoValue: number;
+}
+
 const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'temperature', name: '温度', unit: '摄氏度', color: '#D68C1F', value: (point) => point.temperature },
   { key: 'humidity', name: '湿度', unit: '%RH', color: '#2C7DA0', value: (point) => point.humidity },
@@ -146,7 +172,6 @@ const navItems: NavItem[] = [
   { key: 'history', label: '历史曲线', icon: BarChart3 },
   { key: 'disease', label: '病害识别', icon: Image },
   { key: 'ai', label: 'AI 农事建议', icon: Bot },
-  { key: 'chat', label: '专家问答', icon: MessageSquare },
   { key: 'control', label: '设备控制', icon: ToggleLeft },
   { key: 'knowledge', label: '知识库管理', icon: Database },
   { key: 'alarms', label: '报警记录', icon: Bell },
@@ -167,6 +192,15 @@ const chatInput = ref('番茄叶片有黄斑，结合当前环境应该怎么处
 const chatImageUrl = ref('');
 const chatImageFileName = ref('');
 const chatSending = ref(false);
+const assistantOpen = ref(false);
+const assistantPendingAction = ref<string | null>(null);
+const smartControlPanelOpen = ref(false);
+const smartControlEnabled = ref(true);
+const smartControlAutoDemands = ref<SmartControlDemands>(cloneSmartControlDemands(zeroSmartControlDemands));
+const smartControlEffectiveDemands = ref<SmartControlDemands>(cloneSmartControlDemands(zeroSmartControlDemands));
+const smartControlDecision = ref<SmartControlDecision | null>(null);
+const smartControlLastPublishAt = ref<number | null>(null);
+const smartControlParamStates = ref<Record<SmartControlParamKey, SmartControlParamState>>(defaultSmartControlParamStates());
 const voiceMessage = ref('语音输入可用时会自动转成文字');
 const listening = ref(false);
 const knowledgeBases = ref<KnowledgeBaseInfo[]>([]);
@@ -263,6 +297,38 @@ const realtimeMetricCards = computed(() => metricCards.value);
 
 const selectedMetricDefinition = computed(() => historyMetricDefinitions.find((metric) => metric.key === selectedMetricKey.value) ?? null);
 
+const contentLayoutClass = computed(() => ({
+  'content-layout--assistant-open': assistantOpen.value,
+  'content-layout--metric-open': activeView.value === 'realtime' && Boolean(selectedMetricCard.value && selectedMetricDefinition.value),
+}));
+
+const smartControlParams = computed<SmartControlParamVm[]>(() => smartControlParamKeys.map((key) => {
+  const state = smartControlParamStates.value[key];
+  return {
+    key,
+    label: smartControlParamLabel(key),
+    color: smartControlParamColor(key),
+    mode: state.mode,
+    value: smartControlValueFromDemands(key, smartControlEffectiveDemands.value),
+    autoValue: smartControlValueFromDemands(key, smartControlAutoDemands.value),
+  };
+}));
+
+const smartControlAutoCount = computed(() => smartControlParams.value.filter((item) => item.mode === 'auto').length);
+const smartControlManualCount = computed(() => smartControlParams.value.length - smartControlAutoCount.value);
+const smartControlStatusState = computed<StatusLevel>(() => {
+  if (!smartControlEnabled.value) {
+    return 'neutral';
+  }
+  if (smartControlDecision.value?.riskLevel === 'urgent') {
+    return 'danger';
+  }
+  if (smartControlDecision.value?.riskLevel === 'watch') {
+    return 'watch';
+  }
+  return 'good';
+});
+
 const selectedMetricChartOption = computed<EChartsOption>(() => {
   const metric = selectedMetricDefinition.value;
   if (!metric) {
@@ -305,14 +371,13 @@ const historyChartOption = computed<EChartsOption>(() => {
   const leftAxisCount = selectedDefinitions.filter((_, index) => index % 2 === 0).length;
   const rightAxisCount = selectedDefinitions.length - leftAxisCount;
   const axisSpacing = selectedCount > 5 ? 52 : 58;
-  const showAxisName = selectedCount <= 3;
   return {
     tooltip: { trigger: 'axis' },
     legend: { show: false },
     grid: {
-      left: Math.max(62, 62 + Math.max(0, leftAxisCount - 1) * axisSpacing),
-      right: Math.max(62, 62 + Math.max(0, rightAxisCount - 1) * axisSpacing),
-      top: showAxisName ? 44 : 22,
+      left: Math.max(86, 86 + Math.max(0, leftAxisCount - 1) * axisSpacing),
+      right: Math.max(86, 86 + Math.max(0, rightAxisCount - 1) * axisSpacing),
+      top: 56,
       bottom: 34,
     },
     xAxis: { type: 'category', boundaryGap: false, data: labels },
@@ -321,7 +386,7 @@ const historyChartOption = computed<EChartsOption>(() => {
       const range = historyAxisRange(values);
       return {
         type: 'value',
-        name: showAxisName ? `${definition.name}(${definition.unit})` : '',
+        name: `${definition.name}(${definition.unit})`,
         min: range.min,
         max: range.max,
         position: index % 2 === 0 ? 'left' : 'right',
@@ -556,6 +621,7 @@ function saveMetricTargetRange(): void {
     [selectedMetricKey.value]: { min, max },
   };
   targetRangeError.value = '';
+  syncSmartControlValues();
 }
 
 watch(activeView, (view) => {
@@ -606,6 +672,7 @@ async function loadDashboard(isBackground = false): Promise<void> {
     aiAnalysis.value = nextAi;
     alarms.value = nextAlarms;
     currentWeather.value = nextWeather;
+    syncSmartControlValues();
   } finally {
     loading.value = false;
     refreshing.value = false;
@@ -631,6 +698,149 @@ async function applyCommand(command: string, value: number, reason: string): Pro
   };
 }
 
+function syncSmartControlValues(): void {
+  if (!latest.value) {
+    return;
+  }
+  const decision = computeSmartControlDecision(
+    latest.value,
+    historyPoints.value,
+    metricTargetRanges.value,
+    currentWeather.value,
+    smartControlAutoDemands.value,
+  );
+  smartControlDecision.value = decision;
+  smartControlAutoDemands.value = cloneSmartControlDemands(decision.demands);
+  smartControlEffectiveDemands.value = smartControlEnabled.value
+    ? applySmartControlOverrides(decision.demands, smartControlParamStates.value)
+    : cloneSmartControlDemands(zeroSmartControlDemands);
+}
+
+function buildSmartControlCommand(action: 'smart_control_update' | 'smart_control_stop', demands: SmartControlDemands, reason: string): DeviceCommand {
+  if (!latest.value) {
+    throw new Error('No telemetry available');
+  }
+  const safeDemands = cloneSmartControlDemands(demands);
+  const tempDemand = safeDemands.heat > 0 ? safeDemands.heat : -safeDemands.cool;
+  const timestamp = Date.now();
+  return {
+    device_id: latest.value.device_id,
+    command: action,
+    value: action === 'smart_control_stop' ? 0 : 1,
+    reason,
+    action,
+    fieldId: latest.value.device_id,
+    fieldName: '智慧大棚',
+    source: 'web_smart_control',
+    demands: safeDemands,
+    waterDemand: safeDemands.water,
+    lightDemand: safeDemands.light,
+    heatDemand: safeDemands.heat,
+    coolDemand: safeDemands.cool,
+    ventDemand: safeDemands.vent,
+    co2Demand: safeDemands.co2,
+    tempDemand,
+    airDemand: safeDemands.vent,
+    mistDemand: safeDemands.co2,
+    timestamp,
+  };
+}
+
+async function publishSmartControl(reason: string, action: 'smart_control_update' | 'smart_control_stop' = 'smart_control_update'): Promise<void> {
+  if (!latest.value) {
+    return;
+  }
+  const demands = action === 'smart_control_stop'
+    ? cloneSmartControlDemands(zeroSmartControlDemands)
+    : smartControlEffectiveDemands.value;
+  const result = await sendDeviceCommand(buildSmartControlCommand(action, demands, reason));
+  commandResults.value = [result, ...commandResults.value].slice(0, 10);
+  smartControlLastPublishAt.value = result.executed_at;
+  latest.value = {
+    ...latest.value,
+    timestamp: result.executed_at,
+    status: result.status,
+  };
+}
+
+async function setSmartControlEnabled(enabled: boolean): Promise<void> {
+  smartControlEnabled.value = enabled;
+  syncSmartControlValues();
+  await publishSmartControl(enabled ? '开启智能托管' : '关闭智能托管', enabled ? 'smart_control_update' : 'smart_control_stop');
+}
+
+async function setSmartParamManual(key: SmartControlParamKey): Promise<void> {
+  const current = smartControlParamStates.value[key];
+  const initialValue = current.lastManualValue > 0 ? current.lastManualValue : smartControlValueFromDemands(key, smartControlEffectiveDemands.value);
+  smartControlEnabled.value = true;
+  smartControlParamStates.value = {
+    ...smartControlParamStates.value,
+    [key]: {
+      key,
+      mode: 'manual',
+      value: clampControlValue(initialValue),
+      lastManualValue: clampControlValue(initialValue),
+    },
+  };
+  syncSmartControlValues();
+  await publishSmartControl(`${smartControlParamLabel(key)}切换手动`);
+}
+
+async function updateSmartParamManualValue(key: SmartControlParamKey, value: number): Promise<void> {
+  const current = smartControlParamStates.value[key];
+  if (current.mode !== 'manual') {
+    return;
+  }
+  const safeValue = clampControlValue(value);
+  smartControlParamStates.value = {
+    ...smartControlParamStates.value,
+    [key]: {
+      ...current,
+      value: safeValue,
+      lastManualValue: safeValue,
+    },
+  };
+  syncSmartControlValues();
+  await publishSmartControl(`${smartControlParamLabel(key)}手动值调整`);
+}
+
+function handleSmartParamSliderChange(key: SmartControlParamKey, event: Event): void {
+  const input = event.target as HTMLInputElement;
+  void updateSmartParamManualValue(key, Number(input.value));
+}
+
+async function restoreSmartParamAuto(key: SmartControlParamKey): Promise<void> {
+  const current = smartControlParamStates.value[key];
+  const autoValue = smartControlValueFromDemands(key, smartControlAutoDemands.value);
+  smartControlEnabled.value = true;
+  smartControlParamStates.value = {
+    ...smartControlParamStates.value,
+    [key]: {
+      ...current,
+      mode: 'auto',
+      value: autoValue,
+    },
+  };
+  syncSmartControlValues();
+  await publishSmartControl(`${smartControlParamLabel(key)}恢复自动`);
+}
+
+async function setAllSmartParamsAuto(): Promise<void> {
+  const nextStates = defaultSmartControlParamStates();
+  smartControlParamKeys.forEach((key) => {
+    const current = smartControlParamStates.value[key];
+    nextStates[key] = {
+      ...current,
+      mode: 'auto',
+      value: smartControlValueFromDemands(key, smartControlAutoDemands.value),
+    };
+  });
+  smartControlEnabled.value = true;
+  smartControlParamStates.value = nextStates;
+  syncSmartControlValues();
+  await publishSmartControl('一键自动托管');
+}
+
 async function toggleDevice(
   isActive: boolean,
   onCommand: string,
@@ -639,6 +849,20 @@ async function toggleDevice(
   offReason: string,
 ): Promise<void> {
   await applyCommand(isActive ? offCommand : onCommand, isActive ? 0 : 1, isActive ? offReason : onReason);
+}
+
+function commandResultText(result: CommandResult): string {
+  const command = result.command;
+  if (!command.command.startsWith('smart_control_')) {
+    return command.reason;
+  }
+  return JSON.stringify({
+    waterDemand: command.waterDemand,
+    lightDemand: command.lightDemand,
+    tempDemand: command.tempDemand,
+    airDemand: command.airDemand,
+    mistDemand: command.mistDemand,
+  });
 }
 
 async function handleDiseaseUpload(event: Event): Promise<void> {
@@ -895,8 +1119,13 @@ onBeforeUnmount(() => {
         </button>
       </nav>
 
+      <button class="assistant-launcher" type="button" :class="{ 'assistant-launcher--open': assistantOpen }" @click="assistantOpen = !assistantOpen">
+        <Bot :size="24" />
+        <span>AI 助手</span>
+      </button>
     </aside>
 
+    <div class="content-layout" :class="contentLayoutClass">
     <main class="workspace">
       <header class="topbar">
         <div>
@@ -1188,49 +1417,72 @@ onBeforeUnmount(() => {
           </section>
         </section>
 
-        <section v-show="activeView === 'chat'" class="view-stack">
-          <section class="panel chat-panel">
+        <section v-show="activeView === 'control'" class="view-stack">
+          <section class="panel smart-control-panel">
             <div class="section-heading">
-              <h2>AI 专家问答</h2>
-              <StatusPill :label="voiceMessage" :state="listening ? 'watch' : 'neutral'" />
+              <div>
+                <h2>智能托管</h2>
+                <span>自动计算控制需求值，手动模式会固定用户设置</span>
+              </div>
+              <div class="smart-control-actions">
+                <StatusPill :label="smartControlDecision?.status ?? '等待数据'" :state="smartControlStatusState" />
+                <button class="text-button" type="button" @click="smartControlPanelOpen = !smartControlPanelOpen">
+                  <SlidersHorizontal :size="18" />
+                  {{ smartControlPanelOpen ? '收起参数' : '打开参数' }}
+                </button>
+              </div>
             </div>
-            <div class="chat-list">
-              <article v-for="message in chatMessages" :key="message.id" :class="`chat-bubble chat-bubble--${message.role}`">
-                <img v-if="message.image_url" :src="message.image_url" alt="问答附图" />
-                <p>{{ message.content }}</p>
-                <div v-if="message.references?.length" class="reference-list">
-                  <strong>引用知识</strong>
-                  <span v-for="refItem in message.references" :key="`${message.id}-${refItem.itemId}-${refItem.chunkId}`">
-                    {{ refItem.title }}：{{ refItem.content }}
-                  </span>
+            <div class="smart-control-summary">
+              <p>{{ smartControlDecision?.summary ?? '正在等待实时环境数据生成托管建议。' }}</p>
+              <span>{{ smartControlDecision?.weatherSummary ?? '天气暂不可用，本地自治' }}</span>
+              <span>上次下发：{{ smartControlLastPublishAt ? formatDateTime(smartControlLastPublishAt) : '尚未下发' }}</span>
+            </div>
+            <div class="smart-demand-grid">
+              <article v-for="param in smartControlParams" :key="param.key" class="smart-demand-chip" :class="{ 'smart-demand-chip--manual': param.mode === 'manual' }">
+                <div>
+                  <strong>{{ param.label }}</strong>
+                  <span>{{ param.mode === 'manual' ? '手动' : '自动' }}</span>
+                </div>
+                <b :style="{ color: param.mode === 'manual' ? '#C26A1B' : param.color }">{{ param.value }}%</b>
+              </article>
+            </div>
+            <div class="smart-control-toggle-row">
+              <button type="button" class="toggle-switch" :class="{ 'toggle-switch--on': smartControlEnabled }" @click="setSmartControlEnabled(!smartControlEnabled)">
+                <span>停止</span><span>托管</span><i></i>
+              </button>
+              <button class="primary-button" type="button" @click="setAllSmartParamsAuto">
+                <RefreshCw :size="18" />
+                一键自动
+              </button>
+            </div>
+            <div v-if="smartControlPanelOpen" class="smart-param-panel">
+              <article v-for="param in smartControlParams" :key="`${param.key}-panel`" class="smart-param-row" :class="{ 'smart-param-row--manual': param.mode === 'manual' }">
+                <div class="smart-param-row__head">
+                  <div>
+                    <strong>{{ param.label }}</strong>
+                    <span>当前 {{ param.value }}% · 自动 {{ param.autoValue }}%</span>
+                  </div>
+                  <StatusPill :label="param.mode === 'manual' ? '手动' : '自动'" :state="param.mode === 'manual' ? 'watch' : 'good'" />
+                </div>
+                <div class="smart-param-row__control">
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    :value="param.value"
+                    :disabled="param.mode !== 'manual'"
+                    :style="{ accentColor: param.color }"
+                    @change="handleSmartParamSliderChange(param.key, $event)"
+                  />
+                  <button class="text-button" type="button" @click="param.mode === 'manual' ? restoreSmartParamAuto(param.key) : setSmartParamManual(param.key)">
+                    {{ param.mode === 'manual' ? '恢复自动' : '手动' }}
+                  </button>
                 </div>
               </article>
             </div>
-            <div v-if="chatImageUrl" class="chat-attachment">
-              <img :src="chatImageUrl" alt="待发送图片" />
-              <span>{{ chatImageFileName }}</span>
-              <button class="icon-button" type="button" title="移除图片" @click="clearChatImage">
-                <X :size="16" />
-              </button>
-            </div>
-            <div class="chat-composer">
-              <label class="icon-button" title="上传图片">
-                <Image :size="18" />
-                <input type="file" accept="image/*" @change="handleChatImageUpload" />
-              </label>
-              <button class="icon-button" type="button" title="语音输入" @click="startVoiceInput">
-                <Mic :class="{ pulsing: listening }" :size="18" />
-              </button>
-              <textarea v-model="chatInput" placeholder="输入问题，例如：这片叶子是不是得病了？应该怎么控制设备？"></textarea>
-              <button class="primary-button" type="button" :disabled="chatSending" @click="sendChat">
-                <Send :size="18" />
-                {{ chatSending ? '发送中' : '发送' }}
-              </button>
-            </div>
           </section>
-        </section>
 
-        <section v-show="activeView === 'control'" class="view-stack">
           <section class="panel">
             <div class="section-heading">
               <h2>远程设备控制</h2>
@@ -1287,7 +1539,7 @@ onBeforeUnmount(() => {
             <div class="command-list">
               <article v-for="result in commandResults" :key="result.executed_at">
                 <code>{{ result.command.command }}</code>
-                <span>{{ result.command.reason }}</span>
+                <span>{{ commandResultText(result) }}</span>
                 <time>{{ formatDateTime(result.executed_at) }}</time>
               </article>
               <p v-if="commandResults.length === 0" class="empty-text">暂无控制记录，点击上方按钮后会显示执行结果。</p>
@@ -1400,6 +1652,7 @@ onBeforeUnmount(() => {
           </section>
         </section>
       </template>
+    </main>
 
       <aside v-if="activeView === 'realtime' && selectedMetricCard && selectedMetricDefinition" class="metric-drawer">
         <div class="metric-drawer__header">
@@ -1446,6 +1699,60 @@ onBeforeUnmount(() => {
           :active="Boolean(selectedMetricKey)"
         />
       </aside>
-    </main>
+
+      <aside v-if="assistantOpen" class="assistant-panel">
+        <div class="assistant-panel__header">
+          <div>
+            <span>全局对话</span>
+            <h2>AI 助手</h2>
+          </div>
+          <button class="icon-button" type="button" title="关闭 AI 助手" @click="assistantOpen = false">
+            <X :size="18" />
+          </button>
+        </div>
+        <StatusPill :label="voiceMessage" :state="listening ? 'watch' : 'neutral'" />
+        <div class="chat-list assistant-panel__messages">
+          <article v-for="message in chatMessages" :key="message.id" :class="`chat-bubble chat-bubble--${message.role}`">
+            <img v-if="message.image_url" :src="message.image_url" alt="问答附图" />
+            <p>{{ message.content }}</p>
+            <div v-if="message.references?.length" class="reference-list">
+              <strong>引用知识</strong>
+              <span v-for="refItem in message.references" :key="`${message.id}-${refItem.itemId}-${refItem.chunkId}`">
+                {{ refItem.title }}：{{ refItem.content }}
+              </span>
+            </div>
+          </article>
+        </div>
+        <div v-if="assistantPendingAction" class="assistant-confirm">
+          <strong>待确认操作</strong>
+          <span>{{ assistantPendingAction }}</span>
+          <div>
+            <button class="primary-button" type="button" @click="assistantPendingAction = null">确认执行</button>
+            <button class="text-button" type="button" @click="assistantPendingAction = null">取消</button>
+          </div>
+        </div>
+        <div v-if="chatImageUrl" class="chat-attachment">
+          <img :src="chatImageUrl" alt="待发送图片" />
+          <span>{{ chatImageFileName }}</span>
+          <button class="icon-button" type="button" title="移除图片" @click="clearChatImage">
+            <X :size="16" />
+          </button>
+        </div>
+        <div class="chat-composer assistant-composer">
+          <label class="icon-button" title="上传图片">
+            <Image :size="18" />
+            <input type="file" accept="image/*" @change="handleChatImageUpload" />
+          </label>
+          <button class="icon-button" type="button" title="语音输入" @click="startVoiceInput">
+            <Mic :class="{ pulsing: listening }" :size="18" />
+          </button>
+          <textarea v-model="chatInput" placeholder="输入问题或操作需求，执行控制前我会先请你确认。"></textarea>
+          <button class="primary-button" type="button" :disabled="chatSending" @click="sendChat">
+            <Send :size="18" />
+            {{ chatSending ? '发送中' : '发送' }}
+          </button>
+        </div>
+      </aside>
+    </div>
   </div>
 </template>

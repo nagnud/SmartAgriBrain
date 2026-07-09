@@ -120,6 +120,30 @@ button:disabled {
   font-weight: 700;
 }
 
+.assistant-launcher {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 58px;
+  margin-top: auto;
+  color: #ffffff;
+  border: 1px solid #277a43;
+  border-radius: 8px;
+  background: #2f8f4e;
+  font-size: 16px;
+  font-weight: 800;
+  box-shadow: 0 8px 20px rgba(47, 143, 78, 0.22);
+}
+
+.assistant-launcher--open {
+  color: #1e2a22;
+  border-color: #b7c6b8;
+  background: #eef3ea;
+  box-shadow: none;
+}
+
 .metric-card,
 .loading-panel,
 .hero-panel,
@@ -140,6 +164,41 @@ button:disabled {
 .workspace {
   min-width: 0;
   padding: 24px 28px 36px;
+}
+
+.content-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "main";
+  min-width: 0;
+}
+
+.content-layout--metric-open {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
+  grid-template-areas: "main metric";
+}
+
+.content-layout--assistant-open {
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 460px);
+  grid-template-areas: "main assistant";
+}
+
+.content-layout--assistant-open.content-layout--metric-open {
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 460px);
+  grid-template-areas:
+    "main assistant"
+    "metric assistant";
+  grid-template-rows: auto auto;
+}
+
+.content-layout--assistant-open.content-layout--metric-open .metric-drawer {
+  height: auto;
+  min-height: 0;
+  border-top: 1px solid #d9e2d7;
+}
+
+.workspace {
+  grid-area: main;
 }
 
 .topbar {
@@ -966,6 +1025,74 @@ button:disabled {
   background: #f8faf6;
 }
 
+.assistant-panel {
+  grid-area: assistant;
+  display: grid;
+  min-width: 0;
+  height: 100vh;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  gap: 12px;
+  padding: 24px 18px;
+  overflow: hidden;
+  border-left: 1px solid #d9e2d7;
+  background: #ffffff;
+  box-shadow: -10px 0 28px rgba(30, 42, 34, 0.12);
+}
+
+.assistant-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.assistant-panel__header span {
+  color: #2c7da0;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.assistant-panel__header h2 {
+  margin: 4px 0 0;
+  font-size: 23px;
+}
+
+.assistant-panel__messages {
+  max-height: none;
+  min-height: 0;
+}
+
+.assistant-panel .chat-bubble {
+  width: min(100%, 360px);
+}
+
+.assistant-composer {
+  grid-template-columns: 40px 40px minmax(0, 1fr);
+}
+
+.assistant-composer .primary-button {
+  grid-column: 1 / -1;
+}
+
+.assistant-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #e1a04b;
+  border-radius: 8px;
+  background: #fff8ea;
+}
+
+.assistant-confirm span {
+  color: #4f5d55;
+  line-height: 1.45;
+}
+
+.assistant-confirm div {
+  display: flex;
+  gap: 8px;
+}
+
 .reference-list {
   display: grid;
   gap: 6px;
@@ -990,6 +1117,127 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
+}
+
+.smart-control-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.smart-control-actions,
+.smart-control-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.smart-control-summary {
+  display: grid;
+  gap: 6px;
+  color: #4f5d55;
+}
+
+.smart-control-summary p {
+  margin: 0;
+  color: #1e2a22;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.smart-control-summary span {
+  font-size: 13px;
+}
+
+.smart-demand-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.smart-demand-chip {
+  display: grid;
+  gap: 8px;
+  min-height: 78px;
+  padding: 12px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.smart-demand-chip--manual {
+  border-color: #e1a04b;
+  background: #fff8ea;
+}
+
+.smart-demand-chip div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.smart-demand-chip span {
+  padding: 2px 7px;
+  color: #2f8f4e;
+  border-radius: 8px;
+  background: #e5f3e8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.smart-demand-chip--manual span {
+  color: #c26a1b;
+  background: #fff0d8;
+}
+
+.smart-demand-chip b {
+  font-size: 25px;
+  line-height: 1;
+}
+
+.smart-param-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.smart-param-row {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.smart-param-row--manual {
+  border-color: #e1a04b;
+  background: #fff8ea;
+}
+
+.smart-param-row__head,
+.smart-param-row__control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.smart-param-row__head strong,
+.smart-param-row__head span {
+  display: block;
+}
+
+.smart-param-row__head span {
+  margin-top: 4px;
+  color: #5f6b63;
+  font-size: 13px;
+}
+
+.smart-param-row__control input {
+  width: 100%;
 }
 
 .control-card {
@@ -1164,12 +1412,8 @@ button:disabled {
 }
 
 .metric-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  z-index: 30;
+  grid-area: metric;
   display: grid;
-  width: min(520px, 100vw);
   height: 100vh;
   gap: 16px;
   align-content: start;
@@ -1177,7 +1421,7 @@ button:disabled {
   overflow: auto;
   border-left: 1px solid #d9e2d7;
   background: #ffffff;
-  box-shadow: -16px 0 38px rgba(30, 42, 34, 0.18);
+  box-shadow: -8px 0 22px rgba(30, 42, 34, 0.12);
 }
 
 .metric-drawer__header {
@@ -1292,9 +1536,31 @@ button:disabled {
 }
 
 @media (max-width: 1380px) {
+  .app-shell {
+    grid-template-columns: 230px minmax(0, 1fr);
+  }
+
+  .content-layout--metric-open,
+  .content-layout--assistant-open,
+  .content-layout--assistant-open.content-layout--metric-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "main"
+      "metric"
+      "assistant";
+  }
+
+  .metric-drawer,
+  .assistant-panel {
+    height: auto;
+    max-height: none;
+    border-top: 1px solid #d9e2d7;
+  }
+
   .metric-grid,
   .realtime-grid,
   .control-grid,
+  .smart-demand-grid,
   .suggestion-grid,
   .result-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1313,9 +1579,24 @@ button:disabled {
 }
 
 @media (max-width: 860px) {
+  body {
+    min-width: 0;
+  }
+
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
+  }
+
   .metric-grid,
   .realtime-grid,
   .control-grid,
+  .smart-demand-grid,
+  .smart-param-panel,
   .suggestion-grid,
   .result-grid {
     grid-template-columns: 1fr;
