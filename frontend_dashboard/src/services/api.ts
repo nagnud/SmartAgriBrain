@@ -31,6 +31,7 @@ import type {
   KnowledgeItemInfo,
   KnowledgeTextAddResult,
   TelemetryPayload,
+  VoiceTranscriptionResponse,
   WeatherPayload,
 } from '../types';
 
@@ -148,6 +149,40 @@ export async function sendExpertChatMessage(payload: ExpertChatRequest): Promise
     },
     actions,
   };
+}
+
+export async function transcribeVoiceChunk(payload: {
+  audio: Blob;
+  sessionId: string;
+  sequence: number;
+  isFinal: boolean;
+  mimeType: string;
+  language?: string;
+}): Promise<VoiceTranscriptionResponse> {
+  if (useMockAssistant) {
+    return {
+      ok: false,
+      text: '',
+      partial: !payload.isFinal,
+      final: payload.isFinal,
+      message: '语音识别需要关闭助手 Mock，并连接后端服务。',
+    };
+  }
+  const formData = new FormData();
+  formData.append('audio', payload.audio, `voice-${payload.sequence}.webm`);
+  formData.append('session_id', payload.sessionId);
+  formData.append('sequence', String(payload.sequence));
+  formData.append('is_final', String(payload.isFinal));
+  formData.append('language', payload.language ?? 'zh-CN');
+  formData.append('mime_type', payload.mimeType);
+  const response = await fetch(`${apiBaseUrl}/api/v1/assistant/voice/transcribe`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<VoiceTranscriptionResponse>;
 }
 
 export async function getKnowledgeBases(): Promise<KnowledgeBaseInfo[]> {

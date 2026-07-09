@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 .env
+backend_api/.env
+backend_api/.venv/
 
 # Node / Vue
 node_modules/
@@ -25,6 +27,7 @@ Thumbs.db
 
 # Logs
 *.log
+backend_api/*.log
 
 # Binary large files
 *.zip

@@ -176,6 +176,7 @@ export interface ChatMessage {
   content: string;
   image_url?: string;
   created_at: number;
+  typing?: boolean;
   references?: KnowledgeReference[];
   suggested_commands?: AiCommand[];
   suggested_actions?: AssistantAction[];
@@ -197,6 +198,14 @@ export interface ExpertChatResponse {
   message: ChatMessage;
   references?: KnowledgeReference[];
   actions?: AssistantAction[];
+}
+
+export interface VoiceTranscriptionResponse {
+  ok: boolean;
+  text: string;
+  partial: boolean;
+  final: boolean;
+  message: string;
 }
 
 export interface KnowledgeBaseInfo {

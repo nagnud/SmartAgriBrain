@@ -430,8 +430,8 @@ function Copy-ProjectToCheckout {
   New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 
   robocopy $projectRoot $targetDir /MIR `
-    /XD node_modules dist .push-cache .push-tmp .git SmartAgriBrain `
-    /XF $credentialFileName dev-server.log dev-server.err.log dev-server.codex.log dev-server.codex.err.log tsconfig.tsbuildinfo `
+    /XD node_modules dist .push-cache .push-tmp .git SmartAgriBrain .venv __pycache__ `
+    /XF .env $credentialFileName dev-server.log dev-server.err.log dev-server.codex.log dev-server.codex.err.log tsconfig.tsbuildinfo `
     /NFL /NDL /NJH /NJS /NC /NS
 
   if ($LASTEXITCODE -gt 7) {

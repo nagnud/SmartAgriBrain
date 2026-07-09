@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { Component } from 'vue';
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { EChartsOption } from 'echarts';
 import {
   Activity,
   AlertTriangle,
+  ArrowDown,
   BarChart3,
   Bell,
   Bot,
@@ -55,6 +56,7 @@ import {
   getLatestTelemetry,
   sendDeviceCommand,
   sendExpertChatMessage,
+  transcribeVoiceChunk,
   updateKnowledgeBase,
   updateKnowledgeItem,
 } from './services/api';
@@ -62,7 +64,6 @@ import type {
   AiAnalysisResponse,
   AlarmRecord,
   AssistantAction,
-  AssistantActionRisk,
   ChatMessage,
   CommandResult,
   DeviceCommand,
@@ -120,7 +121,9 @@ interface MetricCardVm {
 
 interface SpeechRecognitionEventLike {
   results: {
+    length: number;
     [index: number]: {
+      isFinal: boolean;
       [index: number]: {
         transcript: string;
       };
@@ -130,15 +133,19 @@ interface SpeechRecognitionEventLike {
 
 interface SpeechRecognitionLike {
   lang: string;
+  continuous: boolean;
   interimResults: boolean;
   maxAlternatives: number;
   start: () => void;
+  stop: () => void;
+  abort: () => void;
   onresult: ((event: SpeechRecognitionEventLike) => void) | null;
   onerror: (() => void) | null;
   onend: (() => void) | null;
 }
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
 type HistoryMetricKey = 'temperature' | 'humidity' | 'light' | 'co2' | 'soil_moisture' | 'soil_ec' | 'gas_resistance';
 
 interface HistoryMetricDefinition {
@@ -206,10 +213,14 @@ const diseaseImageUrl = ref('');
 const diseaseLoading = ref(false);
 const chatMessages = ref<ChatMessage[]>([]);
 const chatInput = ref('番茄叶片有黄斑，结合当前环境应该怎么处理？');
+const chatInputRef = ref<HTMLTextAreaElement | null>(null);
 const chatImageUrl = ref('');
 const chatImageFileName = ref('');
 const chatSending = ref(false);
 const assistantOpen = ref(false);
+const assistantMessagesRef = ref<HTMLElement | null>(null);
+const assistantAtBottom = ref(true);
+const assistantShowScrollButton = ref(false);
 const assistantConfirmActionId = ref<string | null>(null);
 const assistantExecutingActionId = ref<string | null>(null);
 const smartControlPanelOpen = ref(false);
@@ -264,7 +275,19 @@ const refreshing = ref(false);
 let refreshTimer: number | undefined;
 let metricEditorTimer: number | undefined;
 let metricEditorChartTimer: number | undefined;
-let activeSpeechRecognition: SpeechRecognitionLike | null = null;
+let activeVoiceRecorder: MediaRecorder | null = null;
+let activeVoiceStream: MediaStream | null = null;
+let activeBrowserSpeechRecognition: SpeechRecognitionLike | null = null;
+let assistantThinkingTimer: number | undefined;
+let assistantTypeRunId = 0;
+let voiceInputPrefix = '';
+let voiceInputSuffix = '';
+let voiceCurrentTranscript = '';
+let voiceSessionId = '';
+let voiceSequence = 0;
+let voiceMimeType = 'audio/webm';
+let voiceStopping = false;
+let voiceUploadQueue: Promise<void> = Promise.resolve();
 let metricEditorLastSourceRect: MetricEditorRect | null = null;
 const metricEditorSourceRects = new Map<HistoryMetricKey, MetricEditorRect>();
 
@@ -842,6 +865,19 @@ watch(activeView, (view) => {
   }
 });
 
+watch(assistantOpen, (open) => {
+  if (open) {
+    void scrollAssistantToBottom();
+    void nextTick(resizeChatInput);
+  } else {
+    assistantShowScrollButton.value = false;
+  }
+});
+
+watch(chatInput, () => {
+  void nextTick(resizeChatInput);
+});
+
 function riskLabel(level: AiAnalysisResponse['risk_level']): string {
   if (level === 'high') {
     return '高风险';
@@ -1170,26 +1206,6 @@ function actionPayloadNumber(action: AssistantAction, key: string, fallback = 0)
   return fallback;
 }
 
-function assistantActionRiskLabel(risk: AssistantActionRisk): string {
-  if (risk === 'high') {
-    return '高风险';
-  }
-  if (risk === 'medium') {
-    return '需确认';
-  }
-  return '普通';
-}
-
-function assistantActionRiskState(risk: AssistantActionRisk): StatusLevel {
-  if (risk === 'high') {
-    return 'danger';
-  }
-  if (risk === 'medium') {
-    return 'watch';
-  }
-  return 'neutral';
-}
-
 function assistantActionStatusText(action: AssistantAction): string {
   if (action.status === 'executed') {
     return '已执行';
@@ -1208,10 +1224,10 @@ function assistantActionStatusText(action: AssistantAction): string {
 
 function assistantActionConfirmText(action: AssistantAction): string {
   if (assistantExecutingActionId.value === action.id) {
-    return '执行中';
+    return '处理中';
   }
   if (action.risk === 'high' && assistantConfirmActionId.value !== action.id) {
-    return '确认风险';
+    return '确认操作';
   }
   if (action.risk === 'high') {
     return '再次确认';
@@ -1416,6 +1432,142 @@ function clearChatImage(): void {
   chatImageFileName.value = '';
 }
 
+function isAssistantMessagesAtBottom(element: HTMLElement): boolean {
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
+}
+
+function updateAssistantScrollState(): void {
+  const element = assistantMessagesRef.value;
+  if (!element) {
+    assistantAtBottom.value = true;
+    assistantShowScrollButton.value = false;
+    return;
+  }
+  const atBottom = isAssistantMessagesAtBottom(element);
+  assistantAtBottom.value = atBottom;
+  assistantShowScrollButton.value = !atBottom;
+}
+
+async function scrollAssistantToBottom(smooth = false): Promise<void> {
+  await nextTick();
+  const element = assistantMessagesRef.value;
+  if (!element) {
+    return;
+  }
+  element.scrollTo({
+    top: element.scrollHeight,
+    behavior: smooth ? 'smooth' : 'auto',
+  });
+  window.requestAnimationFrame(updateAssistantScrollState);
+}
+
+function handleAssistantMessagesScroll(): void {
+  updateAssistantScrollState();
+}
+
+function resizeChatInput(): void {
+  const input = chatInputRef.value;
+  if (!input) {
+    return;
+  }
+  input.style.height = 'auto';
+  const nextHeight = Math.min(input.scrollHeight, 154);
+  input.style.height = `${nextHeight}px`;
+  input.style.overflowY = input.scrollHeight > 154 ? 'auto' : 'hidden';
+}
+
+function waitForAssistantTyping(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function updateChatMessage(messageId: string, patch: Partial<ChatMessage>): void {
+  chatMessages.value = chatMessages.value.map((message) => (
+    message.id === messageId ? { ...message, ...patch } : message
+  ));
+}
+
+function replaceChatMessage(messageId: string, nextMessage: ChatMessage): void {
+  const index = chatMessages.value.findIndex((message) => message.id === messageId);
+  if (index < 0) {
+    chatMessages.value = [...chatMessages.value, nextMessage];
+    return;
+  }
+  chatMessages.value = [
+    ...chatMessages.value.slice(0, index),
+    nextMessage,
+    ...chatMessages.value.slice(index + 1),
+  ];
+}
+
+function stopAssistantThinking(): void {
+  if (assistantThinkingTimer !== undefined) {
+    window.clearInterval(assistantThinkingTimer);
+    assistantThinkingTimer = undefined;
+  }
+}
+
+function startAssistantThinking(messageId: string): void {
+  stopAssistantThinking();
+  let dotCount = 0;
+  assistantThinkingTimer = window.setInterval(() => {
+    dotCount = dotCount >= 3 ? 1 : dotCount + 1;
+    updateChatMessage(messageId, { content: '。'.repeat(dotCount) });
+  }, 360);
+}
+
+async function revealAssistantMessage(finalMessage: ChatMessage, replaceMessageId: string, shouldFollow: boolean): Promise<void> {
+  stopAssistantThinking();
+  const runId = ++assistantTypeRunId;
+  const chars = Array.from(finalMessage.content);
+  const step = chars.length > 360 ? 6 : chars.length > 180 ? 4 : 2;
+  const draftMessage: ChatMessage = {
+    ...finalMessage,
+    content: '',
+    references: undefined,
+    suggested_actions: undefined,
+    suggested_commands: undefined,
+    typing: true,
+  };
+  replaceChatMessage(replaceMessageId, draftMessage);
+
+  let index = 0;
+  while (index < chars.length) {
+    if (runId !== assistantTypeRunId) {
+      return;
+    }
+    index = Math.min(index + step, chars.length);
+    updateChatMessage(finalMessage.id, { content: chars.slice(0, index).join('') });
+    if (shouldFollow && assistantAtBottom.value) {
+      await scrollAssistantToBottom();
+    } else {
+      await nextTick();
+      updateAssistantScrollState();
+    }
+    await waitForAssistantTyping(22);
+  }
+
+  if (runId !== assistantTypeRunId) {
+    return;
+  }
+  replaceChatMessage(finalMessage.id, { ...finalMessage, typing: false });
+  if (shouldFollow && assistantAtBottom.value) {
+    await scrollAssistantToBottom();
+  } else {
+    await nextTick();
+    updateAssistantScrollState();
+  }
+}
+
+function handleChatKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+    return;
+  }
+  event.preventDefault();
+  void sendChat();
+}
+
 async function sendChat(): Promise<void> {
   if (!latest.value || chatSending.value) {
     return;
@@ -1431,7 +1583,17 @@ async function sendChat(): Promise<void> {
     image_url: chatImageUrl.value || undefined,
     created_at: Date.now(),
   };
-  chatMessages.value = [...chatMessages.value, userMessage];
+  const thinkingMessage: ChatMessage = {
+    id: `assistant-thinking-${Date.now()}`,
+    role: 'assistant',
+    content: '。。。',
+    created_at: Date.now(),
+    typing: true,
+  };
+  chatMessages.value = [...chatMessages.value, userMessage, thinkingMessage];
+  chatInput.value = '';
+  await scrollAssistantToBottom();
+  startAssistantThinking(thinkingMessage.id);
   chatSending.value = true;
   try {
     const response = await sendExpertChatMessage({
@@ -1445,53 +1607,275 @@ async function sendChat(): Promise<void> {
       knowledge_items: knowledgeItems.value,
       command_results: commandResults.value,
     });
-    chatMessages.value = [...chatMessages.value, response.message];
-    chatInput.value = '';
+    const shouldFollowResponse = assistantAtBottom.value;
+    await revealAssistantMessage(response.message, thinkingMessage.id, shouldFollowResponse);
     clearChatImage();
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知错误';
-    chatMessages.value = [
-      ...chatMessages.value,
+    const shouldFollowResponse = assistantAtBottom.value;
+    await revealAssistantMessage(
       {
         id: `assistant-error-${Date.now()}`,
         role: 'assistant',
         content: `AI助手暂时没有连上后端服务。\n请确认 FastAPI 后端已启动，并且 http://localhost:8000/api/v1/health 可以访问。\n错误信息：${message}`,
         created_at: Date.now(),
       },
-    ];
+      thinkingMessage.id,
+      shouldFollowResponse,
+    );
   } finally {
+    stopAssistantThinking();
     chatSending.value = false;
   }
 }
 
-function startVoiceInput(): void {
-  const windowWithSpeech = window as Window & {
+function setChatInputFromVoice(transcript: string): void {
+  chatInput.value = `${voiceInputPrefix}${transcript}${voiceInputSuffix}`;
+  void nextTick(() => {
+    const input = chatInputRef.value;
+    if (!input) {
+      return;
+    }
+    resizeChatInput();
+    const caretPosition = voiceInputPrefix.length + transcript.length;
+    input.focus();
+    input.setSelectionRange(caretPosition, caretPosition);
+  });
+}
+
+function isVoiceCaptureSecureOrigin(): boolean {
+  const host = window.location.hostname;
+  return window.location.protocol === 'https:' || host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function pickVoiceMimeType(): string {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/mp4',
+  ];
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? '';
+}
+
+function stopActiveVoiceStream(): void {
+  activeVoiceStream?.getTracks().forEach((track) => track.stop());
+  activeVoiceStream = null;
+}
+
+function getBrowserSpeechRecognition(): SpeechRecognitionConstructor | null {
+  const speechWindow = window as Window & {
     SpeechRecognition?: SpeechRecognitionConstructor;
     webkitSpeechRecognition?: SpeechRecognitionConstructor;
   };
-  const SpeechRecognition = windowWithSpeech.SpeechRecognition ?? windowWithSpeech.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    voiceMessage.value = '当前浏览器不支持语音识别，请直接输入文字。';
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
+function shouldFallbackToBrowserSpeech(message: string): boolean {
+  return /SPEECH_TRANSCRIBE_API_KEY|OPENAI_API_KEY|API Key/i.test(message);
+}
+
+function stopBrowserSpeechInput(): void {
+  const recognition = activeBrowserSpeechRecognition;
+  activeBrowserSpeechRecognition = null;
+  if (!recognition) {
     return;
   }
-  listening.value = true;
-  voiceMessage.value = '正在听，请说出你的问题...';
-  activeSpeechRecognition = new SpeechRecognition();
-  activeSpeechRecognition.lang = 'zh-CN';
-  activeSpeechRecognition.interimResults = false;
-  activeSpeechRecognition.maxAlternatives = 1;
-  activeSpeechRecognition.onresult = (event) => {
-    const transcript = event.results[0]?.[0]?.transcript ?? '';
-    chatInput.value = transcript.length > 0 ? transcript : chatInput.value;
-    voiceMessage.value = transcript.length > 0 ? '语音已转成文字' : '没有识别到有效文字';
-  };
-  activeSpeechRecognition.onerror = () => {
-    voiceMessage.value = '语音识别失败，请改用手动输入。';
-  };
-  activeSpeechRecognition.onend = () => {
+  recognition.onresult = null;
+  recognition.onerror = null;
+  recognition.onend = null;
+  recognition.stop();
+}
+
+function startBrowserSpeechFallback(): boolean {
+  const Recognition = getBrowserSpeechRecognition();
+  if (!Recognition) {
+    voiceMessage.value = '后端未配置语音识别 API Key，且当前浏览器不支持内置语音识别。请配置 SPEECH_TRANSCRIBE_API_KEY 或手动输入。';
     listening.value = false;
+    return false;
+  }
+
+  const recognition = new Recognition();
+  activeBrowserSpeechRecognition = recognition;
+  recognition.lang = 'zh-CN';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+  recognition.onresult = (event) => {
+    let transcript = '';
+    for (let index = 0; index < event.results.length; index += 1) {
+      transcript += event.results[index][0]?.transcript ?? '';
+    }
+    const cleanTranscript = transcript.trim();
+    if (cleanTranscript) {
+      voiceCurrentTranscript = cleanTranscript;
+      setChatInputFromVoice(cleanTranscript);
+      voiceMessage.value = '正在使用浏览器语音识别，文字已同步到输入框';
+    }
   };
-  activeSpeechRecognition.start();
+  recognition.onerror = () => {
+    voiceMessage.value = '浏览器语音识别失败，请检查麦克风权限，或配置后端 SPEECH_TRANSCRIBE_API_KEY。';
+    listening.value = false;
+    activeBrowserSpeechRecognition = null;
+  };
+  recognition.onend = () => {
+    listening.value = false;
+    activeBrowserSpeechRecognition = null;
+    voiceMessage.value = voiceCurrentTranscript.trim().length > 0
+      ? '语音已写入输入框'
+      : '浏览器语音识别已结束，没有识别到有效文字';
+  };
+
+  try {
+    recognition.start();
+    listening.value = true;
+    voiceMessage.value = '后端未配置语音识别 API Key，已切换为浏览器语音识别';
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误';
+    voiceMessage.value = `浏览器语音识别启动失败：${message}`;
+    activeBrowserSpeechRecognition = null;
+    listening.value = false;
+    return false;
+  }
+}
+
+async function uploadVoiceChunk(chunk: Blob, sequence: number, isFinal: boolean): Promise<void> {
+  try {
+    const result = await transcribeVoiceChunk({
+      audio: chunk,
+      sessionId: voiceSessionId,
+      sequence,
+      isFinal,
+      mimeType: voiceMimeType || chunk.type || 'audio/webm',
+      language: 'zh-CN',
+    });
+    if (result.text.trim().length > 0) {
+      voiceCurrentTranscript = result.text.trim();
+      setChatInputFromVoice(voiceCurrentTranscript);
+      voiceMessage.value = result.final ? '语音已写入输入框' : '后端实时识别中，文字已同步到输入框';
+      return;
+    }
+    if (shouldFallbackToBrowserSpeech(result.message || '')) {
+      if (activeVoiceRecorder && activeVoiceRecorder.state !== 'inactive') {
+        activeVoiceRecorder.ondataavailable = null;
+        activeVoiceRecorder.stop();
+      }
+      activeVoiceRecorder = null;
+      stopActiveVoiceStream();
+      void startBrowserSpeechFallback();
+      return;
+    }
+    voiceMessage.value = result.message || (result.final ? '没有识别到有效文字' : '正在录音，等待识别结果...');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误';
+    console.warn('Voice chunk transcription failed', message);
+    voiceMessage.value = `后端语音识别连接失败：${message}`;
+  }
+}
+
+function queueVoiceChunkUpload(chunk: Blob, isFinal: boolean): void {
+  const sequence = voiceSequence;
+  voiceSequence += 1;
+  voiceUploadQueue = voiceUploadQueue
+    .then(() => uploadVoiceChunk(chunk, sequence, isFinal))
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : '未知错误';
+      voiceMessage.value = `后端语音识别失败：${message}`;
+    });
+}
+
+function stopVoiceInput(): void {
+  if (activeBrowserSpeechRecognition) {
+    stopBrowserSpeechInput();
+    listening.value = false;
+    voiceMessage.value = voiceCurrentTranscript.trim().length > 0 ? '语音已写入输入框' : '语音输入已停止';
+    return;
+  }
+  voiceStopping = true;
+  voiceMessage.value = '正在整理语音输入...';
+  if (activeVoiceRecorder && activeVoiceRecorder.state !== 'inactive') {
+    activeVoiceRecorder.stop();
+    return;
+  }
+  stopActiveVoiceStream();
+  listening.value = false;
+}
+
+async function startVoiceInput(): Promise<void> {
+  if (listening.value) {
+    stopVoiceInput();
+    return;
+  }
+  if (activeBrowserSpeechRecognition) {
+    stopBrowserSpeechInput();
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    startBrowserSpeechFallback();
+    return;
+  }
+  if (!isVoiceCaptureSecureOrigin()) {
+    voiceMessage.value = '录音需要 HTTPS 或 localhost，请用 localhost 地址打开。';
+    return;
+  }
+
+  const input = chatInputRef.value;
+  const selectionStart = input?.selectionStart ?? chatInput.value.length;
+  const selectionEnd = input?.selectionEnd ?? chatInput.value.length;
+  voiceInputPrefix = chatInput.value.slice(0, selectionStart);
+  voiceInputSuffix = chatInput.value.slice(selectionEnd);
+  voiceCurrentTranscript = '';
+  voiceSessionId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  voiceSequence = 0;
+  voiceStopping = false;
+  voiceUploadQueue = Promise.resolve();
+
+  try {
+    activeVoiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    voiceMimeType = pickVoiceMimeType();
+    activeVoiceRecorder = new MediaRecorder(
+      activeVoiceStream,
+      voiceMimeType ? { mimeType: voiceMimeType } : undefined,
+    );
+    activeVoiceRecorder.ondataavailable = (event) => {
+      if (event.data.size <= 0) {
+        return;
+      }
+      queueVoiceChunkUpload(event.data, voiceStopping);
+    };
+    activeVoiceRecorder.onerror = () => {
+      voiceMessage.value = '录音失败，请检查麦克风权限或输入设备。';
+      stopVoiceInput();
+    };
+    activeVoiceRecorder.onstop = () => {
+      const wasStopping = voiceStopping;
+      activeVoiceRecorder = null;
+      stopActiveVoiceStream();
+      voiceUploadQueue.finally(() => {
+        listening.value = false;
+        if (voiceCurrentTranscript.trim().length > 0) {
+          voiceMessage.value = '语音已写入输入框';
+        } else if (wasStopping) {
+          voiceMessage.value = '没有识别到有效文字';
+        }
+      });
+    };
+    listening.value = true;
+    voiceMessage.value = '正在录音，后端会实时识别并写入输入框';
+    activeVoiceRecorder.start(1200);
+  } catch (error) {
+    listening.value = false;
+    activeVoiceRecorder = null;
+    stopActiveVoiceStream();
+    const message = error instanceof Error ? error.message : '未知错误';
+    voiceMessage.value = `录音启动失败：${message}`;
+  }
 }
 
 async function selectKnowledgeBase(kbId: number): Promise<void> {
@@ -1604,13 +1988,20 @@ onBeforeUnmount(() => {
   if (metricEditorChartTimer) {
     window.clearTimeout(metricEditorChartTimer);
   }
+  stopAssistantThinking();
+  assistantTypeRunId += 1;
   if (diseaseImageUrl.value.startsWith('blob:')) {
     URL.revokeObjectURL(diseaseImageUrl.value);
   }
   if (chatImageUrl.value.startsWith('blob:')) {
     URL.revokeObjectURL(chatImageUrl.value);
   }
-  activeSpeechRecognition = null;
+  if (activeVoiceRecorder && activeVoiceRecorder.state !== 'inactive') {
+    activeVoiceRecorder.stop();
+  }
+  activeVoiceRecorder = null;
+  stopBrowserSpeechInput();
+  stopActiveVoiceStream();
 });
 </script>
 
@@ -2265,44 +2656,60 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <StatusPill :label="voiceMessage" :state="listening ? 'watch' : 'neutral'" />
-        <div class="chat-list assistant-panel__messages">
-          <article v-for="message in chatMessages" :key="message.id" :class="`chat-bubble chat-bubble--${message.role}`">
-            <img v-if="message.image_url" :src="message.image_url" alt="问答附图" />
-            <p>{{ message.content }}</p>
-            <div v-if="message.references?.length" class="reference-list">
-              <strong>引用知识</strong>
-              <span v-for="refItem in message.references" :key="`${message.id}-${refItem.itemId}-${refItem.chunkId}`">
-                {{ refItem.title }}：{{ refItem.content }}
-              </span>
-            </div>
-            <div v-if="message.suggested_actions?.length" class="assistant-actions">
-              <strong>待确认操作</strong>
-              <article
-                v-for="action in message.suggested_actions"
-                :key="action.id"
-                class="assistant-action-card"
-                :class="`assistant-action-card--${action.risk}`"
-              >
-                <div class="assistant-action-card__body">
-                  <b>{{ action.title }}</b>
-                  <span>{{ action.description || 'AI 建议执行该操作，确认后才会生效。' }}</span>
-                  <em v-if="assistantActionStatusText(action)">{{ assistantActionStatusText(action) }}</em>
-                </div>
-                <StatusPill :label="assistantActionRiskLabel(action.risk)" :state="assistantActionRiskState(action.risk)" />
-                <div v-if="action.status === 'pending' || action.status === 'failed' || !action.status" class="assistant-action-card__buttons">
-                  <button
-                    class="primary-button"
-                    type="button"
-                    :disabled="assistantExecutingActionId === action.id"
-                    @click="confirmAssistantAction(action)"
-                  >
-                    {{ assistantActionConfirmText(action) }}
-                  </button>
-                  <button class="text-button" type="button" @click="cancelAssistantAction(action)">取消</button>
-                </div>
-              </article>
-            </div>
-          </article>
+        <div class="assistant-messages-wrap">
+          <div ref="assistantMessagesRef" class="chat-list assistant-panel__messages" @scroll="handleAssistantMessagesScroll">
+            <article
+              v-for="message in chatMessages"
+              :key="message.id"
+              class="chat-bubble"
+              :class="[`chat-bubble--${message.role}`, { 'chat-bubble--typing': message.typing }]"
+            >
+              <img v-if="message.image_url" :src="message.image_url" alt="问答附图" />
+              <p>{{ message.content }}</p>
+              <div v-if="message.references?.length" class="reference-list">
+                <strong>引用知识</strong>
+                <span v-for="refItem in message.references" :key="`${message.id}-${refItem.itemId}-${refItem.chunkId}`">
+                  {{ refItem.title }}：{{ refItem.content }}
+                </span>
+              </div>
+              <div v-if="message.suggested_actions?.length" class="assistant-actions">
+                <strong>待确认操作</strong>
+                <article
+                  v-for="action in message.suggested_actions"
+                  :key="action.id"
+                  class="assistant-action-card"
+                  :class="`assistant-action-card--${action.risk}`"
+                >
+                  <div class="assistant-action-card__body">
+                    <b>{{ action.title }}</b>
+                    <span>{{ action.description || 'AI 建议执行该操作，确认后才会生效。' }}</span>
+                    <em v-if="assistantActionStatusText(action)">{{ assistantActionStatusText(action) }}</em>
+                  </div>
+                  <div v-if="action.status === 'pending' || action.status === 'failed' || !action.status" class="assistant-action-card__buttons">
+                    <button
+                      class="primary-button"
+                      type="button"
+                      :disabled="assistantExecutingActionId === action.id"
+                      @click="confirmAssistantAction(action)"
+                    >
+                      {{ assistantActionConfirmText(action) }}
+                    </button>
+                    <button class="text-button" type="button" @click="cancelAssistantAction(action)">取消</button>
+                  </div>
+                </article>
+              </div>
+            </article>
+          </div>
+          <button
+            v-if="assistantShowScrollButton"
+            class="assistant-scroll-bottom"
+            type="button"
+            title="回到最新消息"
+            aria-label="回到最新消息"
+            @click="scrollAssistantToBottom(true)"
+          >
+            <ArrowDown :size="18" />
+          </button>
         </div>
         <div v-if="chatImageUrl" class="chat-attachment">
           <img :src="chatImageUrl" alt="待发送图片" />
@@ -2316,10 +2723,10 @@ onBeforeUnmount(() => {
             <Image :size="18" />
             <input type="file" accept="image/*" @change="handleChatImageUpload" />
           </label>
-          <button class="icon-button" type="button" title="语音输入" @click="startVoiceInput">
+          <button class="icon-button" type="button" :title="listening ? '停止语音输入' : '语音输入'" @click="startVoiceInput">
             <Mic :class="{ pulsing: listening }" :size="18" />
           </button>
-          <textarea v-model="chatInput" placeholder="输入问题或操作需求，执行控制前我会先请你确认。"></textarea>
+          <textarea ref="chatInputRef" v-model="chatInput" placeholder="输入问题或操作需求，执行控制前我会先请你确认。" @keydown="handleChatKeydown"></textarea>
           <button class="primary-button" type="button" :disabled="chatSending" @click="sendChat">
             <Send :size="18" />
             {{ chatSending ? '发送中' : '发送' }}
