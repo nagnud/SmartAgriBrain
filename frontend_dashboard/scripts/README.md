@@ -18,7 +18,7 @@
 - `scripts/backend/start-backend.bat`
 - `scripts/backend/start-backend.ps1`
 
-首次启动会自动创建 `backend_api/.venv` 并安装依赖。真实 AI 农事建议和 AI 助手问答需要在 `backend_api/.env` 中填写：
+首次启动会自动创建 `backend_api/.venv` 并安装依赖。后端会读取 `backend_api/.env` 中的 DeepSeek 配置；这个文件会随项目一起推送，别人拿到代码后运行后端脚本即可使用同一套配置：
 
 ```text
 DEEPSEEK_API_KEY=你的 DeepSeek API Key

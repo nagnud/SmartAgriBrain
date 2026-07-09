@@ -68,7 +68,7 @@ VITE_USE_MOCK_AI_ADVICE=false
 
 如果只想让专家问答接入后端、AI 农事建议仍使用前端 Mock，把 `VITE_USE_MOCK_AI_ADVICE` 改回 `true` 即可。
 
-后端 AI 农事建议和专家问答使用 `backend_api/.env` 中的 DeepSeek 配置：
+后端 AI 农事建议和专家问答使用 `backend_api/.env` 中的 DeepSeek 配置。这个文件会随项目一起推送，别人拿到代码后运行后端脚本即可使用同一套配置：
 
 ```env
 DEEPSEEK_BASE_URL=https://api.deepseek.com
