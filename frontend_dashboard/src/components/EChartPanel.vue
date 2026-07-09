@@ -27,7 +27,7 @@ function renderChart(): void {
     chart = echarts.init(chartEl.value);
   }
   chart.resize({ width, height });
-  chart.setOption(props.option, true);
+  chart.setOption(props.option, { notMerge: true, lazyUpdate: true });
 }
 
 function resizeChart(): void {
@@ -56,7 +56,6 @@ function scheduleRender(): void {
 watch(
   () => props.option,
   () => scheduleRender(),
-  { deep: true },
 );
 
 watch(

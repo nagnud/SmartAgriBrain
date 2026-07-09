@@ -173,9 +173,6 @@ export function executeMockCommand(command: DeviceCommand): CommandResult {
   const status = { ...runtimeStatus };
   if (command.command === 'smart_control_update' && command.demands) {
     lastSmartControlDemands = { ...command.demands };
-    status.pump = command.demands.water > 0 ? 1 : 0;
-    status.light = command.demands.light > 0 ? 1 : 0;
-    status.fan = command.demands.vent > 0 || command.demands.cool > 0 ? 1 : 0;
   }
   if (command.command === 'smart_control_stop') {
     lastSmartControlDemands = {
@@ -186,9 +183,6 @@ export function executeMockCommand(command: DeviceCommand): CommandResult {
       vent: 0,
       co2: 0,
     };
-    status.pump = 0;
-    status.light = 0;
-    status.fan = 0;
   }
   if (command.command.startsWith('fan_')) {
     status.fan = command.value;

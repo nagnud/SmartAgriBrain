@@ -156,6 +156,13 @@ interface SmartControlParamVm {
   autoValue: number;
 }
 
+interface MetricEditorRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'temperature', name: '温度', unit: '摄氏度', color: '#D68C1F', value: (point) => point.temperature },
   { key: 'humidity', name: '湿度', unit: '%RH', color: '#2C7DA0', value: (point) => point.humidity },
@@ -168,11 +175,11 @@ const historyMetricDefinitions: HistoryMetricDefinition[] = [
 
 const navItems: NavItem[] = [
   { key: 'overview', label: '首页总览', icon: Home },
+  { key: 'control', label: '设备控制', icon: ToggleLeft },
   { key: 'realtime', label: '实时监测', icon: Activity },
   { key: 'history', label: '历史曲线', icon: BarChart3 },
   { key: 'disease', label: '病害识别', icon: Image },
   { key: 'ai', label: 'AI 农事建议', icon: Bot },
-  { key: 'control', label: '设备控制', icon: ToggleLeft },
   { key: 'knowledge', label: '知识库管理', icon: Database },
   { key: 'alarms', label: '报警记录', icon: Bell },
 ];
@@ -226,13 +233,39 @@ const metricTargetRanges = ref<Record<HistoryMetricKey, MetricTargetRange>>({
   gas_resistance: { min: 12000, max: 22000 },
 });
 const selectedMetricKey = ref<HistoryMetricKey | null>(null);
+const metricEditorTransition = ref<'opening' | 'closing' | 'switch-next' | 'switch-prev' | ''>('');
+const metricEditorChartActive = ref(false);
 const targetMinDraft = ref('');
 const targetMaxDraft = ref('');
 const targetRangeError = ref('');
+const metricEditorStyle = ref<Record<string, string>>({
+  '--metric-editor-left': '0px',
+  '--metric-editor-top': '0px',
+  '--metric-editor-width': '100vw',
+  '--metric-editor-height': '100vh',
+  '--metric-editor-motion-x': '0px',
+  '--metric-editor-motion-y': '0px',
+  '--metric-editor-scale-x': '1',
+  '--metric-editor-scale-y': '1',
+});
 const loading = ref(true);
 const refreshing = ref(false);
 let refreshTimer: number | undefined;
+let metricEditorTimer: number | undefined;
+let metricEditorChartTimer: number | undefined;
 let activeSpeechRecognition: SpeechRecognitionLike | null = null;
+let metricEditorLastSourceRect: MetricEditorRect | null = null;
+const metricEditorSourceRects = new Map<HistoryMetricKey, MetricEditorRect>();
+
+const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
+  temperature: 0.01,
+  humidity: 0.1,
+  light: 10,
+  co2: 1,
+  soil_moisture: 0.1,
+  soil_ec: 0.01,
+  gas_resistance: 10,
+};
 
 const currentAirQuality = computed(() => {
   if (!latest.value) {
@@ -296,10 +329,10 @@ const overviewMetricCards = computed(() => metricCards.value.map((metric) => ({
 const realtimeMetricCards = computed(() => metricCards.value);
 
 const selectedMetricDefinition = computed(() => historyMetricDefinitions.find((metric) => metric.key === selectedMetricKey.value) ?? null);
+const selectedMetricInputStep = computed(() => selectedMetricKey.value ? metricTargetInputSteps[selectedMetricKey.value] : 0.01);
 
 const contentLayoutClass = computed(() => ({
   'content-layout--assistant-open': assistantOpen.value,
-  'content-layout--metric-open': activeView.value === 'realtime' && Boolean(selectedMetricCard.value && selectedMetricDefinition.value),
 }));
 
 const smartControlParams = computed<SmartControlParamVm[]>(() => smartControlParamKeys.map((key) => {
@@ -329,8 +362,9 @@ const smartControlStatusState = computed<StatusLevel>(() => {
   return 'good';
 });
 
-const selectedMetricChartOption = computed<EChartsOption>(() => {
-  const metric = selectedMetricDefinition.value;
+const selectedMetricChartOption = computed<EChartsOption>(() => metricChartOptionFor(selectedMetricDefinition.value));
+
+function metricChartOptionFor(metric: HistoryMetricDefinition | null): EChartsOption {
   if (!metric) {
     return {};
   }
@@ -356,13 +390,17 @@ const selectedMetricChartOption = computed<EChartsOption>(() => {
       name: metric.name,
       type: 'line',
       smooth: true,
+      showSymbol: true,
+      symbol: 'circle',
+      symbolSize: 7,
       data: values,
       color: metric.color,
       lineStyle: { width: 3, color: metric.color },
-      itemStyle: { color: metric.color },
+      itemStyle: { color: '#ffffff', borderColor: metric.color, borderWidth: 2 },
+      emphasis: { focus: 'series', scale: 1.2 },
     }],
   };
-});
+}
 
 const historyChartOption = computed<EChartsOption>(() => {
   const labels = historyPoints.value.map((point) => formatTime(point.timestamp));
@@ -370,14 +408,14 @@ const historyChartOption = computed<EChartsOption>(() => {
   const selectedCount = selectedDefinitions.length;
   const leftAxisCount = selectedDefinitions.filter((_, index) => index % 2 === 0).length;
   const rightAxisCount = selectedDefinitions.length - leftAxisCount;
-  const axisSpacing = selectedCount > 5 ? 52 : 58;
+  const axisSpacing = selectedCount >= 7 ? 76 : selectedCount >= 5 ? 68 : 60;
   return {
     tooltip: { trigger: 'axis' },
     legend: { show: false },
     grid: {
       left: Math.max(86, 86 + Math.max(0, leftAxisCount - 1) * axisSpacing),
       right: Math.max(86, 86 + Math.max(0, rightAxisCount - 1) * axisSpacing),
-      top: 56,
+      top: selectedCount >= 5 ? 82 : 66,
       bottom: 34,
     },
     xAxis: { type: 'category', boundaryGap: false, data: labels },
@@ -386,7 +424,7 @@ const historyChartOption = computed<EChartsOption>(() => {
       const range = historyAxisRange(values);
       return {
         type: 'value',
-        name: `${definition.name}(${definition.unit})`,
+        name: `${definition.name}\n(${definition.unit})`,
         min: range.min,
         max: range.max,
         position: index % 2 === 0 ? 'left' : 'right',
@@ -394,8 +432,14 @@ const historyChartOption = computed<EChartsOption>(() => {
         axisLine: { show: true, lineStyle: { color: definition.color } },
         axisTick: { lineStyle: { color: definition.color } },
         axisLabel: { color: definition.color, margin: 8, hideOverlap: true },
-        nameGap: 16,
-        nameTextStyle: { color: definition.color, fontWeight: 700, align: index % 2 === 0 ? 'left' : 'right' },
+        nameGap: 22,
+        nameTextStyle: {
+          color: definition.color,
+          fontWeight: 700,
+          lineHeight: 16,
+          align: index % 2 === 0 ? 'left' : 'right',
+          verticalAlign: 'bottom',
+        },
         splitLine: { show: index === 0, lineStyle: { color: '#e7eee8' } },
       };
     }),
@@ -589,7 +633,120 @@ function metricAiInsight(kind: 'high' | 'low' | 'normal', key: HistoryMetricKey)
   return kind === 'high' ? '智能判断：当前指标偏高，需要复核设备状态。' : '智能判断：当前指标偏低，建议结合其他指标判断。';
 }
 
-function openMetricDrawer(key: HistoryMetricKey): void {
+function scheduleMetricEditorTransitionClear(): void {
+  if (metricEditorTimer) {
+    window.clearTimeout(metricEditorTimer);
+  }
+  metricEditorTimer = window.setTimeout(() => {
+    metricEditorTransition.value = '';
+  }, 380);
+}
+
+function clearMetricEditorChartTimer(): void {
+  if (metricEditorChartTimer) {
+    window.clearTimeout(metricEditorChartTimer);
+    metricEditorChartTimer = undefined;
+  }
+}
+
+function scheduleMetricEditorChartActivation(delay = 420): void {
+  clearMetricEditorChartTimer();
+  metricEditorChartActive.value = false;
+  metricEditorChartTimer = window.setTimeout(() => {
+    metricEditorChartActive.value = Boolean(selectedMetricKey.value);
+    metricEditorChartTimer = undefined;
+  }, delay);
+}
+
+function elementRect(element: Element): MetricEditorRect {
+  const rect = element.getBoundingClientRect();
+  return {
+    left: rect.left,
+    top: rect.top,
+    width: Math.max(rect.width, 1),
+    height: Math.max(rect.height, 1),
+  };
+}
+
+function metricEditorTargetRect(): MetricEditorRect {
+  const workspace = document.querySelector<HTMLElement>('.workspace');
+  if (!workspace) {
+    return {
+      left: 0,
+      top: 0,
+      width: Math.max(window.innerWidth, 1),
+      height: Math.max(window.innerHeight, 1),
+    };
+  }
+
+  const rect = workspace.getBoundingClientRect();
+  const styles = window.getComputedStyle(workspace);
+  const paddingLeft = Number.parseFloat(styles.paddingLeft) || 0;
+  const paddingRight = Number.parseFloat(styles.paddingRight) || 0;
+  const paddingBottom = Number.parseFloat(styles.paddingBottom) || 0;
+  const topbar = workspace.querySelector<HTMLElement>('.topbar');
+  const left = Math.max(12, rect.left + paddingLeft);
+  const top = Math.max(12, topbar ? topbar.getBoundingClientRect().bottom + 20 : rect.top);
+  const rightSpace = Math.max(12, window.innerWidth - rect.right + paddingRight);
+  const width = Math.max(320, window.innerWidth - left - rightSpace);
+  const height = Math.max(520, window.innerHeight - top - paddingBottom);
+
+  return { left, top, width, height };
+}
+
+function captureMetricCardRects(): void {
+  metricEditorSourceRects.clear();
+  document.querySelectorAll<HTMLElement>('[data-metric-key]').forEach((element) => {
+    const key = element.dataset.metricKey as HistoryMetricKey | undefined;
+    if (key) {
+      metricEditorSourceRects.set(key, elementRect(element));
+    }
+  });
+}
+
+function metricCardRect(key: HistoryMetricKey, element?: Element | null): MetricEditorRect {
+  const sourceElement = element ?? document.querySelector<HTMLElement>(`[data-metric-key="${key}"]`);
+  if (sourceElement) {
+    const rect = elementRect(sourceElement);
+    if (rect.width > 1 && rect.height > 1) {
+      metricEditorLastSourceRect = rect;
+      metricEditorSourceRects.set(key, rect);
+      return rect;
+    }
+  }
+  const cachedRect = metricEditorSourceRects.get(key);
+  if (cachedRect) {
+    metricEditorLastSourceRect = cachedRect;
+    return cachedRect;
+  }
+  if (metricEditorLastSourceRect) {
+    return metricEditorLastSourceRect;
+  }
+  const target = metricEditorTargetRect();
+  return {
+    left: target.left + target.width / 2 - 120,
+    top: target.top + target.height / 2 - 80,
+    width: 240,
+    height: 160,
+  };
+}
+
+function updateMetricEditorMotion(key: HistoryMetricKey, element?: Element | null): void {
+  const target = metricEditorTargetRect();
+  const source = metricCardRect(key, element);
+  metricEditorStyle.value = {
+    '--metric-editor-left': `${target.left}px`,
+    '--metric-editor-top': `${target.top}px`,
+    '--metric-editor-width': `${target.width}px`,
+    '--metric-editor-height': `${target.height}px`,
+    '--metric-editor-motion-x': `${source.left - target.left}px`,
+    '--metric-editor-motion-y': `${source.top - target.top}px`,
+    '--metric-editor-scale-x': String(source.width / target.width),
+    '--metric-editor-scale-y': String(source.height / target.height),
+  };
+}
+
+function hydrateMetricTargetDraft(key: HistoryMetricKey): void {
   selectedMetricKey.value = key;
   const range = metricTargetRanges.value[key];
   targetMinDraft.value = String(range.min);
@@ -597,9 +754,53 @@ function openMetricDrawer(key: HistoryMetricKey): void {
   targetRangeError.value = '';
 }
 
-function closeMetricDrawer(): void {
-  selectedMetricKey.value = null;
+function openMetricEditor(key: HistoryMetricKey, event?: MouseEvent | KeyboardEvent): void {
+  const sourceElement = event?.currentTarget instanceof Element ? event.currentTarget : null;
+  if (selectedMetricKey.value && selectedMetricKey.value !== key) {
+    const currentIndex = historyMetricDefinitions.findIndex((metric) => metric.key === selectedMetricKey.value);
+    const nextIndex = historyMetricDefinitions.findIndex((metric) => metric.key === key);
+    metricEditorTransition.value = nextIndex > currentIndex ? 'switch-next' : 'switch-prev';
+    hydrateMetricTargetDraft(key);
+    scheduleMetricEditorTransitionClear();
+    metricEditorChartActive.value = true;
+    return;
+  }
+  captureMetricCardRects();
+  updateMetricEditorMotion(key, sourceElement);
+  metricEditorTransition.value = 'opening';
+  hydrateMetricTargetDraft(key);
+  scheduleMetricEditorChartActivation();
+  scheduleMetricEditorTransitionClear();
+}
+
+function switchMetricEditor(direction: -1 | 1): void {
+  if (!selectedMetricKey.value) {
+    return;
+  }
+  const currentIndex = historyMetricDefinitions.findIndex((metric) => metric.key === selectedMetricKey.value);
+  const nextIndex = (currentIndex + direction + historyMetricDefinitions.length) % historyMetricDefinitions.length;
+  metricEditorTransition.value = direction > 0 ? 'switch-next' : 'switch-prev';
+  hydrateMetricTargetDraft(historyMetricDefinitions[nextIndex].key);
+  metricEditorChartActive.value = true;
+  scheduleMetricEditorTransitionClear();
+}
+
+function closeMetricEditor(): void {
+  if (!selectedMetricKey.value) {
+    return;
+  }
+  updateMetricEditorMotion(selectedMetricKey.value);
+  metricEditorTransition.value = 'closing';
+  metricEditorChartActive.value = false;
+  clearMetricEditorChartTimer();
   targetRangeError.value = '';
+  if (metricEditorTimer) {
+    window.clearTimeout(metricEditorTimer);
+  }
+  metricEditorTimer = window.setTimeout(() => {
+    selectedMetricKey.value = null;
+    metricEditorTransition.value = '';
+  }, 360);
 }
 
 function saveMetricTargetRange(): void {
@@ -626,7 +827,7 @@ function saveMetricTargetRange(): void {
 
 watch(activeView, (view) => {
   if (view !== 'realtime') {
-    closeMetricDrawer();
+    closeMetricEditor();
   }
 });
 
@@ -759,7 +960,6 @@ async function publishSmartControl(reason: string, action: 'smart_control_update
   latest.value = {
     ...latest.value,
     timestamp: result.executed_at,
-    status: result.status,
   };
 }
 
@@ -825,6 +1025,14 @@ async function restoreSmartParamAuto(key: SmartControlParamKey): Promise<void> {
   await publishSmartControl(`${smartControlParamLabel(key)}恢复自动`);
 }
 
+async function toggleSmartParamMode(key: SmartControlParamKey): Promise<void> {
+  if (smartControlParamStates.value[key].mode === 'manual') {
+    await restoreSmartParamAuto(key);
+    return;
+  }
+  await setSmartParamManual(key);
+}
+
 async function setAllSmartParamsAuto(): Promise<void> {
   const nextStates = defaultSmartControlParamStates();
   smartControlParamKeys.forEach((key) => {
@@ -853,15 +1061,84 @@ async function toggleDevice(
 
 function commandResultText(result: CommandResult): string {
   const command = result.command;
-  if (!command.command.startsWith('smart_control_')) {
-    return command.reason;
+  if (command.command === 'smart_control_update') {
+    const labelsText = smartControlParamKeys.map((key) => smartControlParamLabel(key)).join('、');
+    if (command.reason === '一键自动托管') {
+      return `已恢复${labelsText}的自动调控，远程设备开关保持当前状态。`;
+    }
+    if (command.reason === '开启智能托管') {
+      return `已打开${labelsText}的托管自动调控，远程设备开关保持当前状态。`;
+    }
+    if (command.reason.endsWith('切换手动')) {
+      const label = smartControlReasonLabel(command.reason, '切换手动');
+      return `已关闭${label}托管自动调控，可手动设置控制值。`;
+    }
+    if (command.reason.endsWith('恢复自动')) {
+      const label = smartControlReasonLabel(command.reason, '恢复自动');
+      return `已打开${label}托管自动调控，将按环境变化自动更新。`;
+    }
+    if (command.reason.endsWith('手动值调整')) {
+      const label = smartControlReasonLabel(command.reason, '手动值调整');
+      return `已更新${label}手动控制值，设备开关状态保持不变。`;
+    }
+    return '已更新自动调控参数，远程设备开关保持当前状态。';
   }
-  return JSON.stringify({
-    waterDemand: command.waterDemand,
-    lightDemand: command.lightDemand,
-    tempDemand: command.tempDemand,
-    airDemand: command.airDemand,
-    mistDemand: command.mistDemand,
+  if (command.command === 'smart_control_stop') {
+    return '已关闭全部托管自动调控，远程设备开关保持当前状态。';
+  }
+  return command.reason || (result.success ? '设备状态已更新。' : result.message);
+}
+
+function smartControlReasonLabel(reason: string, suffix: string): string {
+  return reason.endsWith(suffix) ? reason.slice(0, -suffix.length) : '';
+}
+
+function commandActionText(command: DeviceCommand): string {
+  if (command.command === 'smart_control_update') {
+    if (command.reason === '一键自动托管') {
+      return '一键自动托管已应用';
+    }
+    if (command.reason === '开启智能托管') {
+      return '打开智能托管自动调控';
+    }
+    const manualLabel = smartControlReasonLabel(command.reason, '切换手动');
+    if (manualLabel) {
+      return `关闭${manualLabel}托管自动调控`;
+    }
+    const autoLabel = smartControlReasonLabel(command.reason, '恢复自动');
+    if (autoLabel) {
+      return `打开${autoLabel}托管自动调控`;
+    }
+    const adjustedLabel = smartControlReasonLabel(command.reason, '手动值调整');
+    if (adjustedLabel) {
+      return `调整${adjustedLabel}手动控制值`;
+    }
+    return '自动调控参数已更新';
+  }
+  if (command.command === 'smart_control_stop') {
+    return '关闭全部托管自动调控';
+  }
+  const labels: Record<string, string> = {
+    fan_on: '打开风机',
+    fan_off: '关闭风机',
+    pump_on: '打开水泵',
+    pump_off: '关闭水泵',
+    light_on: '打开补光灯',
+    light_off: '关闭补光灯',
+    curtain_open: '打开卷帘',
+    curtain_close: '关闭卷帘',
+    alarm_on: '打开报警器',
+    alarm_off: '关闭报警器',
+  };
+  return labels[command.command] ?? '设备状态更新';
+}
+
+function aiCommandText(command: { command: string; value: number }): string {
+  return commandActionText({
+    device_id: latest.value?.device_id ?? '',
+    command: command.command,
+    value: command.value,
+    reason: '',
   });
 }
 
@@ -1082,6 +1359,12 @@ onBeforeUnmount(() => {
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
   }
+  if (metricEditorTimer) {
+    window.clearTimeout(metricEditorTimer);
+  }
+  if (metricEditorChartTimer) {
+    window.clearTimeout(metricEditorChartTimer);
+  }
   if (diseaseImageUrl.value.startsWith('blob:')) {
     URL.revokeObjectURL(diseaseImageUrl.value);
   }
@@ -1217,67 +1500,139 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section v-show="activeView === 'realtime'" class="view-stack">
-          <div class="section-heading">
-            <h2>实时监测</h2>
-            <span>5 秒自动刷新，展示农业核心环境指标</span>
-          </div>
-          <div class="realtime-grid">
-            <article
-              v-for="metric in realtimeMetricCards"
-              :key="metric.key"
-              :class="['realtime-card', `realtime-card--${metric.state}`, { 'realtime-card--active': selectedMetricKey === metric.key }]"
-              role="button"
-              tabindex="0"
-              @click="openMetricDrawer(metric.key)"
-              @keydown.enter="openMetricDrawer(metric.key)"
-            >
-              <div class="realtime-card__header">
-                <span :style="{ color: metric.color }">
-                  <component :is="metric.icon" :size="20" />
-                  {{ metric.title }}
-                </span>
-                <strong>{{ metric.statusLabel }}</strong>
+        <section v-show="activeView === 'realtime'" class="view-stack realtime-view">
+          <template v-if="!selectedMetricCard || !selectedMetricDefinition">
+            <div class="section-heading">
+              <h2>实时监测</h2>
+              <span>5 秒自动刷新，展示农业核心环境指标</span>
+            </div>
+            <div class="realtime-grid">
+              <article
+                v-for="metric in realtimeMetricCards"
+                :key="metric.key"
+                :data-metric-key="metric.key"
+                :class="['realtime-card', `realtime-card--${metric.state}`]"
+                role="button"
+                tabindex="0"
+                @click="openMetricEditor(metric.key, $event)"
+                @keydown.enter="openMetricEditor(metric.key, $event)"
+              >
+                <div class="realtime-card__header">
+                  <span :style="{ color: metric.color }">
+                    <component :is="metric.icon" :size="20" />
+                    {{ metric.title }}
+                  </span>
+                  <strong>{{ metric.statusLabel }}</strong>
+                </div>
+                <div class="realtime-card__value">
+                  <strong>{{ metric.value }}</strong>
+                  <span>{{ metric.unit }}</span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>目标区间</dt>
+                    <dd>{{ metric.targetText.replace('目标 ', '') }}</dd>
+                  </div>
+                  <div>
+                    <dt>趋势</dt>
+                    <dd>{{ metric.trendText }}</dd>
+                  </div>
+                </dl>
+                <p>{{ metric.aiInsight }}</p>
+              </article>
+            </div>
+
+            <section class="panel ai-trend-panel">
+              <div class="section-heading">
+                <h2>AI 分析曲线</h2>
+                <span>智能判断</span>
               </div>
-              <div class="realtime-card__value">
-                <strong>{{ metric.value }}</strong>
-                <span>{{ metric.unit }}</span>
+              <div class="ai-trend-mock">
+                <i v-for="metric in realtimeMetricCards.slice(0, 7)" :key="metric.key" :style="{ height: `${36 + Math.abs(metric.currentValue % 54)}px`, background: metric.color }"></i>
+              </div>
+              <p class="summary-text">结合当前环境指标展示异常概率、调控建议强度和病害风险趋势参考。</p>
+            </section>
+            <section class="panel sensor-table">
+              <div class="section-heading">
+                <h2>传感器原始值</h2>
+                <span>查看设备最新采样明细</span>
               </div>
               <dl>
-                <div>
-                  <dt>目标区间</dt>
-                  <dd>{{ metric.targetText.replace('目标 ', '') }}</dd>
-                </div>
-                <div>
-                  <dt>趋势</dt>
-                  <dd>{{ metric.trendText }}</dd>
-                </div>
+                <div><dt>温度 / 湿度</dt><dd>{{ latest.sensors.temperature }} 摄氏度 / {{ latest.sensors.humidity }} %RH</dd></div>
+                <div><dt>光照 / CO2</dt><dd>{{ latest.sensors.light }} lux / {{ latest.sensors.co2 }} ppm</dd></div>
+                <div><dt>土壤湿度 / 土壤 EC</dt><dd>{{ latest.sensors.soil_moisture }} % / {{ latest.sensors.soil_ec }} mS/cm</dd></div>
+                <div><dt>气压 / 空气质量</dt><dd>{{ latest.sensors.pressure }} kPa / {{ latest.sensors.gas_resistance }} Ω</dd></div>
               </dl>
-              <p>{{ metric.aiInsight }}</p>
-            </article>
-          </div>
+            </section>
+          </template>
 
-          <section class="panel ai-trend-panel">
-            <div class="section-heading">
-              <h2>AI 分析曲线</h2>
-              <span>智能判断</span>
-            </div>
-            <div class="ai-trend-mock">
-              <i v-for="metric in realtimeMetricCards.slice(0, 7)" :key="metric.key" :style="{ height: `${36 + Math.abs(metric.currentValue % 54)}px`, background: metric.color }"></i>
-            </div>
-            <p class="summary-text">结合当前环境指标展示异常概率、调控建议强度和病害风险趋势参考。</p>
-          </section>
-          <section class="panel sensor-table">
-            <div class="section-heading">
-              <h2>传感器原始值</h2>
-              <span>查看设备最新采样明细</span>
-            </div>
-            <dl>
-              <div><dt>temperature / humidity</dt><dd>{{ latest.sensors.temperature }} 摄氏度 / {{ latest.sensors.humidity }} %RH</dd></div>
-              <div><dt>light / co2</dt><dd>{{ latest.sensors.light }} lux / {{ latest.sensors.co2 }} ppm</dd></div>
-              <div><dt>soil_moisture / soil_ec</dt><dd>{{ latest.sensors.soil_moisture }} % / {{ latest.sensors.soil_ec }} mS/cm</dd></div>
-              <div><dt>pressure / gas_resistance</dt><dd>{{ latest.sensors.pressure }} kPa / {{ latest.sensors.gas_resistance }} Ω</dd></div>
-            </dl>
+          <section
+            v-else
+            :class="['metric-editor-stage', metricEditorTransition ? `metric-editor-stage--${metricEditorTransition}` : '']"
+            :style="metricEditorStyle"
+          >
+            <button class="metric-editor-nav metric-editor-nav--prev" type="button" title="上一个变量" @click="switchMetricEditor(-1)">
+              &lt;
+            </button>
+            <button class="metric-editor-nav metric-editor-nav--next" type="button" title="下一个变量" @click="switchMetricEditor(1)">
+              &gt;
+            </button>
+
+            <article class="metric-editor-page metric-editor-page--current">
+              <div class="metric-editor__header">
+                <div>
+                  <span :style="{ color: selectedMetricCard.color }">{{ selectedMetricCard.statusLabel }}</span>
+                  <h2>{{ selectedMetricCard.title }}</h2>
+                </div>
+                <button class="icon-button" type="button" title="关闭详情" @click="closeMetricEditor">
+                  <X :size="18" />
+                </button>
+              </div>
+
+              <section class="metric-editor__value">
+                <component :is="selectedMetricCard.icon" :size="34" :style="{ color: selectedMetricCard.color }" />
+                <strong>{{ selectedMetricCard.value }}</strong>
+                <span>{{ selectedMetricCard.unit }}</span>
+              </section>
+
+              <section class="target-editor">
+                <div class="section-heading">
+                  <h2>&#30446;&#26631;&#21306;&#38388;</h2>
+                  <span>{{ selectedMetricCard.targetText }}</span>
+                </div>
+                <div class="target-editor__inputs">
+                  <label>
+                    <span>&#19979;&#38480;</span>
+                    <input v-model="targetMinDraft" type="number" :step="selectedMetricInputStep" />
+                  </label>
+                  <label>
+                    <span>&#19978;&#38480;</span>
+                    <input v-model="targetMaxDraft" type="number" :step="selectedMetricInputStep" />
+                  </label>
+                </div>
+                <p v-if="targetRangeError" class="form-error">{{ targetRangeError }}</p>
+                <button class="primary-button" type="button" @click="saveMetricTargetRange">
+                  <Save :size="18" />
+                  &#20445;&#23384;&#30446;&#26631;
+                </button>
+              </section>
+
+              <section class="metric-detail-panel">
+                <dl>
+                  <div>
+                    <dt>趋势</dt>
+                    <dd>{{ selectedMetricCard.trendText }}</dd>
+                  </div>
+                </dl>
+                <p>{{ selectedMetricCard.aiInsight }}</p>
+              </section>
+
+              <EChartPanel
+                :title="`${selectedMetricDefinition.name}\u8d8b\u52bf`"
+                :option="selectedMetricChartOption"
+                :active="metricEditorChartActive"
+              />
+            </article>
           </section>
         </section>
 
@@ -1413,7 +1768,10 @@ onBeforeUnmount(() => {
             <ul class="suggestion-list">
               <li v-for="basis in aiAnalysis?.basis" :key="basis">{{ basis }}</li>
             </ul>
-            <pre class="json-preview">{{ JSON.stringify(aiAnalysis?.commands ?? [], null, 2) }}</pre>
+            <ul class="suggestion-list">
+              <li v-for="command in aiAnalysis?.commands ?? []" :key="`${command.command}-${command.value}`">{{ aiCommandText(command) }}</li>
+              <li v-if="(aiAnalysis?.commands ?? []).length === 0">暂无需要立即执行的设备操作。</li>
+            </ul>
           </section>
         </section>
 
@@ -1426,6 +1784,10 @@ onBeforeUnmount(() => {
               </div>
               <div class="smart-control-actions">
                 <StatusPill :label="smartControlDecision?.status ?? '等待数据'" :state="smartControlStatusState" />
+                <button class="primary-button" type="button" @click="setAllSmartParamsAuto">
+                  <RefreshCw :size="18" />
+                  &#19968;&#38190;&#33258;&#21160;
+                </button>
                 <button class="text-button" type="button" @click="smartControlPanelOpen = !smartControlPanelOpen">
                   <SlidersHorizontal :size="18" />
                   {{ smartControlPanelOpen ? '收起参数' : '打开参数' }}
@@ -1438,21 +1800,19 @@ onBeforeUnmount(() => {
               <span>上次下发：{{ smartControlLastPublishAt ? formatDateTime(smartControlLastPublishAt) : '尚未下发' }}</span>
             </div>
             <div class="smart-demand-grid">
-              <article v-for="param in smartControlParams" :key="param.key" class="smart-demand-chip" :class="{ 'smart-demand-chip--manual': param.mode === 'manual' }">
+              <button
+                v-for="param in smartControlParams"
+                :key="param.key"
+                type="button"
+                class="smart-demand-chip"
+                :class="{ 'smart-demand-chip--manual': param.mode === 'manual' }"
+                @click="toggleSmartParamMode(param.key)"
+              >
                 <div>
                   <strong>{{ param.label }}</strong>
                   <span>{{ param.mode === 'manual' ? '手动' : '自动' }}</span>
                 </div>
                 <b :style="{ color: param.mode === 'manual' ? '#C26A1B' : param.color }">{{ param.value }}%</b>
-              </article>
-            </div>
-            <div class="smart-control-toggle-row">
-              <button type="button" class="toggle-switch" :class="{ 'toggle-switch--on': smartControlEnabled }" @click="setSmartControlEnabled(!smartControlEnabled)">
-                <span>停止</span><span>托管</span><i></i>
-              </button>
-              <button class="primary-button" type="button" @click="setAllSmartParamsAuto">
-                <RefreshCw :size="18" />
-                一键自动
               </button>
             </div>
             <div v-if="smartControlPanelOpen" class="smart-param-panel">
@@ -1486,7 +1846,7 @@ onBeforeUnmount(() => {
           <section class="panel">
             <div class="section-heading">
               <h2>远程设备控制</h2>
-              <span>按钮会生成统一命令 JSON 并更新端侧执行状态</span>
+              <span>查看并切换现场设备运行状态</span>
             </div>
             <div class="control-grid">
               <article class="control-card">
@@ -1538,7 +1898,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="command-list">
               <article v-for="result in commandResults" :key="result.executed_at">
-                <code>{{ result.command.command }}</code>
+                <strong>{{ commandActionText(result.command) }}</strong>
                 <span>{{ commandResultText(result) }}</span>
                 <time>{{ formatDateTime(result.executed_at) }}</time>
               </article>
@@ -1654,51 +2014,6 @@ onBeforeUnmount(() => {
       </template>
     </main>
 
-      <aside v-if="activeView === 'realtime' && selectedMetricCard && selectedMetricDefinition" class="metric-drawer">
-        <div class="metric-drawer__header">
-          <div>
-            <span :style="{ color: selectedMetricCard.color }">{{ selectedMetricCard.statusLabel }}</span>
-            <h2>{{ selectedMetricCard.title }}</h2>
-          </div>
-          <button class="icon-button" type="button" title="关闭" @click="closeMetricDrawer">
-            <X :size="18" />
-          </button>
-        </div>
-
-        <section class="metric-drawer__value">
-          <component :is="selectedMetricCard.icon" :size="30" :style="{ color: selectedMetricCard.color }" />
-          <strong>{{ selectedMetricCard.value }}</strong>
-          <span>{{ selectedMetricCard.unit }}</span>
-        </section>
-
-        <section class="target-editor">
-          <div class="section-heading">
-            <h2>目标区间</h2>
-            <span>{{ selectedMetricCard.targetText }}</span>
-          </div>
-          <div class="target-editor__inputs">
-            <label>
-              <span>下限</span>
-              <input v-model="targetMinDraft" type="number" step="0.01" />
-            </label>
-            <label>
-              <span>上限</span>
-              <input v-model="targetMaxDraft" type="number" step="0.01" />
-            </label>
-          </div>
-          <p v-if="targetRangeError" class="form-error">{{ targetRangeError }}</p>
-          <button class="primary-button" type="button" @click="saveMetricTargetRange">
-            <Save :size="18" />
-            保存目标
-          </button>
-        </section>
-
-        <EChartPanel
-          :title="`${selectedMetricDefinition.name}趋势`"
-          :option="selectedMetricChartOption"
-          :active="Boolean(selectedMetricKey)"
-        />
-      </aside>
 
       <aside v-if="assistantOpen" class="assistant-panel">
         <div class="assistant-panel__header">
