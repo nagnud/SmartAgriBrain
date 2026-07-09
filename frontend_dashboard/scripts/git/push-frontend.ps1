@@ -1,6 +1,6 @@
 param(
   [string] $Message,
-  [int] $MaxNetworkAttempts = 8,
+  [int] $MaxNetworkAttempts = 3,
   [switch] $DryRun,
   [switch] $ValidateOnly
 )
@@ -21,6 +21,7 @@ $credentialPath = Join-Path $PSScriptRoot $credentialFileName
 $askPassRoot = $null
 $askPassScript = $null
 $askPassCommand = $null
+$networkCommandTimeoutSeconds = 25
 
 function Write-Step {
   param([string] $Text)
@@ -36,7 +37,7 @@ function Write-Info {
 function Test-TransientGitNetworkError {
   param([string] $Message)
 
-  return $Message -match "Recv failure|Connection was reset|Connection reset|Failed to connect|Couldn't connect|timed out|Could not resolve host|curl 28|curl 35|curl 56|HTTP/2 stream|SSL_read|SSL_ERROR_SYSCALL|schannel|RPC failed|early EOF|remote end hung up|Operation timed out|The requested URL returned error: 408|The requested URL returned error: 429|The requested URL returned error: 5\d\d"
+  return $Message -match "timed out after|Operation too slow|Less than \d+ bytes/sec|Recv failure|Connection was reset|Connection reset|Failed to connect|Couldn't connect|timed out|Could not resolve host|curl 28|curl 35|curl 56|HTTP/2 stream|SSL_read|SSL_ERROR_SYSCALL|schannel|RPC failed|early EOF|remote end hung up|Operation timed out|The requested URL returned error: 408|The requested URL returned error: 429|The requested URL returned error: 5\d\d"
 }
 
 function Test-NonFastForwardError {
@@ -52,13 +53,94 @@ function Get-RetryDelaySeconds {
   return [int]$delay
 }
 
+function ConvertTo-CommandLineArgument {
+  param([Parameter(Mandatory = $true)][AllowEmptyString()][string] $Value)
+
+  if ($Value -notmatch '[\s"]') {
+    return $Value
+  }
+
+  $escaped = $Value -replace '\\(?=\\*")', '$0$0'
+  $escaped = $escaped -replace '"', '\"'
+  $escaped = $escaped -replace '(\\+)$', '$1$1'
+  return '"' + $escaped + '"'
+}
+
+function Stop-ProcessTree {
+  param([Parameter(Mandatory = $true)][int] $ProcessId)
+
+  $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue
+  foreach ($child in $children) {
+    Stop-ProcessTree -ProcessId $child.ProcessId
+  }
+  Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-GitProcessCaptured {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]] $Arguments,
+
+    [string] $WorkingDirectory,
+
+    [Parameter(Mandatory = $true)]
+    [int] $TimeoutSeconds
+  )
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo.FileName = "git"
+  $process.StartInfo.Arguments = ($Arguments | ForEach-Object { ConvertTo-CommandLineArgument -Value $_ }) -join " "
+  if ($WorkingDirectory) {
+    $process.StartInfo.WorkingDirectory = $WorkingDirectory
+  }
+  $process.StartInfo.UseShellExecute = $false
+  $process.StartInfo.RedirectStandardOutput = $true
+  $process.StartInfo.RedirectStandardError = $true
+  $process.StartInfo.CreateNoWindow = $true
+
+  [void]$process.Start()
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
+  $finished = $process.WaitForExit($TimeoutSeconds * 1000)
+
+  if (-not $finished) {
+    Stop-ProcessTree -ProcessId $process.Id
+    $timeoutMessage = "Git command timed out after ${TimeoutSeconds}s: git $($Arguments -join ' ')"
+    return [pscustomobject]@{
+      ExitCode = 124
+      Output = @($timeoutMessage)
+    }
+  }
+
+  $stdout = $stdoutTask.Result
+  $stderr = $stderrTask.Result
+  $output = @()
+  if ($stdout) {
+    $output += ($stdout -split "`r?`n" | Where-Object { $_ -ne "" })
+  }
+  if ($stderr) {
+    $output += ($stderr -split "`r?`n" | Where-Object { $_ -ne "" })
+  }
+
+  [pscustomobject]@{
+    ExitCode = $process.ExitCode
+    Output = @($output)
+  }
+}
+
 function Invoke-GitCaptured {
   param(
     [Parameter(Mandatory = $true)]
     [string[]] $Arguments,
 
-    [string] $WorkingDirectory
+    [string] $WorkingDirectory,
+
+    [int] $TimeoutSeconds = 0
   )
+
+  if ($TimeoutSeconds -gt 0) {
+    return Invoke-GitProcessCaptured -Arguments $Arguments -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds
+  }
 
   $previousLocation = Get-Location
   $previousErrorActionPreference = $ErrorActionPreference
@@ -110,7 +192,11 @@ function Invoke-GitChecked {
   $lastResult = $null
   $safeAttempts = [Math]::Max(1, $Attempts)
   for ($attempt = 1; $attempt -le $safeAttempts; $attempt++) {
-    $lastResult = Invoke-GitCaptured -Arguments $gitArguments -WorkingDirectory $WorkingDirectory
+    $timeout = 0
+    if ($Network) {
+      $timeout = $networkCommandTimeoutSeconds
+    }
+    $lastResult = Invoke-GitCaptured -Arguments $gitArguments -WorkingDirectory $WorkingDirectory -TimeoutSeconds $timeout
     $message = ($lastResult.Output | Out-String).Trim()
 
     if ($lastResult.ExitCode -eq 0) {
