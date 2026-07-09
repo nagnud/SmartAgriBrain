@@ -11,14 +11,20 @@
 
 平时双击 `scripts/web/start-web.bat` 即可启动网页。
 
-## api
+## backend
 
-用于启动本地 FastAPI 后端，提供 AI 助手文字对话和语音识别接口。
+用于启动本地 FastAPI 后端，提供 AI 农事建议、AI 助手文字对话和语音识别接口。
 
-- `scripts/api/start-api.bat`
-- `scripts/api/start-api.ps1`
+- `scripts/backend/start-backend.bat`
+- `scripts/backend/start-backend.ps1`
 
-首次启动会自动创建 `backend_api/.venv` 并安装依赖。真实语音识别需要在 `backend_api/.env` 中填写：
+首次启动会自动创建 `backend_api/.venv` 并安装依赖。真实 AI 农事建议和 AI 助手问答需要在 `backend_api/.env` 中填写：
+
+```text
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+```
+
+真实语音识别需要填写：
 
 ```text
 SPEECH_TRANSCRIBE_API_KEY=你的语音识别 API Key

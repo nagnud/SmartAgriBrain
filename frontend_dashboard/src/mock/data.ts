@@ -1,5 +1,4 @@
 import type {
-  AiAnalysisResponse,
   ChatMessage,
   CommandResult,
   DeviceCommand,
@@ -90,40 +89,6 @@ export function buildMockHistory(): HistoryPoint[] {
       soil_ec: rounded(1.75 + Math.cos(phase / 2) * 0.35, 2),
     };
   });
-}
-
-export function buildMockAiAnalysis(latest: TelemetryPayload): AiAnalysisResponse {
-  const tempHigh = latest.sensors.temperature >= 28.5;
-  const humidityHigh = latest.sensors.humidity >= 68;
-  const lightLow = latest.sensors.light < 15000;
-  const co2Low = latest.sensors.co2 < 560;
-  const soilWet = latest.sensors.soil_moisture > 64;
-  const risk = humidityHigh || soilWet ? 'medium' : tempHigh || lightLow || co2Low ? 'medium' : 'low';
-  return {
-    device_id: latest.device_id,
-    crop: 'tomato',
-    risk_level: risk,
-    summary: humidityHigh
-      ? '当前湿度偏高，番茄叶面结露和霜霉病风险上升，建议优先通风降湿。'
-      : '当前大棚环境整体稳定，可继续保持自动巡检和轻量通风策略。',
-    basis: [
-      `空气湿度 ${latest.sensors.humidity}%RH，土壤湿度 ${latest.sensors.soil_moisture}%`,
-      `光照 ${latest.sensors.light} lux，CO2 ${latest.sensors.co2} ppm`,
-      '知识库规则：高湿与通风不足会提高番茄病害发生概率',
-    ],
-    suggestions: [
-      humidityHigh ? '开启风机 10 分钟，降低棚内湿度并减少叶面结露。' : '保持当前通风节奏，继续观察湿度曲线。',
-      lightLow ? '光照不足，可开启补光灯并保持卷帘打开。' : '光照处于可用区间，避免长时间强补光。',
-      soilWet ? '土壤湿度偏高，暂停水泵并观察 2 小时。' : '土壤湿度适中，维持小水量精准灌溉。',
-      co2Low ? 'CO2 偏低，可在通风后短时补充气肥。' : 'CO2 浓度稳定，暂不需要额外干预。',
-    ],
-    commands: [
-      ...(humidityHigh ? [{ command: 'fan_on', value: 1 }] : []),
-      ...(lightLow ? [{ command: 'light_on', value: 1 }, { command: 'curtain_open', value: 1 }] : []),
-      ...(soilWet ? [{ command: 'pump_off', value: 0 }] : []),
-    ],
-    updated_at: Date.now(),
-  };
 }
 
 export function buildMockWeather(): WeatherPayload {

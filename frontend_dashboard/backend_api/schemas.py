@@ -8,6 +8,40 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class AiCommand(BaseModel):
+    command: str
+    value: int
+
+
+class AiRiskFactor(BaseModel):
+    key: str
+    label: str
+    detail: str
+    state: Literal["good", "watch", "danger", "neutral"] = "watch"
+
+
+class FarmAdviceRequest(BaseModel):
+    device_id: str = Field(..., min_length=1)
+    crop: str = "tomato"
+    sensors: Dict[str, Any] = Field(default_factory=dict)
+    status: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FarmAdviceResponse(BaseModel):
+    device_id: str
+    crop: str
+    ai_connected: bool = True
+    risk_level: Literal["low", "medium", "high"]
+    risk_score: int = Field(default=0, ge=0, le=100)
+    risk_status: str = "较稳定"
+    risk_factors: List[AiRiskFactor] = Field(default_factory=list)
+    summary: str
+    suggestions: List[str] = Field(default_factory=list)
+    commands: List[AiCommand] = Field(default_factory=list)
+    basis: List[str] = Field(default_factory=list)
+    updated_at: int
+
+
 class KnowledgeReference(BaseModel):
     itemId: int
     chunkId: int

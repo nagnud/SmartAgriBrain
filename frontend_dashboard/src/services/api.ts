@@ -1,7 +1,6 @@
 import {
   addMockKnowledgeItem,
   analyzeMockKnowledge,
-  buildMockAiAnalysis,
   buildMockDiseaseDetection,
   buildMockExpertChat,
   buildMockWeather,
@@ -41,6 +40,9 @@ const useMock = import.meta.env.VITE_USE_MOCK !== 'false';
 const useMockAssistant = import.meta.env.VITE_USE_MOCK_ASSISTANT === undefined
   ? useMock
   : import.meta.env.VITE_USE_MOCK_ASSISTANT !== 'false';
+const useMockAiAdvice = import.meta.env.VITE_USE_MOCK_AI_ADVICE === undefined
+  ? useMock
+  : import.meta.env.VITE_USE_MOCK_AI_ADVICE !== 'false';
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -54,6 +56,30 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<T>;
+}
+
+function buildDisconnectedAiAnalysis(latest: TelemetryPayload, detail = 'AI 服务暂时不可用。'): AiAnalysisResponse {
+  return {
+    device_id: latest.device_id,
+    crop: 'tomato',
+    ai_connected: false,
+    risk_level: 'low',
+    risk_score: 0,
+    risk_status: 'AI 未连接',
+    risk_factors: [
+      {
+        key: 'ai_disconnected',
+        label: 'AI 未连接',
+        detail,
+        state: 'neutral',
+      },
+    ],
+    summary: 'AI 未连接，暂时无法生成风险指数和农事建议。',
+    suggestions: ['请检查 DeepSeek API Key、后端服务和网络连接后重新生成 AI 分析。'],
+    commands: [],
+    basis: ['未连接 AI 服务，本次未生成 AI 分析结果。'],
+    updated_at: Date.now(),
+  };
 }
 
 export async function getLatestTelemetry(): Promise<TelemetryPayload> {
@@ -78,18 +104,23 @@ export async function getDeviceStatus(): Promise<TelemetryPayload['status']> {
 }
 
 export async function analyzeFarm(latest: TelemetryPayload): Promise<AiAnalysisResponse> {
-  if (useMock) {
-    return buildMockAiAnalysis(latest);
+  if (useMockAiAdvice) {
+    return buildDisconnectedAiAnalysis(latest, '当前前端配置为不请求 AI 农事建议接口。');
   }
-  return requestJson<AiAnalysisResponse>('/api/ai/analyze', {
-    method: 'POST',
-    body: JSON.stringify({
-      device_id: latest.device_id,
-      crop: 'tomato',
-      sensors: latest.sensors,
-      status: latest.status,
-    }),
-  });
+  try {
+    return await requestJson<AiAnalysisResponse>('/api/ai/analyze', {
+      method: 'POST',
+      body: JSON.stringify({
+        device_id: latest.device_id,
+        crop: 'tomato',
+        sensors: latest.sensors,
+        status: latest.status,
+      }),
+    });
+  } catch (error) {
+    console.warn('AI farm advice API unavailable.', error);
+    return buildDisconnectedAiAnalysis(latest, 'AI 农事建议接口不可用，请检查后端服务。');
+  }
 }
 
 export async function sendDeviceCommand(command: DeviceCommand): Promise<CommandResult> {

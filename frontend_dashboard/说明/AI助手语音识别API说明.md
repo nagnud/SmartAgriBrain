@@ -5,7 +5,7 @@
 双击：
 
 ```text
-scripts\api\start-api.bat
+scripts\backend\start-backend.bat
 ```
 
 后端默认启动在：

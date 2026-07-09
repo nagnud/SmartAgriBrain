@@ -13,6 +13,7 @@ Set-Location -LiteralPath $apiRoot
 if (-not (Test-Path -LiteralPath $envPath)) {
   Copy-Item -LiteralPath $envExamplePath -Destination $envPath
   Write-Host "Created backend_api\.env from .env.example."
+  Write-Host "Set DEEPSEEK_API_KEY in backend_api\.env to enable real AI farm advice and assistant chat."
   Write-Host "Set SPEECH_TRANSCRIBE_API_KEY or OPENAI_API_KEY in backend_api\.env to enable real voice transcription."
 }
 

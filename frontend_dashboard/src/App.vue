@@ -166,6 +166,13 @@ interface SmartControlParamVm {
   autoValue: number;
 }
 
+interface AiRiskFactor {
+  key: string;
+  label: string;
+  detail: string;
+  state: StatusLevel;
+}
+
 interface MetricEditorRect {
   left: number;
   top: number;
@@ -219,6 +226,12 @@ const chatImageUrl = ref('');
 const chatImageFileName = ref('');
 const chatSending = ref(false);
 const assistantOpen = ref(false);
+const defaultAssistantWidth = 460;
+const minAssistantWidth = 360;
+const minWorkspaceWidth = 640;
+const maxAssistantViewportRatio = 0.55;
+const assistantWidth = ref(defaultAssistantWidth);
+const assistantResizing = ref(false);
 const assistantMessagesRef = ref<HTMLElement | null>(null);
 const assistantAtBottom = ref(true);
 const assistantShowScrollButton = ref(false);
@@ -363,11 +376,159 @@ const overviewMetricCards = computed(() => metricCards.value.map((metric) => ({
 
 const realtimeMetricCards = computed(() => metricCards.value);
 
+function clampRiskScore(value: unknown): number {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function riskScoreState(score: number): StatusLevel {
+  if (score >= 70) {
+    return 'danger';
+  }
+  if (score >= 35) {
+    return 'watch';
+  }
+  return 'good';
+}
+
+function analysisStatusLabel(analysis: AiAnalysisResponse | null): string {
+  if (!analysis) {
+    return '等待 AI';
+  }
+  if (analysis.ai_connected === false) {
+    return 'AI 未连接';
+  }
+  return analysis.risk_status || riskLabel(analysis.risk_level);
+}
+
+function analysisStatusState(analysis: AiAnalysisResponse | null): StatusLevel {
+  if (!analysis || analysis.ai_connected === false) {
+    return 'neutral';
+  }
+  if (typeof analysis.risk_score === 'number') {
+    return riskScoreState(analysis.risk_score);
+  }
+  return analysis.risk_level === 'low' ? 'good' : analysis.risk_level === 'medium' ? 'watch' : 'danger';
+}
+
+const aiRiskScore = computed(() => {
+  if (!latest.value || realtimeMetricCards.value.length === 0) {
+    return 0;
+  }
+  if (typeof aiAnalysis.value?.risk_score === 'number') {
+    return clampRiskScore(aiAnalysis.value.risk_score);
+  }
+
+  const metricScore = realtimeMetricCards.value.reduce((total, metric) => {
+    if (metric.state === 'good') {
+      return total + 2;
+    }
+    const range = metricTargetRanges.value[metric.key];
+    const span = Math.max(range.max - range.min, 1);
+    const distance = metric.currentValue < range.min
+      ? range.min - metric.currentValue
+      : Math.max(metric.currentValue - range.max, 0);
+    const severity = Math.min(distance / span, 1);
+    return total + (metric.state === 'danger' ? 18 : 14) + severity * 22;
+  }, 0);
+
+  const analysisFloor = aiAnalysis.value?.risk_level === 'high'
+    ? 82
+    : aiAnalysis.value?.risk_level === 'medium'
+      ? 54
+      : aiAnalysis.value?.risk_level === 'low'
+        ? 18
+        : 0;
+
+  return Math.min(100, Math.round(Math.max(metricScore, analysisFloor)));
+});
+
+const aiRiskStatus = computed<{ label: string; state: StatusLevel }>(() => {
+  if (!latest.value) {
+    return { label: '等待数据', state: 'neutral' };
+  }
+  if (aiAnalysis.value?.ai_connected === false) {
+    return { label: 'AI 未连接', state: 'neutral' };
+  }
+  if (aiAnalysis.value?.risk_status && typeof aiAnalysis.value.risk_score === 'number') {
+    return {
+      label: aiAnalysis.value.risk_status,
+      state: riskScoreState(aiRiskScore.value),
+    };
+  }
+  if (aiRiskScore.value >= 70) {
+    return { label: '高风险', state: 'danger' };
+  }
+  if (aiRiskScore.value >= 35) {
+    return { label: '需关注', state: 'watch' };
+  }
+  return { label: '较稳定', state: 'good' };
+});
+
+const aiRiskSummary = computed(() => {
+  if (!latest.value) {
+    return '等待实时采样数据。';
+  }
+  if (aiAnalysis.value?.summary && typeof aiAnalysis.value.risk_score === 'number') {
+    return aiAnalysis.value.summary;
+  }
+  if (aiRiskScore.value >= 70) {
+    return '多项指标偏离明显，请优先处理高风险项。';
+  }
+  if (aiRiskScore.value >= 35) {
+    return '部分指标偏离目标，建议小幅调整并复查。';
+  }
+  return '当前环境整体平稳，保持现有策略并继续观察。';
+});
+
+const aiRiskFactors = computed<AiRiskFactor[]>(() => {
+  const apiFactors = aiAnalysis.value?.risk_factors;
+  if (apiFactors && apiFactors.length > 0) {
+    return apiFactors.slice(0, 3).map((factor, index) => ({
+      key: factor.key || `api-factor-${index}`,
+      label: factor.label,
+      detail: factor.detail,
+      state: factor.state,
+    }));
+  }
+
+  const factors = realtimeMetricCards.value
+    .filter((metric) => metric.state !== 'good')
+    .map((metric) => ({
+      key: metric.key,
+      label: metric.title,
+      detail: `${metric.statusLabel}，${metric.hint}`,
+      state: metric.state === 'danger' ? 'danger' as const : 'watch' as const,
+    }))
+    .sort((left, right) => {
+      const weight = { danger: 2, watch: 1, good: 0, neutral: 0 };
+      return weight[right.state] - weight[left.state];
+    })
+    .slice(0, 3);
+
+  if (factors.length > 0) {
+    return factors;
+  }
+
+  return [{
+    key: 'stable',
+    label: '环境稳定',
+    detail: '关键指标在目标范围内',
+    state: 'good',
+  }];
+});
+
 const selectedMetricDefinition = computed(() => historyMetricDefinitions.find((metric) => metric.key === selectedMetricKey.value) ?? null);
 const selectedMetricInputStep = computed(() => selectedMetricKey.value ? metricTargetInputSteps[selectedMetricKey.value] : 0.01);
 
 const contentLayoutClass = computed(() => ({
   'content-layout--assistant-open': assistantOpen.value,
+}));
+
+const contentLayoutStyle = computed<Record<string, string>>(() => ({
+  '--assistant-width': `${assistantWidth.value}px`,
 }));
 
 const smartControlParams = computed<SmartControlParamVm[]>(() => smartControlParamKeys.map((key) => {
@@ -437,7 +598,10 @@ function metricChartOptionFor(metric: HistoryMetricDefinition | null): EChartsOp
   };
 }
 
-const historyChartOption = computed<EChartsOption>(() => {
+const overviewChartOption = computed<EChartsOption>(() => buildMultiMetricChartOption(false));
+const historyChartOption = computed<EChartsOption>(() => buildMultiMetricChartOption(true));
+
+function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
   const labels = historyPoints.value.map((point) => formatTime(point.timestamp));
   const selectedDefinitions = historyMetricDefinitions.filter((item) => selectedHistoryMetricKeys.value.includes(item.key));
   const selectedCount = selectedDefinitions.length;
@@ -445,7 +609,11 @@ const historyChartOption = computed<EChartsOption>(() => {
   const rightAxisCount = selectedDefinitions.length - leftAxisCount;
   const axisSpacing = selectedCount >= 7 ? 76 : selectedCount >= 5 ? 68 : 60;
   return {
-    tooltip: { trigger: 'axis' },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'line' },
+      triggerOn: 'mousemove',
+    },
     legend: { show: false },
     grid: {
       left: Math.max(86, 86 + Math.max(0, leftAxisCount - 1) * axisSpacing),
@@ -482,15 +650,22 @@ const historyChartOption = computed<EChartsOption>(() => {
       name: definition.name,
       type: 'line',
       smooth: true,
+      showSymbol: showSymbols,
+      symbol: 'circle',
+      symbolSize: showSymbols ? 6 : 8,
       yAxisIndex: index,
       data: historyPoints.value.map(definition.value),
       color: definition.color,
       lineStyle: { width: 3, color: definition.color },
-      itemStyle: { color: definition.color },
-      emphasis: { focus: 'series' },
+      itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2 },
+      emphasis: {
+        focus: 'series',
+        scale: 1.18,
+        itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2 },
+      },
     })),
   };
-});
+}
 
 function historyAxisRange(values: number[]): { min: number; max: number } {
   if (values.length === 0) {
@@ -860,6 +1035,71 @@ function saveMetricTargetRange(): void {
   syncSmartControlValues();
 }
 
+function clampAssistantWidth(width: number): number {
+  if (typeof window === 'undefined') {
+    return Math.min(Math.max(width, minAssistantWidth), defaultAssistantWidth);
+  }
+  const maxByViewport = window.innerWidth * maxAssistantViewportRatio;
+  const maxByWorkspace = window.innerWidth - minWorkspaceWidth;
+  const maxWidth = Math.max(minAssistantWidth, Math.min(maxByViewport, maxByWorkspace));
+  return Math.min(Math.max(width, minAssistantWidth), maxWidth);
+}
+
+function requestAssistantLayoutResize(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    window.dispatchEvent(new Event('resize'));
+  });
+}
+
+function handleAssistantResizeMove(event: PointerEvent): void {
+  if (!assistantResizing.value) {
+    return;
+  }
+  assistantWidth.value = clampAssistantWidth(window.innerWidth - event.clientX);
+  requestAssistantLayoutResize();
+}
+
+function stopAssistantResize(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.removeEventListener('pointermove', handleAssistantResizeMove);
+  window.removeEventListener('pointerup', stopAssistantResize);
+  window.removeEventListener('pointercancel', stopAssistantResize);
+  document.body.classList.remove('is-resizing-assistant');
+  if (assistantResizing.value) {
+    assistantResizing.value = false;
+    requestAssistantLayoutResize();
+  }
+}
+
+function startAssistantResize(event: PointerEvent): void {
+  if (typeof window === 'undefined' || window.innerWidth <= 1380) {
+    return;
+  }
+  event.preventDefault();
+  assistantResizing.value = true;
+  document.body.classList.add('is-resizing-assistant');
+  assistantWidth.value = clampAssistantWidth(window.innerWidth - event.clientX);
+  window.addEventListener('pointermove', handleAssistantResizeMove);
+  window.addEventListener('pointerup', stopAssistantResize);
+  window.addEventListener('pointercancel', stopAssistantResize);
+  requestAssistantLayoutResize();
+}
+
+function resetAssistantWidth(): void {
+  assistantWidth.value = clampAssistantWidth(defaultAssistantWidth);
+  requestAssistantLayoutResize();
+}
+
+function handleAssistantViewportResize(): void {
+  assistantWidth.value = clampAssistantWidth(assistantWidth.value);
+  requestAssistantLayoutResize();
+}
+
 watch(activeView, (view) => {
   if (view !== 'realtime') {
     closeMetricEditor();
@@ -911,16 +1151,32 @@ async function loadDashboard(isBackground = false): Promise<void> {
   try {
     const nextLatest = await getLatestTelemetry();
     latest.value = nextLatest;
-    const [nextHistory, nextAi, nextAlarms, nextWeather] = await Promise.all([
+    const [historyResult, aiResult, alarmsResult, weatherResult] = await Promise.allSettled([
       getDeviceHistory(),
       analyzeFarm(nextLatest),
       getAlarmRecords(),
       getCurrentWeather(),
     ]);
-    historyPoints.value = nextHistory;
-    aiAnalysis.value = nextAi;
-    alarms.value = nextAlarms;
-    currentWeather.value = nextWeather;
+    if (historyResult.status === 'fulfilled') {
+      historyPoints.value = historyResult.value;
+    } else {
+      console.warn('History data failed to load.', historyResult.reason);
+    }
+    if (aiResult.status === 'fulfilled') {
+      aiAnalysis.value = aiResult.value;
+    } else {
+      console.warn('AI analysis failed to load.', aiResult.reason);
+    }
+    if (alarmsResult.status === 'fulfilled') {
+      alarms.value = alarmsResult.value;
+    } else {
+      console.warn('Alarm records failed to load.', alarmsResult.reason);
+    }
+    if (weatherResult.status === 'fulfilled') {
+      currentWeather.value = weatherResult.value;
+    } else {
+      console.warn('Weather data failed to load.', weatherResult.reason);
+    }
     syncSmartControlValues();
   } finally {
     loading.value = false;
@@ -1988,6 +2244,7 @@ async function runKnowledgeAnalysis(): Promise<void> {
 onMounted(() => {
   void loadDashboard();
   void refreshKnowledge();
+  window.addEventListener('resize', handleAssistantViewportResize);
   chatMessages.value = [
     {
       id: 'assistant-welcome',
@@ -2002,6 +2259,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopAssistantResize();
+  window.removeEventListener('resize', handleAssistantViewportResize);
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
   }
@@ -2061,7 +2320,7 @@ onBeforeUnmount(() => {
       </button>
     </aside>
 
-    <div class="content-layout" :class="contentLayoutClass">
+    <div class="content-layout" :class="contentLayoutClass" :style="contentLayoutStyle">
     <main class="workspace">
       <header class="topbar">
         <div>
@@ -2120,7 +2379,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="two-column">
-            <EChartPanel title="近 6 小时环境趋势" :option="historyChartOption" :active="activeView === 'overview'">
+            <EChartPanel title="近 6 小时环境趋势" :option="overviewChartOption" :active="activeView === 'overview'">
               <template #toolbar>
                 <div class="history-selector" aria-label="历史曲线变量选择">
                   <button
@@ -2141,8 +2400,8 @@ onBeforeUnmount(() => {
                 <h2>AI 摘要</h2>
                 <StatusPill
                   v-if="aiAnalysis"
-                  :label="riskLabel(aiAnalysis.risk_level)"
-                  :state="aiAnalysis.risk_level === 'low' ? 'good' : aiAnalysis.risk_level === 'medium' ? 'watch' : 'danger'"
+                  :label="analysisStatusLabel(aiAnalysis)"
+                  :state="analysisStatusState(aiAnalysis)"
                 />
               </div>
               <p class="summary-text">{{ aiAnalysis?.summary }}</p>
@@ -2195,27 +2454,30 @@ onBeforeUnmount(() => {
               </article>
             </div>
 
-            <section class="panel ai-trend-panel">
+            <section class="panel ai-risk-panel">
               <div class="section-heading">
-                <h2>AI 分析曲线</h2>
-                <span>智能判断</span>
+                <h2>AI 风险指数</h2>
+                <StatusPill :label="aiRiskStatus.label" :state="aiRiskStatus.state" />
               </div>
-              <div class="ai-trend-mock">
-                <i v-for="metric in realtimeMetricCards.slice(0, 7)" :key="metric.key" :style="{ height: `${36 + Math.abs(metric.currentValue % 54)}px`, background: metric.color }"></i>
+              <div class="ai-risk-content">
+                <div class="ai-risk-score" :class="`ai-risk-score--${aiRiskStatus.state}`">
+                  <span>当前风险</span>
+                  <div>
+                    <strong>{{ aiRiskScore }}</strong>
+                    <em>/100</em>
+                  </div>
+                  <i><b :style="{ width: `${aiRiskScore}%` }"></b></i>
+                </div>
+                <div class="ai-risk-detail">
+                  <p>{{ aiRiskSummary }}</p>
+                  <ul>
+                    <li v-for="factor in aiRiskFactors" :key="factor.key" :class="`ai-risk-factor--${factor.state}`">
+                      <span>{{ factor.label }}</span>
+                      <em>{{ factor.detail }}</em>
+                    </li>
+                  </ul>
+                </div>
               </div>
-              <p class="summary-text">结合当前环境指标展示异常概率、调控建议强度和病害风险趋势参考。</p>
-            </section>
-            <section class="panel sensor-table">
-              <div class="section-heading">
-                <h2>传感器原始值</h2>
-                <span>查看设备最新采样明细</span>
-              </div>
-              <dl>
-                <div><dt>温度 / 湿度</dt><dd>{{ latest.sensors.temperature }} 摄氏度 / {{ latest.sensors.humidity }} %RH</dd></div>
-                <div><dt>光照 / CO2</dt><dd>{{ latest.sensors.light }} lux / {{ latest.sensors.co2 }} ppm</dd></div>
-                <div><dt>土壤湿度 / 土壤 EC</dt><dd>{{ latest.sensors.soil_moisture }} % / {{ latest.sensors.soil_ec }} mS/cm</dd></div>
-                <div><dt>气压 / 空气质量</dt><dd>{{ latest.sensors.pressure }} kPa / {{ latest.sensors.gas_resistance }} Ω</dd></div>
-              </dl>
             </section>
           </template>
 
@@ -2400,8 +2662,8 @@ onBeforeUnmount(() => {
               <h2>AI 农事建议</h2>
               <StatusPill
                 v-if="aiAnalysis"
-                :label="riskLabel(aiAnalysis.risk_level)"
-                :state="aiAnalysis.risk_level === 'low' ? 'good' : aiAnalysis.risk_level === 'medium' ? 'watch' : 'danger'"
+                :label="analysisStatusLabel(aiAnalysis)"
+                :state="analysisStatusState(aiAnalysis)"
               />
             </div>
             <p class="summary-text">{{ aiAnalysis?.summary }}</p>
@@ -2668,6 +2930,18 @@ onBeforeUnmount(() => {
     </main>
 
 
+      <div
+        v-if="assistantOpen"
+        class="assistant-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整 AI 助手宽度"
+        title="拖动调整宽度，双击恢复默认"
+        @pointerdown="startAssistantResize"
+        @dblclick="resetAssistantWidth"
+      >
+        <span class="assistant-resizer__tip">拖动调整宽度，双击恢复默认</span>
+      </div>
       <aside v-if="assistantOpen" class="assistant-panel">
         <div class="assistant-panel__header">
           <div>

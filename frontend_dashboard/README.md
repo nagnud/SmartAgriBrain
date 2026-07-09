@@ -57,13 +57,27 @@ VITE_USE_MOCK=false
 VITE_USE_MOCK_ASSISTANT=false
 ```
 
-如果只想让 AI 助手真实接入、其他遥测/设备/视觉功能继续使用 Mock，可以保持：
+如果只想让 AI 助手和 AI 农事建议真实接入、其他遥测/设备/视觉功能继续使用 Mock，可以保持：
 
 ```env
 VITE_API_BASE_URL=http://localhost:8000
 VITE_USE_MOCK=true
 VITE_USE_MOCK_ASSISTANT=false
+VITE_USE_MOCK_AI_ADVICE=false
 ```
+
+如果只想让专家问答接入后端、AI 农事建议仍使用前端 Mock，把 `VITE_USE_MOCK_AI_ADVICE` 改回 `true` 即可。
+
+后端 AI 农事建议和专家问答使用 `backend_api/.env` 中的 DeepSeek 配置：
+
+```env
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_TIMEOUT_SECONDS=90
+```
+
+前端的 AI 农事建议接口为 `POST /api/ai/analyze`；后端也兼容 `POST /api/v1/farm/ai/analyze`。
 
 前端预留接口集中在 `src/services/api.ts`：
 

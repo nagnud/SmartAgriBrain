@@ -1,15 +1,15 @@
-import time
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
+from assistant_service import assistant_chat
+from farm_advice_service import analyze_farm_advice
 from schemas import (
-    AssistantChatMessage,
     AssistantChatRequest,
     AssistantChatResponse,
+    FarmAdviceRequest,
+    FarmAdviceResponse,
     HealthResponse,
-    KnowledgeReference,
     VoiceTranscriptionResponse,
     VoiceTranscriptionStatus,
 )
@@ -37,41 +37,19 @@ def health() -> HealthResponse:
     return HealthResponse(ok=True, service="smartagribrain-local-api")
 
 
+@app.post("/api/ai/analyze", response_model=FarmAdviceResponse)
+def post_ai_analyze(payload: FarmAdviceRequest) -> FarmAdviceResponse:
+    return analyze_farm_advice(payload)
+
+
+@app.post("/api/v1/farm/ai/analyze", response_model=FarmAdviceResponse)
+def post_v1_farm_ai_analyze(payload: FarmAdviceRequest) -> FarmAdviceResponse:
+    return analyze_farm_advice(payload)
+
+
 @app.post("/api/v1/assistant/chat", response_model=AssistantChatResponse)
 def post_assistant_chat(payload: AssistantChatRequest) -> AssistantChatResponse:
-    references = [
-        KnowledgeReference(
-            itemId=1,
-            chunkId=1,
-            title="本地农业助手",
-            content="当前为本地后端占位回复。接入大模型后，可在此处调用真实 LLM API，并在执行控制动作前返回待确认操作。",
-            score=0.86,
-        )
-    ]
-    latest = payload.latest or {}
-    sensors = latest.get("sensors", {}) if isinstance(latest, dict) else {}
-    sensor_text = ""
-    if isinstance(sensors, dict) and sensors:
-        sensor_text = (
-            f"\n\n当前环境参考：温度 {sensors.get('temperature', '--')}，"
-            f"湿度 {sensors.get('humidity', '--')}，"
-            f"光照 {sensors.get('light', '--')}，"
-            f"CO2 {sensors.get('co2', '--')}。"
-        )
-
-    content = (
-        "我已经收到你的问题。当前后端已接通，可以处理文字、图片和语音识别后的文本。"
-        "后续接入大模型 API 后，我会根据自然语言生成操作建议；涉及设备控制或目标值修改时，会先让用户确认。"
-        f"{sensor_text}\n\n你的问题：{payload.question}"
-    )
-    message = AssistantChatMessage(
-        id=f"assistant-{int(time.time() * 1000)}",
-        content=content,
-        created_at=int(time.time() * 1000),
-        references=references,
-        suggested_actions=[],
-    )
-    return AssistantChatResponse(message=message, references=references, actions=[])
+    return assistant_chat(payload)
 
 
 @app.get("/api/v1/assistant/voice/status", response_model=VoiceTranscriptionStatus)

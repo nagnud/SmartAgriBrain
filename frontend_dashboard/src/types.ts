@@ -60,6 +60,13 @@ export interface AiCommand {
   value: number;
 }
 
+export interface AiRiskFactor {
+  key: string;
+  label: string;
+  detail: string;
+  state: StatusLevel;
+}
+
 export type AssistantActionType =
   | 'navigate_view'
   | 'open_panel'
@@ -87,7 +94,11 @@ export interface AssistantAction {
 export interface AiAnalysisResponse {
   device_id: string;
   crop: string;
+  ai_connected?: boolean;
   risk_level: 'low' | 'medium' | 'high';
+  risk_score?: number;
+  risk_status?: string;
+  risk_factors?: AiRiskFactor[];
   summary: string;
   suggestions: string[];
   commands: AiCommand[];
