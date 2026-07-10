@@ -38,8 +38,8 @@ import {
   Wind,
   X,
 } from '@lucide/vue';
+import CameraGrowthPanel from './components/CameraGrowthPanel.vue';
 import EChartPanel from './components/EChartPanel.vue';
-import MetricCard from './components/MetricCard.vue';
 import StatusPill from './components/StatusPill.vue';
 import {
   addKnowledgeItem,
@@ -3176,17 +3176,36 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="metric-grid metric-grid--wide">
-            <MetricCard
-              v-for="metric in overviewMetricCards"
-              :key="metric.title"
-              :title="metric.title"
-              :value="metric.value"
-              :unit="metric.unit"
-              :hint="metric.hint"
-              :state="metric.state"
-              :icon="metric.icon"
-            />
+          <div class="overview-live-layout">
+            <CameraGrowthPanel :active="activeView === 'overview'" />
+            <section class="panel overview-metrics-panel">
+              <div class="section-heading">
+                <div>
+                  <h2>参数实际值</h2>
+                  <span>内容与原首页总览保持一致</span>
+                </div>
+              </div>
+              <div class="overview-metric-list">
+                <article
+                  v-for="metric in overviewMetricCards"
+                  :key="metric.title"
+                  :class="['overview-metric-item', `overview-metric-item--${metric.state}`]"
+                >
+                  <div class="overview-metric-item__top">
+                    <span>
+                      <component :is="metric.icon" :size="18" />
+                      {{ metric.title }}
+                    </span>
+                    <strong>{{ metric.statusLabel }}</strong>
+                  </div>
+                  <div class="overview-metric-item__value">
+                    <b>{{ metric.value }}</b>
+                    <em>{{ metric.unit }}</em>
+                  </div>
+                  <p>{{ metric.hint }}</p>
+                </article>
+              </div>
+            </section>
           </div>
 
           <div class="two-column">

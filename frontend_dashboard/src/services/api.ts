@@ -261,6 +261,11 @@ export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise
   return response.json() as Promise<DiseaseDetectionResult>;
 }
 
+export async function analyzeGrowthFrame(file: File, imageUrl: string): Promise<DiseaseDetectionResult> {
+  // Future growth-specific AI API should replace this wrapper without changing the camera UI.
+  return analyzeDiseaseImage(file, imageUrl);
+}
+
 export async function uploadDiseasePhoto(file: File): Promise<DiseasePhotoInfo> {
   const formData = new FormData();
   formData.append('image', file);

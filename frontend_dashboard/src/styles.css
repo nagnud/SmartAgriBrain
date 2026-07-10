@@ -372,6 +372,437 @@ body.is-resizing-assistant * {
   background: #f2faf4;
 }
 
+.overview-live-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.72fr) minmax(360px, 0.42fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.camera-growth-panel {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(30, 42, 34, 0.08);
+}
+
+.camera-growth-panel--fullscreen {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+  padding: 20px;
+  border: 0;
+  border-radius: 0;
+  background: #101b14;
+  box-shadow: none;
+}
+
+.camera-growth-panel__header,
+.growth-analysis-box__status,
+.overview-metric-item__top,
+.overview-metric-item__top span,
+.overview-metric-item__value {
+  display: flex;
+  align-items: center;
+}
+
+.camera-growth-panel__header {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.camera-growth-panel__header span {
+  color: #2c7da0;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.camera-growth-panel__header h2 {
+  margin: 4px 0 0;
+  color: #1e2a22;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.camera-growth-panel--fullscreen .camera-growth-panel__header span,
+.camera-growth-panel--fullscreen .camera-growth-panel__header h2 {
+  color: #eff8f1;
+}
+
+.camera-growth-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.camera-mode-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(72px, 1fr));
+  min-height: 40px;
+  overflow: hidden;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.camera-mode-switch button {
+  min-width: 0;
+  padding: 0 10px;
+  color: #4f5d55;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.camera-mode-switch button.selected {
+  color: #ffffff;
+  background: #2f8f4e;
+}
+
+.camera-growth-panel--fullscreen .camera-mode-switch {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.camera-growth-panel--fullscreen .camera-mode-switch button {
+  color: #eff8f1;
+}
+
+.camera-growth-panel--fullscreen .camera-mode-switch button.selected {
+  color: #17251d;
+  background: #ffffff;
+}
+
+.camera-growth-panel__detail-button {
+  color: #1e2a22;
+  border-color: #ffffff;
+  background: #ffffff;
+}
+
+.camera-stage {
+  position: relative;
+  display: grid;
+  width: min(100%, 920px);
+  justify-self: center;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  cursor: pointer;
+  border: 1px solid #17251d;
+  border-radius: 8px;
+  background: #17251d;
+}
+
+.camera-stage[aria-disabled="true"] {
+  cursor: default;
+}
+
+.camera-growth-panel--fullscreen .camera-stage {
+  width: min(calc(100vw - 40px), 140vh);
+  min-height: 0;
+  height: auto;
+  justify-self: center;
+  align-self: center;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.camera-stage video,
+.camera-analysis-frame {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #17251d;
+}
+
+.camera-stage--analysis {
+  cursor: pointer;
+}
+
+.camera-analysis-frame {
+  display: block;
+}
+
+.camera-stage__placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: 28px;
+  color: #dcebe0;
+  text-align: center;
+  background: #17251d;
+}
+
+.camera-stage__placeholder strong {
+  max-width: min(520px, 100%);
+  line-height: 1.5;
+}
+
+.camera-stage__placeholder span {
+  color: #aebfb4;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.growth-status-badge {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  left: 12px;
+  min-height: 30px;
+  padding: 5px 10px;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 8px;
+  background: rgba(46, 158, 87, 0.92);
+  font-size: 13px;
+  font-weight: 900;
+  box-shadow: 0 8px 18px rgba(23, 37, 29, 0.22);
+}
+
+.growth-status-badge--low {
+  background: rgba(44, 125, 160, 0.92);
+}
+
+.growth-status-badge--medium {
+  background: rgba(214, 140, 31, 0.94);
+}
+
+.growth-status-badge--high {
+  background: rgba(214, 69, 69, 0.94);
+}
+
+.analysis-detect-box {
+  position: absolute;
+  z-index: 2;
+  border: 3px solid #2e9e57;
+  box-shadow: 0 0 0 1px rgba(23, 37, 29, 0.58);
+}
+
+.analysis-detect-box span {
+  position: absolute;
+  left: -3px;
+  top: -30px;
+  min-width: max-content;
+  max-width: 220px;
+  padding: 4px 8px;
+  overflow: hidden;
+  color: #ffffff;
+  border-radius: 6px;
+  background: #2e9e57;
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-detect-box--low {
+  border-color: #2c7da0;
+}
+
+.analysis-detect-box--low span {
+  background: #2c7da0;
+}
+
+.analysis-detect-box--medium {
+  border-color: #d68c1f;
+}
+
+.analysis-detect-box--medium span {
+  background: #d68c1f;
+}
+
+.analysis-detect-box--high {
+  border-color: #d64545;
+}
+
+.analysis-detect-box--high span {
+  background: #d64545;
+}
+
+.camera-growth-panel__canvas {
+  display: none;
+}
+
+.growth-analysis-box {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.camera-growth-panel--fullscreen .growth-analysis-box {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  left: 20px;
+  z-index: 2;
+  max-height: min(34vh, 320px);
+  overflow: auto;
+  color: #dcebe0;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(16, 27, 20, 0.86);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(10px);
+}
+
+.growth-analysis-box__status {
+  justify-content: space-between;
+  gap: 12px;
+  color: #2c7da0;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.growth-analysis-box__status span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.growth-analysis-box__status time {
+  color: #7a857d;
+  font-weight: 700;
+}
+
+.growth-analysis-box strong {
+  color: #1e2a22;
+  line-height: 1.45;
+}
+
+.growth-analysis-box p {
+  margin: 0;
+  color: #4f5d55;
+  line-height: 1.6;
+}
+
+.growth-analysis-box ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+  color: #4f5d55;
+  line-height: 1.55;
+}
+
+.camera-growth-panel--fullscreen .growth-analysis-box strong,
+.camera-growth-panel--fullscreen .growth-analysis-box p,
+.camera-growth-panel--fullscreen .growth-analysis-box ul,
+.camera-growth-panel--fullscreen .growth-analysis-box__status,
+.camera-growth-panel--fullscreen .growth-analysis-box__status time {
+  color: #eff8f1;
+}
+
+.overview-metrics-panel {
+  align-self: stretch;
+}
+
+.overview-metric-list {
+  display: grid;
+  gap: 8px;
+  max-height: 680px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.overview-metric-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  min-height: 78px;
+  padding: 8px 10px;
+  border: 1px solid #d9e2d7;
+  border-left: 4px solid #2e9e57;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.overview-metric-item--watch {
+  border-left-color: #d68c1f;
+}
+
+.overview-metric-item--danger {
+  border-left-color: #d64545;
+}
+
+.overview-metric-item--low {
+  border-left-color: #2c7da0;
+}
+
+.overview-metric-item__top {
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.overview-metric-item__top span {
+  min-width: 0;
+  gap: 6px;
+  color: #4f5d55;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.overview-metric-item__top strong {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  color: #ffffff;
+  border-radius: 8px;
+  background: #2e9e57;
+  font-size: 11px;
+}
+
+.overview-metric-item--watch .overview-metric-item__top strong {
+  background: #d68c1f;
+}
+
+.overview-metric-item--danger .overview-metric-item__top strong {
+  background: #d64545;
+}
+
+.overview-metric-item--low .overview-metric-item__top strong {
+  background: #2c7da0;
+}
+
+.overview-metric-item__value {
+  align-items: baseline;
+  gap: 7px;
+}
+
+.overview-metric-item__value b {
+  color: #1e2a22;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.overview-metric-item__value em {
+  color: #7a857d;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.overview-metric-item p {
+  margin: 0;
+  color: #4f5d55;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2657,11 +3088,17 @@ body.is-resizing-assistant .assistant-resizer::before {
   }
 
   .hero-panel,
+  .overview-live-layout,
   .two-column,
   .disease-layout,
   .knowledge-layout,
   .disease-library-body {
     grid-template-columns: 1fr;
+  }
+
+  .overview-metric-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
   }
 
   .ai-risk-content {
@@ -2722,9 +3159,27 @@ body.is-resizing-assistant .assistant-resizer::before {
   .control-grid,
   .smart-demand-grid,
   .smart-param-panel,
+  .overview-metric-list,
   .suggestion-grid,
   .result-grid {
     grid-template-columns: 1fr;
+  }
+
+  .camera-growth-panel {
+    padding: 14px;
+  }
+
+  .camera-growth-panel--fullscreen {
+    padding: 10px;
+  }
+
+  .camera-stage {
+    min-height: 240px;
+  }
+
+  .growth-analysis-box__status {
+    display: grid;
+    justify-content: stretch;
   }
 
   .modal-backdrop {
