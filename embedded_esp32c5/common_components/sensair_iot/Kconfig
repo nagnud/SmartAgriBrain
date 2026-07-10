@@ -1,0 +1,77 @@
+menu "Sensair IoT"
+
+    config SENSAIR_IOT_ENABLE
+        bool "Enable Sensair telemetry and remote control"
+        default y
+
+    config SENSAIR_DEVICE_ID
+        string "Device ID"
+        default "sensairshuttle_001"
+
+    config SENSAIR_UPLOAD_INTERVAL_MS
+        int "Telemetry interval (milliseconds)"
+        range 1000 3600000
+        default 5000
+
+    config SENSAIR_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+
+    config SENSAIR_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config SENSAIR_SNTP_SERVER
+        string "SNTP server"
+        default "pool.ntp.org"
+
+    config SENSAIR_MQTT_URI
+        string "MQTT broker URI (mqtt:// or mqtts://)"
+        default ""
+
+    config SENSAIR_MQTT_USERNAME
+        string "MQTT username"
+        default ""
+
+    config SENSAIR_MQTT_PASSWORD
+        string "MQTT password"
+        default ""
+
+    config SENSAIR_TOPIC_TELEMETRY
+        string "Telemetry topic"
+        default "devices/sensairshuttle_001/telemetry"
+
+    config SENSAIR_TOPIC_COMMAND
+        string "Command topic"
+        default "devices/sensairshuttle_001/command"
+
+    config SENSAIR_TOPIC_ACK
+        string "Command acknowledgement topic"
+        default "devices/sensairshuttle_001/ack"
+
+    config SENSAIR_TOPIC_STATUS
+        string "Online status topic"
+        default "devices/sensairshuttle_001/status"
+
+    config SENSAIR_FAN_GPIO
+        int "Fan GPIO (-1 keeps a virtual actuator)"
+        range -1 48
+        default -1
+
+    config SENSAIR_PUMP_GPIO
+        int "Pump GPIO (-1 keeps a virtual actuator)"
+        range -1 48
+        default -1
+
+    config SENSAIR_LIGHT_GPIO
+        int "Light GPIO (-1 keeps a virtual actuator)"
+        range -1 48
+        default -1
+
+    config SENSAIR_ALARM_GPIO
+        int "Alarm GPIO (-1 keeps a virtual actuator)"
+        range -1 48
+        default -1
+
+endmenu
+

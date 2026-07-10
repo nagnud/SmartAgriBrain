@@ -1,0 +1,15 @@
+# ESP-IDF generated files
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# Editor-local files
+.vscode/
+
+# Secrets and private keys
+.env
+.env.*
+*.pem
+*.key
+secrets.h
