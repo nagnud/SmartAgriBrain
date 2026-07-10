@@ -1,4 +1,4 @@
-import {
+﻿import {
   addMockKnowledgeItem,
   analyzeMockKnowledge,
   buildMockDiseaseDetection,
@@ -21,6 +21,7 @@ import type {
   AlarmRecord,
   CommandResult,
   DeviceCommand,
+  DiseasePhotoInfo,
   DiseaseDetectionResult,
   ExpertChatRequest,
   ExpertChatResponse,
@@ -31,8 +32,6 @@ import type {
   KnowledgeTextAddResult,
   PersistedDashboardState,
   TelemetryPayload,
-  VoiceTranscriptionResponse,
-  VoiceTranscriptionStatus,
   WeatherPayload,
 } from '../types';
 
@@ -78,6 +77,20 @@ async function requestJson<T>(path: string, init?: RequestJsonInit): Promise<T> 
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<T>;
+}
+
+function resolveApiUrl(url: string): string {
+  if (!url || /^(https?:|blob:|data:)/i.test(url)) {
+    return url;
+  }
+  return `${apiBaseUrl}${url.startsWith('/') ? url : `/${url}`}`;
+}
+
+function normalizeDiseasePhoto(item: DiseasePhotoInfo): DiseasePhotoInfo {
+  return {
+    ...item,
+    url: resolveApiUrl(item.url),
+  };
 }
 
 function readLocalDashboardState(): PersistedDashboardState | null {
@@ -248,6 +261,48 @@ export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise
   return response.json() as Promise<DiseaseDetectionResult>;
 }
 
+export async function uploadDiseasePhoto(file: File): Promise<DiseasePhotoInfo> {
+  const formData = new FormData();
+  formData.append('image', file);
+  const response = await fetch(`${apiBaseUrl}/api/v1/photos/disease/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return normalizeDiseasePhoto(await response.json() as DiseasePhotoInfo);
+}
+
+export async function getDiseasePhotos(): Promise<DiseasePhotoInfo[]> {
+  const result = await requestJson<{ items: DiseasePhotoInfo[] }>('/api/v1/photos/disease/list', { timeoutMs: 2500 });
+  return result.items.map(normalizeDiseasePhoto);
+}
+
+export async function getDiseasePhoto(photoId: number): Promise<DiseasePhotoInfo> {
+  const result = await requestJson<DiseasePhotoInfo>(`/api/v1/photos/disease/${encodeURIComponent(photoId)}`, {
+    timeoutMs: 2500,
+  });
+  return normalizeDiseasePhoto(result);
+}
+
+export async function saveDiseasePhotoAnalysis(
+  photoId: number,
+  analysisResult: DiseaseDetectionResult,
+): Promise<DiseasePhotoInfo> {
+  const result = await requestJson<DiseasePhotoInfo>(`/api/v1/photos/disease/${encodeURIComponent(photoId)}/analysis`, {
+    method: 'POST',
+    body: JSON.stringify({ analysisResult }),
+  });
+  return normalizeDiseasePhoto(result);
+}
+
+export async function deleteDiseasePhoto(photoId: number): Promise<void> {
+  await requestJson<{ success: boolean }>(`/api/v1/photos/disease/${encodeURIComponent(photoId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function sendExpertChatMessage(payload: ExpertChatRequest): Promise<ExpertChatResponse> {
   if (useMockAssistant) {
     return buildMockExpertChat(payload);
@@ -266,69 +321,6 @@ export async function sendExpertChatMessage(payload: ExpertChatRequest): Promise
     },
     actions,
   };
-}
-
-export async function transcribeVoiceChunk(payload: {
-  audio: Blob;
-  sessionId: string;
-  sequence: number;
-  isFinal: boolean;
-  mimeType: string;
-  language?: string;
-}): Promise<VoiceTranscriptionResponse> {
-  if (useMockAssistant) {
-    return {
-      ok: false,
-      text: '',
-      partial: !payload.isFinal,
-      final: payload.isFinal,
-      message: '语音识别需要关闭助手 Mock，并连接后端服务。',
-    };
-  }
-  const formData = new FormData();
-  formData.append('audio', payload.audio, `voice-${payload.sequence}.webm`);
-  formData.append('session_id', payload.sessionId);
-  formData.append('sequence', String(payload.sequence));
-  formData.append('is_final', String(payload.isFinal));
-  formData.append('language', payload.language ?? 'zh-CN');
-  formData.append('mime_type', payload.mimeType);
-  const response = await fetch(`${apiBaseUrl}/api/v1/assistant/voice/transcribe`, {
-    method: 'POST',
-    body: formData,
-  });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
-  }
-  return response.json() as Promise<VoiceTranscriptionResponse>;
-}
-
-export async function getVoiceTranscriptionStatus(): Promise<VoiceTranscriptionStatus> {
-  if (useMockAssistant) {
-    return {
-      ok: true,
-      configured: false,
-      provider: 'browser',
-      model: 'Web Speech API',
-      message: '助手 Mock 模式下使用浏览器语音识别。',
-    };
-  }
-
-  try {
-    const response = await fetch(`${apiBaseUrl}/api/v1/assistant/voice/status`);
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<VoiceTranscriptionStatus>;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'unknown error';
-    return {
-      ok: false,
-      configured: true,
-      provider: 'backend',
-      model: '',
-      message: `语音状态接口不可用，将继续尝试后端识别：${message}`,
-    };
-  }
 }
 
 export async function getKnowledgeBases(): Promise<KnowledgeBaseInfo[]> {

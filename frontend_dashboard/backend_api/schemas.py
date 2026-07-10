@@ -99,20 +99,22 @@ class AssistantChatResponse(BaseModel):
     actions: List[AssistantAction] = Field(default_factory=list)
 
 
-class VoiceTranscriptionResponse(BaseModel):
-    ok: bool = True
-    text: str = ""
-    partial: bool = True
-    final: bool = False
-    message: str = ""
+class DiseasePhotoInfo(BaseModel):
+    photoId: int
+    url: str
+    originalName: str = ""
+    mimeType: str = ""
+    size: int = 0
+    createdAt: str
+    analysisResult: Optional[Dict[str, Any]] = None
 
 
-class VoiceTranscriptionStatus(BaseModel):
-    ok: bool = True
-    configured: bool = False
-    provider: str = "backend"
-    model: str = ""
-    message: str = ""
+class DiseasePhotoListResponse(BaseModel):
+    items: List[DiseasePhotoInfo] = Field(default_factory=list)
+
+
+class DiseasePhotoAnalysisRequest(BaseModel):
+    analysisResult: Dict[str, Any] = Field(default_factory=dict)
 
 
 class KnowledgeBaseInfo(BaseModel):

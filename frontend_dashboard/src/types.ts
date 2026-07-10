@@ -68,6 +68,8 @@ export interface PersistedDashboardState {
   assistantWidth?: number;
   chatInput?: string;
   chatMessages?: ChatMessage[];
+  assistantThreads?: AssistantThread[];
+  activeAssistantThreadId?: string;
 }
 
 export interface MetricTargetRange {
@@ -193,6 +195,16 @@ export interface DiseaseDetectionResult {
   processed_at: number;
 }
 
+export interface DiseasePhotoInfo {
+  photoId: number;
+  url: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  createdAt: string;
+  analysisResult?: DiseaseDetectionResult | null;
+}
+
 export interface KnowledgeReference {
   itemId: number;
   chunkId: number;
@@ -213,6 +225,15 @@ export interface ChatMessage {
   suggested_actions?: AssistantAction[];
 }
 
+export interface AssistantThread {
+  id: string;
+  title: string;
+  pinned: boolean;
+  created_at: number;
+  updated_at: number;
+  messages: ChatMessage[];
+}
+
 export interface ExpertChatRequest {
   question: string;
   image_url?: string;
@@ -229,22 +250,6 @@ export interface ExpertChatResponse {
   message: ChatMessage;
   references?: KnowledgeReference[];
   actions?: AssistantAction[];
-}
-
-export interface VoiceTranscriptionResponse {
-  ok: boolean;
-  text: string;
-  partial: boolean;
-  final: boolean;
-  message: string;
-}
-
-export interface VoiceTranscriptionStatus {
-  ok: boolean;
-  configured: boolean;
-  provider: string;
-  model: string;
-  message: string;
 }
 
 export interface KnowledgeBaseInfo {

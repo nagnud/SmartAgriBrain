@@ -175,7 +175,7 @@ button:disabled {
 }
 
 .content-layout--assistant-open {
-  grid-template-columns: minmax(0, 1fr) var(--assistant-width, 460px);
+  grid-template-columns: minmax(0, 1fr) minmax(0, var(--assistant-width, 460px));
   grid-template-areas: "main assistant";
 }
 
@@ -796,6 +796,12 @@ body.is-resizing-assistant * {
   line-height: 1.3;
 }
 
+.section-heading__copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
 .history-selector {
   display: flex;
   flex-wrap: wrap;
@@ -1060,6 +1066,170 @@ body.is-resizing-assistant * {
   font-weight: 800;
 }
 
+.disease-error {
+  padding: 10px 12px;
+  border: 1px solid #efb8b8;
+  border-radius: 8px;
+  background: #fff5f5;
+}
+
+.disease-library-modal {
+  width: min(1180px, 100%);
+}
+
+.disease-library-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.disease-library-upload {
+  position: relative;
+}
+
+.disease-library-upload input {
+  display: none;
+}
+
+.disease-library-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.disease-album {
+  display: grid;
+  max-height: min(68vh, 720px);
+  gap: 18px;
+  overflow: auto;
+  padding: 2px 6px 2px 2px;
+}
+
+.disease-album-group {
+  display: grid;
+  gap: 12px;
+}
+
+.disease-album-group h3 {
+  margin: 0;
+  color: #1e2a22;
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.disease-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  gap: 10px;
+}
+
+.disease-photo-tile {
+  position: relative;
+  display: grid;
+  aspect-ratio: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: #eef3ea;
+  box-shadow: inset 0 0 0 1px #d9e2d7;
+}
+
+.disease-photo-tile.selected {
+  border-color: #2f8f4e;
+  box-shadow: 0 0 0 3px rgba(47, 143, 78, 0.16);
+}
+
+.disease-photo-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.disease-photo-tile span {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  padding: 3px 6px;
+  overflow: hidden;
+  color: #ffffff;
+  border-radius: 6px;
+  background: rgba(23, 37, 29, 0.72);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disease-photo-detail {
+  display: grid;
+  gap: 14px;
+  min-height: 520px;
+  padding: 14px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.disease-photo-detail--empty {
+  place-items: center;
+  text-align: center;
+}
+
+.disease-photo-detail__image {
+  overflow: hidden;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #17251d;
+}
+
+.disease-photo-detail__image img {
+  display: block;
+  width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+}
+
+.disease-photo-detail__meta {
+  display: grid;
+  gap: 4px;
+}
+
+.disease-photo-detail__meta strong {
+  overflow-wrap: anywhere;
+  color: #1e2a22;
+  font-size: 16px;
+}
+
+.disease-photo-detail__meta span {
+  color: #5f6b63;
+  font-size: 13px;
+}
+
+.disease-photo-detail__results {
+  grid-template-columns: 1fr;
+  margin-top: 0;
+}
+
+.disease-photo-detail__results article {
+  min-height: 0;
+}
+
+.disease-photo-detail__suggestions {
+  margin-top: 0;
+}
+
+.disease-delete-button {
+  justify-self: start;
+  color: #d64545;
+  border-color: #efb8b8;
+  background: #fff5f5;
+}
+
 .chat-panel {
   display: grid;
   gap: 14px;
@@ -1099,7 +1269,10 @@ body.is-resizing-assistant * {
 }
 
 .chat-bubble p {
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
+  overflow-wrap: anywhere;
   white-space: pre-line;
 }
 
@@ -1236,6 +1409,7 @@ body.is-resizing-assistant .assistant-resizer::before {
   top: 0;
   display: grid;
   min-width: 0;
+  max-width: 100%;
   align-self: start;
   height: 100vh;
   max-height: 100vh;
@@ -1253,17 +1427,51 @@ body.is-resizing-assistant .assistant-resizer::before {
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.assistant-panel__header > div:first-child {
+  min-width: 0;
 }
 
 .assistant-panel__header span {
   color: #2c7da0;
   font-size: 12px;
   font-weight: 800;
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .assistant-panel__header h2 {
   margin: 4px 0 0;
   font-size: 23px;
+}
+
+.assistant-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.assistant-voice-status {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.assistant-voice-status .status-pill {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  align-items: flex-start;
+  padding-block: 7px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .assistant-panel__messages {
@@ -1276,6 +1484,8 @@ body.is-resizing-assistant .assistant-resizer::before {
 .assistant-messages-wrap {
   position: relative;
   display: grid;
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
   overflow: hidden;
 }
@@ -1283,6 +1493,8 @@ body.is-resizing-assistant .assistant-resizer::before {
 .assistant-panel .chat-bubble {
   width: fit-content;
   max-width: min(100%, 360px);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .assistant-scroll-bottom {
@@ -1308,10 +1520,101 @@ body.is-resizing-assistant .assistant-resizer::before {
 
 .assistant-composer {
   grid-template-columns: 40px 40px minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .assistant-composer .primary-button {
   grid-column: 1 / -1;
+}
+
+.assistant-history-modal {
+  width: min(720px, 100%);
+}
+
+.assistant-history-list {
+  display: grid;
+  gap: 10px;
+}
+
+.assistant-history-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.assistant-history-item--active {
+  border-color: #9bd0a8;
+  background: #f1faf3;
+}
+
+.assistant-history-item--pinned {
+  border-left: 5px solid #2f8f4e;
+}
+
+.assistant-history-item__main {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  background: transparent;
+}
+
+.assistant-history-item__main strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #1e2a22;
+  font-size: 15px;
+}
+
+.assistant-history-item__main strong,
+.assistant-history-item__main span,
+.assistant-history-item__main time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-history-item__main span {
+  color: #4f5d55;
+  font-size: 13px;
+}
+
+.assistant-history-item__main time {
+  color: #7a857d;
+  font-size: 12px;
+}
+
+.assistant-history-actions,
+.assistant-history-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.assistant-history-rename {
+  grid-column: 1 / -1;
+}
+
+.assistant-history-rename input {
+  min-width: 0;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 12px;
+  color: #1e2a22;
+  border: 1px solid #d9e2d7;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .assistant-confirm {
@@ -1421,11 +1724,19 @@ body.is-resizing-assistant .assistant-resizer::before {
 .reference-list {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
   padding: 10px;
   color: #4f5d55;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.72);
   font-size: 12px;
+}
+
+.reference-list span {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .reference-list strong {
@@ -2321,57 +2632,9 @@ body.is-resizing-assistant .assistant-resizer::before {
   }
 }
 
-@media (max-width: 1700px) {
-  .content-layout--assistant-open {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "main";
-  }
-
-  .content-layout--assistant-open .assistant-resizer {
-    display: none;
-  }
-
-  .content-layout--assistant-open .assistant-panel {
-    position: fixed;
-    top: 12px;
-    right: 12px;
-    bottom: 12px;
-    z-index: 30;
-    width: min(430px, calc(100vw - 24px));
-    height: auto;
-    max-height: calc(100vh - 24px);
-    border: 1px solid #d9e2d7;
-    border-radius: 12px;
-    box-shadow: 0 18px 50px rgba(30, 42, 34, 0.22);
-  }
-}
-
 @media (max-width: 1380px) {
   .app-shell {
     grid-template-columns: 230px minmax(0, 1fr);
-  }
-
-  .content-layout--assistant-open {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "main";
-  }
-
-  .assistant-resizer {
-    display: none;
-  }
-
-  .assistant-panel {
-    position: fixed;
-    top: 12px;
-    right: 12px;
-    bottom: 12px;
-    z-index: 30;
-    width: min(430px, calc(100vw - 24px));
-    height: auto;
-    max-height: calc(100vh - 24px);
-    border: 1px solid #d9e2d7;
-    border-radius: 12px;
-    box-shadow: 0 18px 50px rgba(30, 42, 34, 0.22);
   }
 
   .metric-editor-page {
@@ -2396,7 +2659,8 @@ body.is-resizing-assistant .assistant-resizer::before {
   .hero-panel,
   .two-column,
   .disease-layout,
-  .knowledge-layout {
+  .knowledge-layout,
+  .disease-library-body {
     grid-template-columns: 1fr;
   }
 
@@ -2423,11 +2687,34 @@ body.is-resizing-assistant .assistant-resizer::before {
     height: auto;
   }
 
+  .content-layout--assistant-open {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "main";
+  }
+
+  .assistant-resizer {
+    display: none;
+  }
+
   .assistant-panel {
+    position: fixed;
+    z-index: 30;
     inset: 8px;
     width: auto;
+    height: auto;
     max-height: calc(100vh - 16px);
+    border: 1px solid #d9e2d7;
+    border-radius: 12px;
     padding: 18px 14px;
+    box-shadow: 0 18px 50px rgba(30, 42, 34, 0.22);
+  }
+
+  .assistant-history-item {
+    grid-template-columns: 1fr;
+  }
+
+  .assistant-history-actions {
+    justify-content: flex-end;
   }
 
   .metric-grid,
@@ -2438,6 +2725,26 @@ body.is-resizing-assistant .assistant-resizer::before {
   .suggestion-grid,
   .result-grid {
     grid-template-columns: 1fr;
+  }
+
+  .modal-backdrop {
+    padding: 10px;
+  }
+
+  .disease-library-modal {
+    max-height: calc(100vh - 20px);
+  }
+
+  .disease-library-actions {
+    justify-content: flex-start;
+  }
+
+  .disease-photo-grid {
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  }
+
+  .disease-photo-detail {
+    min-height: 360px;
   }
 
   .ai-risk-detail ul {

@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $envPath)) {
   Copy-Item -LiteralPath $envExamplePath -Destination $envPath
   Write-Host "Created backend_api\.env from .env.example."
   Write-Host "Set DEEPSEEK_API_KEY in backend_api\.env to enable real AI farm advice and assistant chat."
-  Write-Host "Set SPEECH_TRANSCRIBE_API_KEY or OPENAI_API_KEY in backend_api\.env to enable real voice transcription."
+  Write-Host "Voice input is handled in the browser with the Web Speech API; no backend voice key is required."
 }
 
 if (-not (Test-Path -LiteralPath $pythonExe)) {

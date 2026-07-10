@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import type { Component } from 'vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { EChartsOption } from 'echarts';
@@ -15,6 +15,7 @@ import {
   Droplets,
   Fan,
   Gauge,
+  History,
   Home,
   Image,
   Leaf,
@@ -22,6 +23,7 @@ import {
   Mic,
   Pencil,
   Plus,
+  Pin,
   RefreshCw,
   Save,
   Send,
@@ -45,32 +47,36 @@ import {
   analyzeFarm,
   analyzeKnowledge,
   createKnowledgeBase,
+  deleteDiseasePhoto,
   deleteKnowledgeBase,
   deleteKnowledgeItem,
   getAlarmRecords,
+  getDiseasePhotos,
   getDeviceHistory,
   getCurrentWeather,
   getKnowledgeBases,
   getKnowledgeItems,
   getLatestTelemetry,
   getPersistedDashboardState,
-  getVoiceTranscriptionStatus,
   savePersistedDashboardState,
+  saveDiseasePhotoAnalysis,
   sendDeviceCommand,
   sendExpertChatMessage,
-  transcribeVoiceChunk,
   updateKnowledgeBase,
   updateKnowledgeItem,
+  uploadDiseasePhoto,
 } from './services/api';
 import type {
   AiAnalysisResponse,
   AlarmRecord,
   AssistantAction,
+  AssistantThread,
   ChatMessage,
   CommandResult,
   DeviceCommand,
   DeviceRuntimeStatus,
   DiseaseDetectionResult,
+  DiseasePhotoInfo,
   HistoryPoint,
   KnowledgeAnalyzeResult,
   KnowledgeBaseInfo,
@@ -105,6 +111,12 @@ interface NavItem {
   key: ViewKey;
   label: string;
   icon: Component;
+}
+
+interface DiseasePhotoGroup {
+  dateKey: string;
+  dateLabel: string;
+  photos: DiseasePhotoInfo[];
 }
 
 interface MetricCardVm {
@@ -183,6 +195,11 @@ interface MetricEditorRect {
   height: number;
 }
 
+interface MetricEditorSourceRect extends MetricEditorRect {
+  documentLeft: number;
+  documentTop: number;
+}
+
 const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'temperature', name: '温度', unit: '摄氏度', color: '#D68C1F', value: (point) => point.temperature },
   { key: 'humidity', name: '湿度', unit: '%RH', color: '#2C7DA0', value: (point) => point.humidity },
@@ -222,7 +239,20 @@ const commandResults = ref<CommandResult[]>([]);
 const diseaseResult = ref<DiseaseDetectionResult | null>(null);
 const diseaseImageUrl = ref('');
 const diseaseLoading = ref(false);
+const diseaseUploadError = ref('');
+const diseasePhotoLibraryOpen = ref(false);
+const diseasePhotos = ref<DiseasePhotoInfo[]>([]);
+const selectedDiseasePhoto = ref<DiseasePhotoInfo | null>(null);
+const currentDiseasePhotoId = ref<number | null>(null);
+const diseasePhotoLoading = ref(false);
+const diseasePhotoDeletingId = ref<number | null>(null);
+const diseasePhotoError = ref('');
 const chatMessages = ref<ChatMessage[]>([]);
+const assistantThreads = ref<AssistantThread[]>([]);
+const activeAssistantThreadId = ref('');
+const assistantHistoryOpen = ref(false);
+const renamingAssistantThreadId = ref('');
+const assistantThreadNameDraft = ref('');
 const chatInput = ref('番茄叶片有黄斑，结合当前环境应该怎么处理？');
 const chatInputRef = ref<HTMLTextAreaElement | null>(null);
 const chatImageUrl = ref('');
@@ -231,7 +261,7 @@ const chatSending = ref(false);
 const assistantOpen = ref(false);
 const defaultAssistantWidth = 460;
 const minAssistantWidth = 360;
-const minWorkspaceWidth = 1220;
+const minWorkspaceWidth = 640;
 const maxAssistantViewportRatio = 0.55;
 const assistantWidth = ref(defaultAssistantWidth);
 const assistantResizing = ref(false);
@@ -283,6 +313,7 @@ const targetRangeError = ref('');
 const targetRangeSavedMessage = ref('');
 const targetRangeSaving = ref(false);
 let targetRangeSavedTimer: number | undefined;
+const metricEditorStageRef = ref<HTMLElement | null>(null);
 const metricEditorStyle = ref<Record<string, string>>({
   '--metric-editor-left': '0px',
   '--metric-editor-top': '0px',
@@ -298,8 +329,6 @@ const refreshing = ref(false);
 let refreshTimer: number | undefined;
 let metricEditorTimer: number | undefined;
 let metricEditorChartTimer: number | undefined;
-let activeVoiceRecorder: MediaRecorder | null = null;
-let activeVoiceStream: MediaStream | null = null;
 let activeBrowserSpeechRecognition: SpeechRecognitionLike | null = null;
 let assistantThinkingTimer: number | undefined;
 let assistantTypeRunId = 0;
@@ -308,13 +337,9 @@ let pendingAssistantResizeClientX = 0;
 let voiceInputPrefix = '';
 let voiceInputSuffix = '';
 let voiceCurrentTranscript = '';
-let voiceSessionId = '';
-let voiceSequence = 0;
-let voiceMimeType = 'audio/webm';
-let voiceStopping = false;
-let voiceUploadQueue: Promise<void> = Promise.resolve();
-let metricEditorLastSourceRect: MetricEditorRect | null = null;
-const metricEditorSourceRects = new Map<HistoryMetricKey, MetricEditorRect>();
+let voiceRecognitionHadError = false;
+let metricEditorLastSourceRect: MetricEditorSourceRect | null = null;
+const metricEditorSourceRects = new Map<HistoryMetricKey, MetricEditorSourceRect>();
 let persistedDeviceStatus: DeviceRuntimeStatus | null = null;
 let persistentStateReady = false;
 let applyingPersistentState = false;
@@ -332,6 +357,24 @@ const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
 
 const selectedKnowledgeBase = computed(() => knowledgeBases.value.find((item) => item.kbId === selectedKbId.value) ?? null);
 const activeAlarms = computed(() => alarms.value.filter((item) => !item.handled).length);
+const diseasePhotoGroups = computed<DiseasePhotoGroup[]>(() => {
+  const groupMap = new Map<string, DiseasePhotoGroup>();
+  for (const photo of diseasePhotos.value) {
+    const dateKey = diseasePhotoDateKey(photo.createdAt);
+    const existing = groupMap.get(dateKey);
+    if (existing) {
+      existing.photos.push(photo);
+      continue;
+    }
+    groupMap.set(dateKey, {
+      dateKey,
+      dateLabel: diseasePhotoDateLabel(dateKey),
+      photos: [photo],
+    });
+  }
+  return [...groupMap.values()];
+});
+const selectedDiseasePhotoAnalysis = computed(() => diseasePhotoAnalysis(selectedDiseasePhoto.value));
 
 const statusSummary = computed<Array<{ label: string; state: StatusLevel }>>(() => {
   const status = latest.value?.status;
@@ -376,6 +419,17 @@ const metricCards = computed<MetricCardVm[]>(() => {
 });
 
 const selectedMetricCard = computed(() => metricCards.value.find((metric) => metric.key === selectedMetricKey.value) ?? null);
+
+const sortedAssistantThreads = computed(() => [...assistantThreads.value].sort((left, right) => {
+  if (left.pinned !== right.pinned) {
+    return left.pinned ? -1 : 1;
+  }
+  return right.updated_at - left.updated_at;
+}));
+
+const activeAssistantThread = computed(() => (
+  assistantThreads.value.find((thread) => thread.id === activeAssistantThreadId.value) ?? null
+));
 
 const overviewMetricCards = computed(() => metricCards.value.map((metric) => ({
   ...metric,
@@ -802,6 +856,92 @@ function persistedSmartControlParamStates(value: unknown): Record<SmartControlPa
   return states;
 }
 
+function createAssistantWelcomeMessage(): ChatMessage {
+  return {
+    id: `assistant-welcome-${Date.now()}`,
+    role: 'assistant',
+    content: '我是智慧农业专家助手。你可以输入文字、上传叶片图片，或用语音提问。',
+    created_at: Date.now(),
+  };
+}
+
+function createAssistantThread(messages: ChatMessage[] = [createAssistantWelcomeMessage()]): AssistantThread {
+  const now = Date.now();
+  return {
+    id: `assistant-thread-${now}-${Math.random().toString(36).slice(2, 8)}`,
+    title: assistantThreadTitleFromMessages(messages),
+    pinned: false,
+    created_at: now,
+    updated_at: now,
+    messages,
+  };
+}
+
+function ensureAssistantThreadState(): void {
+  if (assistantThreads.value.length === 0) {
+    const thread = createAssistantThread();
+    assistantThreads.value = [thread];
+    activeAssistantThreadId.value = thread.id;
+    chatMessages.value = thread.messages;
+    return;
+  }
+  const activeThread = assistantThreads.value.find((thread) => thread.id === activeAssistantThreadId.value)
+    ?? sortedAssistantThreads.value[0];
+  activeAssistantThreadId.value = activeThread.id;
+  chatMessages.value = activeThread.messages.length > 0 ? activeThread.messages : [createAssistantWelcomeMessage()];
+}
+
+function assistantThreadTitleFromMessages(messages: ChatMessage[]): string {
+  const firstUserMessage = messages.find((message) => message.role === 'user' && message.content.trim().length > 0);
+  if (!firstUserMessage) {
+    return '新对话';
+  }
+  const title = firstUserMessage.content.replace(/\s+/g, ' ').trim();
+  return title.length > 18 ? `${title.slice(0, 18)}...` : title;
+}
+
+function assistantThreadHasConversationContent(messages: ChatMessage[]): boolean {
+  return messages.some((message) => (
+    message.role === 'user'
+    && (message.content.trim().length > 0 || Boolean(message.image_url))
+  ));
+}
+
+function assistantThreadPreview(thread: AssistantThread): string {
+  const latestMessage = [...thread.messages].reverse().find((message) => message.content.trim().length > 0);
+  if (!latestMessage) {
+    return '暂无消息';
+  }
+  const text = latestMessage.content.replace(/\s+/g, ' ').trim();
+  return text.length > 34 ? `${text.slice(0, 34)}...` : text;
+}
+
+function persistedAssistantThreads(value: unknown): AssistantThread[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is AssistantThread => (
+      isPlainRecord(item)
+      && typeof item.id === 'string'
+      && typeof item.title === 'string'
+      && typeof item.created_at === 'number'
+      && typeof item.updated_at === 'number'
+    ))
+    .map((item) => {
+      const messages = persistedChatMessages(item.messages);
+      return {
+        id: item.id,
+        title: item.title.trim() || assistantThreadTitleFromMessages(messages),
+        pinned: item.pinned === true,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        messages: messages.length > 0 ? messages : [createAssistantWelcomeMessage()],
+      };
+    })
+    .slice(-24);
+}
+
 function persistedChatMessages(value: unknown): ChatMessage[] {
   if (!Array.isArray(value)) {
     return [];
@@ -829,6 +969,43 @@ function serializableChatMessages(): ChatMessage[] {
     .slice(-30);
 }
 
+function syncActiveAssistantThreadMessages(updateTitle = false): void {
+  if (!activeAssistantThreadId.value) {
+    return;
+  }
+  const messages = serializableChatMessages();
+  const hasRealMessage = messages.some((message) => message.role === 'user');
+  assistantThreads.value = assistantThreads.value.map((thread) => {
+    if (thread.id !== activeAssistantThreadId.value) {
+      return thread;
+    }
+    const shouldRefreshTitle = updateTitle || thread.title === '新对话';
+    return {
+      ...thread,
+      title: shouldRefreshTitle ? assistantThreadTitleFromMessages(messages) : thread.title,
+      updated_at: updateTitle && hasRealMessage ? Date.now() : thread.updated_at,
+      messages: messages.length > 0 ? messages : [createAssistantWelcomeMessage()],
+    };
+  });
+}
+
+function serializableAssistantThreads(): AssistantThread[] {
+  syncActiveAssistantThreadMessages();
+  return assistantThreads.value
+    .map((thread) => ({
+      ...thread,
+      title: thread.title.trim() || assistantThreadTitleFromMessages(thread.messages),
+      messages: thread.messages
+        .filter((message) => !message.typing)
+        .map((message) => ({
+          ...message,
+          image_url: message.image_url?.startsWith('blob:') ? undefined : message.image_url,
+        }))
+        .slice(-30),
+    }))
+    .slice(-24);
+}
+
 function serializeDashboardState(): PersistedDashboardState {
   return {
     version: 1,
@@ -848,6 +1025,8 @@ function serializeDashboardState(): PersistedDashboardState {
     assistantWidth: assistantWidth.value,
     chatInput: chatInput.value,
     chatMessages: serializableChatMessages(),
+    assistantThreads: serializableAssistantThreads(),
+    activeAssistantThreadId: activeAssistantThreadId.value,
   };
 }
 
@@ -928,10 +1107,28 @@ async function loadPersistentDashboardState(): Promise<void> {
     if (typeof state.chatInput === 'string') {
       chatInput.value = state.chatInput;
     }
-    const savedMessages = persistedChatMessages(state.chatMessages);
-    if (savedMessages.length > 0) {
-      chatMessages.value = savedMessages;
+    const savedThreads = persistedAssistantThreads(state.assistantThreads);
+    if (savedThreads.length > 0) {
+      assistantThreads.value = savedThreads;
+      const activeThread = savedThreads.find((thread) => thread.id === state.activeAssistantThreadId)
+        ?? [...savedThreads].sort((left, right) => {
+          if (left.pinned !== right.pinned) {
+            return left.pinned ? -1 : 1;
+          }
+          return right.updated_at - left.updated_at;
+        })[0];
+      activeAssistantThreadId.value = activeThread.id;
+      chatMessages.value = activeThread.messages;
+    } else {
+      const savedMessages = persistedChatMessages(state.chatMessages);
+      if (savedMessages.length > 0) {
+        const migratedThread = createAssistantThread(savedMessages);
+        assistantThreads.value = [migratedThread];
+        activeAssistantThreadId.value = migratedThread.id;
+        chatMessages.value = savedMessages;
+      }
     }
+    ensureAssistantThreadState();
   } finally {
     applyingPersistentState = false;
   }
@@ -1134,6 +1331,24 @@ function elementRect(element: Element): MetricEditorRect {
   };
 }
 
+function elementSourceRect(element: Element): MetricEditorSourceRect {
+  const rect = elementRect(element);
+  return {
+    ...rect,
+    documentLeft: rect.left + window.scrollX,
+    documentTop: rect.top + window.scrollY,
+  };
+}
+
+function sourceRectAtCurrentScroll(source: MetricEditorSourceRect): MetricEditorRect {
+  return {
+    left: source.documentLeft - window.scrollX,
+    top: source.documentTop - window.scrollY,
+    width: source.width,
+    height: source.height,
+  };
+}
+
 function metricEditorTargetRect(): MetricEditorRect {
   const workspace = document.querySelector<HTMLElement>('.workspace');
   if (!workspace) {
@@ -1165,15 +1380,15 @@ function captureMetricCardRects(): void {
   document.querySelectorAll<HTMLElement>('[data-metric-key]').forEach((element) => {
     const key = element.dataset.metricKey as HistoryMetricKey | undefined;
     if (key) {
-      metricEditorSourceRects.set(key, elementRect(element));
+      metricEditorSourceRects.set(key, elementSourceRect(element));
     }
   });
 }
 
-function metricCardRect(key: HistoryMetricKey, element?: Element | null): MetricEditorRect {
+function metricCardSourceRect(key: HistoryMetricKey, element?: Element | null): MetricEditorSourceRect | null {
   const sourceElement = element ?? document.querySelector<HTMLElement>(`[data-metric-key="${key}"]`);
   if (sourceElement) {
-    const rect = elementRect(sourceElement);
+    const rect = elementSourceRect(sourceElement);
     if (rect.width > 1 && rect.height > 1) {
       metricEditorLastSourceRect = rect;
       metricEditorSourceRects.set(key, rect);
@@ -1188,7 +1403,10 @@ function metricCardRect(key: HistoryMetricKey, element?: Element | null): Metric
   if (metricEditorLastSourceRect) {
     return metricEditorLastSourceRect;
   }
-  const target = metricEditorTargetRect();
+  return null;
+}
+
+function fallbackMetricCardRect(target: MetricEditorRect): MetricEditorRect {
   return {
     left: target.left + target.width / 2 - 120,
     top: target.top + target.height / 2 - 80,
@@ -1197,9 +1415,16 @@ function metricCardRect(key: HistoryMetricKey, element?: Element | null): Metric
   };
 }
 
-function updateMetricEditorMotion(key: HistoryMetricKey, element?: Element | null): void {
+function metricCardRect(key: HistoryMetricKey, element?: Element | null): MetricEditorRect {
+  const source = metricCardSourceRect(key, element);
+  if (source) {
+    return sourceRectAtCurrentScroll(source);
+  }
   const target = metricEditorTargetRect();
-  const source = metricCardRect(key, element);
+  return fallbackMetricCardRect(target);
+}
+
+function setMetricEditorMotion(target: MetricEditorRect, source: MetricEditorRect): void {
   metricEditorStyle.value = {
     '--metric-editor-left': `${target.left}px`,
     '--metric-editor-top': `${target.top}px`,
@@ -1210,6 +1435,18 @@ function updateMetricEditorMotion(key: HistoryMetricKey, element?: Element | nul
     '--metric-editor-scale-x': String(source.width / target.width),
     '--metric-editor-scale-y': String(source.height / target.height),
   };
+}
+
+function updateMetricEditorMotion(key: HistoryMetricKey, element?: Element | null): void {
+  const target = metricEditorTargetRect();
+  const source = metricCardRect(key, element);
+  setMetricEditorMotion(target, source);
+}
+
+function updateMetricEditorClosingMotion(key: HistoryMetricKey): void {
+  const target = metricEditorStageRef.value ? elementRect(metricEditorStageRef.value) : metricEditorTargetRect();
+  const source = metricCardRect(key);
+  setMetricEditorMotion(target, source);
 }
 
 function hydrateMetricTargetDraft(key: HistoryMetricKey): void {
@@ -1257,7 +1494,7 @@ function closeMetricEditor(): void {
   if (!selectedMetricKey.value) {
     return;
   }
-  updateMetricEditorMotion(selectedMetricKey.value);
+  updateMetricEditorClosingMotion(selectedMetricKey.value);
   metricEditorTransition.value = 'closing';
   metricEditorChartActive.value = false;
   clearMetricEditorChartTimer();
@@ -1379,7 +1616,7 @@ function stopAssistantResize(): void {
 }
 
 function startAssistantResize(event: PointerEvent): void {
-  if (typeof window === 'undefined' || window.innerWidth <= 1380) {
+  if (typeof window === 'undefined' || window.innerWidth <= 860) {
     return;
   }
   event.preventDefault();
@@ -1831,6 +2068,7 @@ function setAssistantActionStatus(action: AssistantAction, status: AssistantActi
   action.status = status;
   action.error = error;
   chatMessages.value = [...chatMessages.value];
+  syncActiveAssistantThreadMessages();
   schedulePersistentDashboardStateSave();
 }
 
@@ -1975,32 +2213,182 @@ function cancelAssistantAction(action: AssistantAction): void {
   setAssistantActionStatus(action, 'canceled');
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : '未知错误';
+}
+
+function revokeCurrentDiseaseBlob(): void {
+  if (diseaseImageUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(diseaseImageUrl.value);
+  }
+}
+
+function diseasePhotoDateKey(createdAt: string): string {
+  const key = createdAt.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(key) ? key : 'unknown';
+}
+
+function diseasePhotoDateLabel(dateKey: string): string {
+  if (dateKey === 'unknown') {
+    return '未知日期';
+  }
+  const [year, month, day] = dateKey.split('-').map((item) => Number(item));
+  return `${year}年${month}月${day}日`;
+}
+
+function diseasePhotoTimeLabel(createdAt: string): string {
+  return createdAt.length > 10 ? createdAt.slice(11) : createdAt;
+}
+
+function diseasePhotoSizeLabel(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) {
+    return '未知大小';
+  }
+  if (size >= 1024 * 1024) {
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+  return `${Math.max(1, Math.round(size / 1024))} KB`;
+}
+
+function diseasePhotoAnalysis(photo: DiseasePhotoInfo | null): DiseaseDetectionResult | null {
+  if (!photo?.analysisResult || typeof photo.analysisResult !== 'object') {
+    return null;
+  }
+  return photo.analysisResult;
+}
+
+function upsertDiseasePhoto(photo: DiseasePhotoInfo): void {
+  const index = diseasePhotos.value.findIndex((item) => item.photoId === photo.photoId);
+  if (index >= 0) {
+    diseasePhotos.value = [
+      ...diseasePhotos.value.slice(0, index),
+      photo,
+      ...diseasePhotos.value.slice(index + 1),
+    ];
+    return;
+  }
+  diseasePhotos.value = [photo, ...diseasePhotos.value];
+}
+
+async function refreshDiseasePhotoLibrary(): Promise<void> {
+  diseasePhotoLoading.value = true;
+  try {
+    diseasePhotos.value = await getDiseasePhotos();
+    diseasePhotoError.value = '';
+    if (selectedDiseasePhoto.value) {
+      selectedDiseasePhoto.value = diseasePhotos.value.find((photo) => photo.photoId === selectedDiseasePhoto.value?.photoId) ?? null;
+    }
+  } catch (error) {
+    diseasePhotoError.value = `读取图片库失败：${errorText(error)}`;
+  } finally {
+    diseasePhotoLoading.value = false;
+  }
+}
+
+async function openDiseasePhotoLibrary(): Promise<void> {
+  diseasePhotoLibraryOpen.value = true;
+  selectedDiseasePhoto.value = null;
+  await refreshDiseasePhotoLibrary();
+}
+
+function closeDiseasePhotoLibrary(): void {
+  diseasePhotoLibraryOpen.value = false;
+  selectedDiseasePhoto.value = null;
+}
+
+function selectDiseasePhoto(photo: DiseasePhotoInfo): void {
+  selectedDiseasePhoto.value = photo;
+  currentDiseasePhotoId.value = photo.photoId;
+  revokeCurrentDiseaseBlob();
+  diseaseImageUrl.value = photo.url;
+  diseaseResult.value = diseasePhotoAnalysis(photo);
+  diseaseUploadError.value = diseaseResult.value ? '' : '这张图片还没有保存识别结果，可以重新上传或重新分析后保存。';
+}
+
+async function processDiseaseFile(file: File): Promise<void> {
+  revokeCurrentDiseaseBlob();
+  const previewUrl = URL.createObjectURL(file);
+  diseaseImageUrl.value = previewUrl;
+  diseaseResult.value = null;
+  currentDiseasePhotoId.value = null;
+  diseaseUploadError.value = '';
+  diseaseLoading.value = true;
+
+  let uploadedPhoto: DiseasePhotoInfo | null = null;
+  try {
+    try {
+      uploadedPhoto = await uploadDiseasePhoto(file);
+      upsertDiseasePhoto(uploadedPhoto);
+      currentDiseasePhotoId.value = uploadedPhoto.photoId;
+      diseaseImageUrl.value = uploadedPhoto.url;
+      URL.revokeObjectURL(previewUrl);
+    } catch (error) {
+      diseaseUploadError.value = `图片保存到后端失败：${errorText(error)}。当前只显示临时预览，刷新后不会保留。`;
+      console.warn('Disease photo upload failed.', error);
+    }
+
+    const analysisImageUrl = uploadedPhoto?.url ?? previewUrl;
+    const result = {
+      ...await analyzeDiseaseImage(file, analysisImageUrl),
+      image_url: analysisImageUrl,
+    };
+    diseaseResult.value = result;
+
+    if (uploadedPhoto) {
+      const savedPhoto = await saveDiseasePhotoAnalysis(uploadedPhoto.photoId, result);
+      upsertDiseasePhoto(savedPhoto);
+      selectedDiseasePhoto.value = selectedDiseasePhoto.value?.photoId === savedPhoto.photoId ? savedPhoto : selectedDiseasePhoto.value;
+      diseasePhotoError.value = '';
+    }
+  } catch (error) {
+    diseaseUploadError.value = `病害识别失败：${errorText(error)}`;
+  } finally {
+    diseaseLoading.value = false;
+  }
+}
+
 async function handleDiseaseUpload(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) {
     return;
   }
-  if (diseaseImageUrl.value.startsWith('blob:')) {
-    URL.revokeObjectURL(diseaseImageUrl.value);
-  }
-  const nextUrl = URL.createObjectURL(file);
-  diseaseImageUrl.value = nextUrl;
-  diseaseLoading.value = true;
   try {
-    diseaseResult.value = await analyzeDiseaseImage(file, nextUrl);
+    await processDiseaseFile(file);
   } finally {
-    diseaseLoading.value = false;
     input.value = '';
   }
 }
 
 function clearDiseaseImage(): void {
-  if (diseaseImageUrl.value.startsWith('blob:')) {
-    URL.revokeObjectURL(diseaseImageUrl.value);
-  }
+  revokeCurrentDiseaseBlob();
   diseaseImageUrl.value = '';
   diseaseResult.value = null;
+  currentDiseasePhotoId.value = null;
+  diseaseUploadError.value = '';
+}
+
+async function removeDiseasePhoto(photo: DiseasePhotoInfo): Promise<void> {
+  const confirmed = window.confirm(`确定删除这张图片吗？\n${photo.originalName || '未命名图片'}\n删除后本地图片文件和识别结果都会移除。`);
+  if (!confirmed) {
+    return;
+  }
+  diseasePhotoDeletingId.value = photo.photoId;
+  try {
+    await deleteDiseasePhoto(photo.photoId);
+    diseasePhotos.value = diseasePhotos.value.filter((item) => item.photoId !== photo.photoId);
+    if (selectedDiseasePhoto.value?.photoId === photo.photoId) {
+      selectedDiseasePhoto.value = null;
+    }
+    if (currentDiseasePhotoId.value === photo.photoId) {
+      clearDiseaseImage();
+    }
+    diseasePhotoError.value = '';
+  } catch (error) {
+    diseasePhotoError.value = `删除图片失败：${errorText(error)}`;
+  } finally {
+    diseasePhotoDeletingId.value = null;
+  }
 }
 
 function handleChatImageUpload(event: Event): void {
@@ -2056,6 +2444,111 @@ async function scrollAssistantToBottom(smooth = false): Promise<void> {
 
 function handleAssistantMessagesScroll(): void {
   updateAssistantScrollState();
+}
+
+function resetAssistantThreadRename(): void {
+  renamingAssistantThreadId.value = '';
+  assistantThreadNameDraft.value = '';
+}
+
+function createNewAssistantThread(): void {
+  if (chatSending.value) {
+    return;
+  }
+  syncActiveAssistantThreadMessages();
+  const activeThread = assistantThreads.value.find((thread) => thread.id === activeAssistantThreadId.value);
+  const activeMessages = activeThread?.messages ?? chatMessages.value;
+  if (!assistantThreadHasConversationContent(activeMessages)) {
+    assistantHistoryOpen.value = false;
+    resetAssistantThreadRename();
+    assistantConfirmActionId.value = null;
+    void scrollAssistantToBottom();
+    void nextTick(resizeChatInput);
+    return;
+  }
+  clearChatImage();
+  const thread = createAssistantThread();
+  assistantThreads.value = [thread, ...assistantThreads.value];
+  activeAssistantThreadId.value = thread.id;
+  chatMessages.value = thread.messages;
+  assistantHistoryOpen.value = false;
+  resetAssistantThreadRename();
+  assistantConfirmActionId.value = null;
+  void scrollAssistantToBottom();
+  void nextTick(resizeChatInput);
+  schedulePersistentDashboardStateSave();
+}
+
+function switchAssistantThread(threadId: string): void {
+  if (chatSending.value || threadId === activeAssistantThreadId.value) {
+    assistantHistoryOpen.value = false;
+    return;
+  }
+  const thread = assistantThreads.value.find((item) => item.id === threadId);
+  if (!thread) {
+    return;
+  }
+  syncActiveAssistantThreadMessages();
+  clearChatImage();
+  activeAssistantThreadId.value = thread.id;
+  chatMessages.value = thread.messages.length > 0 ? thread.messages : [createAssistantWelcomeMessage()];
+  assistantHistoryOpen.value = false;
+  resetAssistantThreadRename();
+  assistantConfirmActionId.value = null;
+  void scrollAssistantToBottom();
+  schedulePersistentDashboardStateSave();
+}
+
+function beginRenameAssistantThread(thread: AssistantThread): void {
+  renamingAssistantThreadId.value = thread.id;
+  assistantThreadNameDraft.value = thread.title;
+}
+
+function commitRenameAssistantThread(threadId: string): void {
+  const title = assistantThreadNameDraft.value.trim();
+  if (!title) {
+    return;
+  }
+  assistantThreads.value = assistantThreads.value.map((thread) => (
+    thread.id === threadId ? { ...thread, title } : thread
+  ));
+  resetAssistantThreadRename();
+  schedulePersistentDashboardStateSave();
+}
+
+function toggleAssistantThreadPinned(threadId: string): void {
+  assistantThreads.value = assistantThreads.value.map((thread) => (
+    thread.id === threadId ? { ...thread, pinned: !thread.pinned, updated_at: Date.now() } : thread
+  ));
+  schedulePersistentDashboardStateSave();
+}
+
+function deleteAssistantThread(threadId: string): void {
+  if (chatSending.value) {
+    return;
+  }
+  const nextThreads = assistantThreads.value.filter((thread) => thread.id !== threadId);
+  if (nextThreads.length === 0) {
+    const thread = createAssistantThread();
+    assistantThreads.value = [thread];
+    activeAssistantThreadId.value = thread.id;
+    chatMessages.value = thread.messages;
+  } else {
+    assistantThreads.value = nextThreads;
+    if (threadId === activeAssistantThreadId.value) {
+      const nextActiveThread = [...nextThreads].sort((left, right) => {
+        if (left.pinned !== right.pinned) {
+          return left.pinned ? -1 : 1;
+        }
+        return right.updated_at - left.updated_at;
+      })[0];
+      activeAssistantThreadId.value = nextActiveThread.id;
+      chatMessages.value = nextActiveThread.messages.length > 0 ? nextActiveThread.messages : [createAssistantWelcomeMessage()];
+    }
+  }
+  resetAssistantThreadRename();
+  void scrollAssistantToBottom();
+  schedulePersistentDashboardStateSave();
 }
 
 function resizeChatInput(): void {
@@ -2145,6 +2638,7 @@ async function revealAssistantMessage(finalMessage: ChatMessage, replaceMessageI
     return;
   }
   replaceChatMessage(finalMessage.id, { ...finalMessage, typing: false });
+  syncActiveAssistantThreadMessages();
   if (shouldFollow && assistantAtBottom.value) {
     await scrollAssistantToBottom();
   } else {
@@ -2162,6 +2656,24 @@ function handleChatKeydown(event: KeyboardEvent): void {
   void sendChat();
 }
 
+function clearChatComposerInput(): void {
+  chatInput.value = '';
+  voiceInputPrefix = '';
+  voiceInputSuffix = '';
+  voiceCurrentTranscript = '';
+  void nextTick(resizeChatInput);
+}
+
+function stopVoiceInputAfterSend(): void {
+  if (!listening.value && !activeBrowserSpeechRecognition) {
+    return;
+  }
+  stopBrowserSpeechInput();
+  listening.value = false;
+  voiceRecognitionHadError = false;
+  voiceMessage.value = '语音输入已随消息发送停止';
+}
+
 async function sendChat(): Promise<void> {
   if (!latest.value || chatSending.value) {
     return;
@@ -2170,11 +2682,14 @@ async function sendChat(): Promise<void> {
   if (question.length === 0 && chatImageUrl.value.length === 0) {
     return;
   }
+  const pendingImageUrl = chatImageUrl.value;
+  stopVoiceInputAfterSend();
+  clearChatComposerInput();
   const userMessage: ChatMessage = {
     id: `user-${Date.now()}`,
     role: 'user',
     content: question || '请分析这张作物图片。',
-    image_url: chatImageUrl.value || undefined,
+    image_url: pendingImageUrl || undefined,
     created_at: Date.now(),
   };
   const thinkingMessage: ChatMessage = {
@@ -2185,7 +2700,7 @@ async function sendChat(): Promise<void> {
     typing: true,
   };
   chatMessages.value = [...chatMessages.value, userMessage, thinkingMessage];
-  chatInput.value = '';
+  syncActiveAssistantThreadMessages(true);
   schedulePersistentDashboardStateSave();
   await scrollAssistantToBottom();
   startAssistantThinking(thinkingMessage.id);
@@ -2193,7 +2708,7 @@ async function sendChat(): Promise<void> {
   try {
     const response = await sendExpertChatMessage({
       question: userMessage.content,
-      image_url: chatImageUrl.value || undefined,
+      image_url: pendingImageUrl || undefined,
       latest: latest.value,
       disease: diseaseResult.value,
       knowledge_base_id: selectedKbId.value || undefined,
@@ -2239,36 +2754,12 @@ function setChatInputFromVoice(transcript: string): void {
   });
 }
 
-function isVoiceCaptureSecureOrigin(): boolean {
-  const host = window.location.hostname;
-  return window.location.protocol === 'https:' || host === 'localhost' || host === '127.0.0.1' || host === '::1';
-}
-
-function pickVoiceMimeType(): string {
-  const candidates = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/ogg;codecs=opus',
-    'audio/mp4',
-  ];
-  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? '';
-}
-
-function stopActiveVoiceStream(): void {
-  activeVoiceStream?.getTracks().forEach((track) => track.stop());
-  activeVoiceStream = null;
-}
-
 function getBrowserSpeechRecognition(): SpeechRecognitionConstructor | null {
   const speechWindow = window as Window & {
     SpeechRecognition?: SpeechRecognitionConstructor;
     webkitSpeechRecognition?: SpeechRecognitionConstructor;
   };
   return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
-}
-
-function shouldFallbackToBrowserSpeech(message: string): boolean {
-  return /SPEECH_TRANSCRIBE_API_KEY|OPENAI_API_KEY|API Key/i.test(message);
 }
 
 function stopBrowserSpeechInput(): void {
@@ -2283,15 +2774,16 @@ function stopBrowserSpeechInput(): void {
   recognition.stop();
 }
 
-function startBrowserSpeechFallback(): boolean {
+function startBrowserSpeechInput(): boolean {
   const Recognition = getBrowserSpeechRecognition();
   if (!Recognition) {
-    voiceMessage.value = '后端未配置语音识别 API Key，且当前浏览器不支持内置语音识别。请配置 SPEECH_TRANSCRIBE_API_KEY 或手动输入。';
+    voiceMessage.value = '当前浏览器不支持实时语音输入，请使用 Chrome/Edge 或手动输入。';
     listening.value = false;
     return false;
   }
 
   const recognition = new Recognition();
+  voiceRecognitionHadError = false;
   activeBrowserSpeechRecognition = recognition;
   recognition.lang = 'zh-CN';
   recognition.continuous = true;
@@ -2306,79 +2798,38 @@ function startBrowserSpeechFallback(): boolean {
     if (cleanTranscript) {
       voiceCurrentTranscript = cleanTranscript;
       setChatInputFromVoice(cleanTranscript);
-      voiceMessage.value = '正在使用浏览器语音识别，文字已同步到输入框';
+      voiceMessage.value = '正在使用浏览器实时语音输入，文字已同步到输入框';
     }
   };
   recognition.onerror = () => {
-    voiceMessage.value = '浏览器语音识别失败，请检查麦克风权限，或配置后端 SPEECH_TRANSCRIBE_API_KEY。';
+    voiceRecognitionHadError = true;
+    voiceMessage.value = '浏览器语音输入失败，请检查麦克风权限或输入设备。';
     listening.value = false;
     activeBrowserSpeechRecognition = null;
   };
   recognition.onend = () => {
     listening.value = false;
     activeBrowserSpeechRecognition = null;
+    if (voiceRecognitionHadError) {
+      return;
+    }
     voiceMessage.value = voiceCurrentTranscript.trim().length > 0
       ? '语音已写入输入框'
-      : '浏览器语音识别已结束，没有识别到有效文字';
+      : '浏览器语音输入已结束，没有识别到有效文字';
   };
 
   try {
     recognition.start();
     listening.value = true;
-    voiceMessage.value = '后端未配置语音识别 API Key，已切换为浏览器语音识别';
+    voiceMessage.value = '正在启动浏览器实时语音输入...';
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知错误';
-    voiceMessage.value = `浏览器语音识别启动失败：${message}`;
+    voiceMessage.value = `浏览器语音输入启动失败：${message}`;
     activeBrowserSpeechRecognition = null;
     listening.value = false;
     return false;
   }
-}
-
-async function uploadVoiceChunk(chunk: Blob, sequence: number, isFinal: boolean): Promise<void> {
-  try {
-    const result = await transcribeVoiceChunk({
-      audio: chunk,
-      sessionId: voiceSessionId,
-      sequence,
-      isFinal,
-      mimeType: voiceMimeType || chunk.type || 'audio/webm',
-      language: 'zh-CN',
-    });
-    if (result.text.trim().length > 0) {
-      voiceCurrentTranscript = result.text.trim();
-      setChatInputFromVoice(voiceCurrentTranscript);
-      voiceMessage.value = result.final ? '语音已写入输入框' : '后端实时识别中，文字已同步到输入框';
-      return;
-    }
-    if (shouldFallbackToBrowserSpeech(result.message || '')) {
-      if (activeVoiceRecorder && activeVoiceRecorder.state !== 'inactive') {
-        activeVoiceRecorder.ondataavailable = null;
-        activeVoiceRecorder.stop();
-      }
-      activeVoiceRecorder = null;
-      stopActiveVoiceStream();
-      void startBrowserSpeechFallback();
-      return;
-    }
-    voiceMessage.value = result.message || (result.final ? '没有识别到有效文字' : '正在录音，等待识别结果...');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误';
-    console.warn('Voice chunk transcription failed', message);
-    voiceMessage.value = `后端语音识别连接失败：${message}`;
-  }
-}
-
-function queueVoiceChunkUpload(chunk: Blob, isFinal: boolean): void {
-  const sequence = voiceSequence;
-  voiceSequence += 1;
-  voiceUploadQueue = voiceUploadQueue
-    .then(() => uploadVoiceChunk(chunk, sequence, isFinal))
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : '未知错误';
-      voiceMessage.value = `后端语音识别失败：${message}`;
-    });
 }
 
 function stopVoiceInput(): void {
@@ -2388,14 +2839,8 @@ function stopVoiceInput(): void {
     voiceMessage.value = voiceCurrentTranscript.trim().length > 0 ? '语音已写入输入框' : '语音输入已停止';
     return;
   }
-  voiceStopping = true;
-  voiceMessage.value = '正在整理语音输入...';
-  if (activeVoiceRecorder && activeVoiceRecorder.state !== 'inactive') {
-    activeVoiceRecorder.stop();
-    return;
-  }
-  stopActiveVoiceStream();
   listening.value = false;
+  voiceMessage.value = '语音输入已停止';
 }
 
 function prepareVoiceInputSession(): void {
@@ -2405,13 +2850,10 @@ function prepareVoiceInputSession(): void {
   voiceInputPrefix = chatInput.value.slice(0, selectionStart);
   voiceInputSuffix = chatInput.value.slice(selectionEnd);
   voiceCurrentTranscript = '';
-  voiceSessionId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  voiceSequence = 0;
-  voiceStopping = false;
-  voiceUploadQueue = Promise.resolve();
+  voiceRecognitionHadError = false;
 }
 
-async function startVoiceInput(): Promise<void> {
+function startVoiceInput(): void {
   if (listening.value) {
     stopVoiceInput();
     return;
@@ -2420,80 +2862,7 @@ async function startVoiceInput(): Promise<void> {
     stopBrowserSpeechInput();
   }
   prepareVoiceInputSession();
-  if (!navigator.mediaDevices?.getUserMedia) {
-    startBrowserSpeechFallback();
-    return;
-  }
-  if (!isVoiceCaptureSecureOrigin()) {
-    voiceMessage.value = '录音需要 HTTPS 或 localhost，请用 localhost 地址打开。';
-    return;
-  }
-
-  const input = chatInputRef.value;
-  const selectionStart = input?.selectionStart ?? chatInput.value.length;
-  const selectionEnd = input?.selectionEnd ?? chatInput.value.length;
-  voiceInputPrefix = chatInput.value.slice(0, selectionStart);
-  voiceInputSuffix = chatInput.value.slice(selectionEnd);
-  voiceCurrentTranscript = '';
-  voiceSessionId = `voice-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  voiceSequence = 0;
-  voiceStopping = false;
-  voiceUploadQueue = Promise.resolve();
-
-  voiceMessage.value = '正在检查语音识别后端...';
-  const voiceStatus = await getVoiceTranscriptionStatus();
-  if (voiceStatus.configured === false) {
-    voiceMessage.value = voiceStatus.message || '后端未配置语音识别 API Key，正在切换浏览器语音识别';
-    startBrowserSpeechFallback();
-    return;
-  }
-
-  try {
-    activeVoiceStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-    voiceMimeType = pickVoiceMimeType();
-    activeVoiceRecorder = new MediaRecorder(
-      activeVoiceStream,
-      voiceMimeType ? { mimeType: voiceMimeType } : undefined,
-    );
-    activeVoiceRecorder.ondataavailable = (event) => {
-      if (event.data.size <= 0) {
-        return;
-      }
-      queueVoiceChunkUpload(event.data, voiceStopping);
-    };
-    activeVoiceRecorder.onerror = () => {
-      voiceMessage.value = '录音失败，请检查麦克风权限或输入设备。';
-      stopVoiceInput();
-    };
-    activeVoiceRecorder.onstop = () => {
-      const wasStopping = voiceStopping;
-      activeVoiceRecorder = null;
-      stopActiveVoiceStream();
-      voiceUploadQueue.finally(() => {
-        listening.value = false;
-        if (voiceCurrentTranscript.trim().length > 0) {
-          voiceMessage.value = '语音已写入输入框';
-        } else if (wasStopping) {
-          voiceMessage.value = '没有识别到有效文字';
-        }
-      });
-    };
-    listening.value = true;
-    voiceMessage.value = '正在录音，后端会实时识别并写入输入框';
-    activeVoiceRecorder.start(1200);
-  } catch (error) {
-    listening.value = false;
-    activeVoiceRecorder = null;
-    stopActiveVoiceStream();
-    const message = error instanceof Error ? error.message : '未知错误';
-    voiceMessage.value = `录音启动失败：${message}`;
-  }
+  startBrowserSpeechInput();
 }
 
 async function selectKnowledgeBase(kbId: number): Promise<void> {
@@ -2688,17 +3057,10 @@ function persistDashboardBeforeUnload(): void {
 }
 
 onMounted(() => {
+  ensureAssistantThreadState();
   void initializeDashboard();
   window.addEventListener('resize', handleAssistantViewportResize);
   window.addEventListener('beforeunload', persistDashboardBeforeUnload);
-  chatMessages.value = [
-    {
-      id: 'assistant-welcome',
-      role: 'assistant',
-      content: '我是智慧农业专家助手。你可以输入文字、上传叶片图片，或用语音提问。',
-      created_at: Date.now(),
-    },
-  ];
   refreshTimer = window.setInterval(() => {
     void loadDashboard(true);
   }, 5000);
@@ -2732,12 +3094,7 @@ onBeforeUnmount(() => {
   if (chatImageUrl.value.startsWith('blob:')) {
     URL.revokeObjectURL(chatImageUrl.value);
   }
-  if (activeVoiceRecorder && activeVoiceRecorder.state !== 'inactive') {
-    activeVoiceRecorder.stop();
-  }
-  activeVoiceRecorder = null;
   stopBrowserSpeechInput();
-  stopActiveVoiceStream();
 });
 </script>
 
@@ -2937,6 +3294,7 @@ onBeforeUnmount(() => {
 
           <section
             v-else
+            ref="metricEditorStageRef"
             :class="['metric-editor-stage', metricEditorTransition ? `metric-editor-stage--${metricEditorTransition}` : '']"
             :style="metricEditorStyle"
           >
@@ -3055,8 +3413,13 @@ onBeforeUnmount(() => {
         <section v-show="activeView === 'disease'" class="view-stack">
           <section class="panel">
             <div class="section-heading">
+              <div class="section-heading__copy">
               <h2>病害识别</h2>
               <span>上传叶片图片后展示 YOLO 风格检测结果</span>
+              </div>
+              <button class="text-button" type="button" @click="openDiseasePhotoLibrary">
+                <Image :size="18" /> 图片库
+              </button>
             </div>
             <div class="disease-layout">
               <div class="image-uploader">
@@ -3069,6 +3432,7 @@ onBeforeUnmount(() => {
                 <button v-if="diseaseImageUrl" class="text-button" type="button" @click="clearDiseaseImage">
                   <X :size="16" /> 清除图片
                 </button>
+                <p v-if="diseaseUploadError" class="form-error disease-error">{{ diseaseUploadError }}</p>
               </div>
               <div class="detection-stage" :class="{ 'detection-stage--empty': !diseaseImageUrl }">
                 <img v-if="diseaseImageUrl" :src="diseaseImageUrl" alt="上传的叶片图片" />
@@ -3112,6 +3476,90 @@ onBeforeUnmount(() => {
             <p v-else class="empty-text">暂无识别结果，上传图片后会展示检测框、类别、置信度、解释和建议。</p>
           </section>
         </section>
+
+        <div v-if="diseasePhotoLibraryOpen" class="modal-backdrop" @click.self="closeDiseasePhotoLibrary">
+          <section class="modal-card disease-library-modal" role="dialog" aria-modal="true" aria-labelledby="disease-library-title">
+            <div class="modal-card__header">
+              <div>
+                <span>病害识别图片</span>
+                <h2 id="disease-library-title">图片库</h2>
+              </div>
+              <div class="disease-library-actions">
+                <label class="text-button disease-library-upload">
+                  <Upload :size="17" /> 上传图片
+                  <input type="file" accept="image/*" @change="handleDiseaseUpload" />
+                </label>
+                <button class="icon-button" type="button" title="刷新图片库" @click="refreshDiseasePhotoLibrary">
+                  <RefreshCw :class="{ spinning: diseasePhotoLoading }" :size="18" />
+                </button>
+                <button class="icon-button" type="button" title="关闭" @click="closeDiseasePhotoLibrary">
+                  <X :size="18" />
+                </button>
+              </div>
+            </div>
+
+            <p v-if="diseasePhotoError" class="form-error disease-error">{{ diseasePhotoError }}</p>
+
+            <div class="disease-library-body">
+              <div class="disease-album">
+                <p v-if="diseasePhotoLoading && diseasePhotos.length === 0" class="empty-text">正在读取图片库...</p>
+                <p v-else-if="diseasePhotos.length === 0" class="empty-text">暂无已上传图片。</p>
+                <section v-for="group in diseasePhotoGroups" :key="group.dateKey" class="disease-album-group">
+                  <h3>{{ group.dateLabel }}</h3>
+                  <div class="disease-photo-grid">
+                    <button
+                      v-for="photo in group.photos"
+                      :key="photo.photoId"
+                      class="disease-photo-tile"
+                      :class="{ selected: selectedDiseasePhoto?.photoId === photo.photoId }"
+                      type="button"
+                      @click="selectDiseasePhoto(photo)"
+                    >
+                      <img :src="photo.url" :alt="photo.originalName || '病害识别图片'" loading="lazy" />
+                      <span>{{ diseasePhotoTimeLabel(photo.createdAt) }}</span>
+                    </button>
+                  </div>
+                </section>
+              </div>
+
+              <aside class="disease-photo-detail" :class="{ 'disease-photo-detail--empty': !selectedDiseasePhoto }">
+                <template v-if="selectedDiseasePhoto">
+                  <div class="disease-photo-detail__image">
+                    <img :src="selectedDiseasePhoto.url" :alt="selectedDiseasePhoto.originalName || '病害识别图片详情'" />
+                  </div>
+                  <div class="disease-photo-detail__meta">
+                    <strong>{{ selectedDiseasePhoto.originalName || '未命名图片' }}</strong>
+                    <span>{{ selectedDiseasePhoto.createdAt }} · {{ diseasePhotoSizeLabel(selectedDiseasePhoto.size) }}</span>
+                  </div>
+                  <template v-if="selectedDiseasePhotoAnalysis">
+                    <p class="summary-text">{{ selectedDiseasePhotoAnalysis.summary }}</p>
+                    <div class="result-grid disease-photo-detail__results">
+                      <article v-for="det in selectedDiseasePhotoAnalysis.detections" :key="det.id">
+                        <strong>{{ det.label }}</strong>
+                        <span>类别：{{ det.class_name }}</span>
+                        <span>置信度：{{ Math.round(det.confidence * 100) }}%</span>
+                      </article>
+                    </div>
+                    <p class="callout-text">{{ selectedDiseasePhotoAnalysis.explanation }}</p>
+                    <ul class="suggestion-list disease-photo-detail__suggestions">
+                      <li v-for="suggestion in selectedDiseasePhotoAnalysis.suggestions" :key="suggestion">{{ suggestion }}</li>
+                    </ul>
+                  </template>
+                  <p v-else class="empty-text">这张图片还没有保存识别结果。</p>
+                  <button
+                    class="text-button disease-delete-button"
+                    type="button"
+                    :disabled="diseasePhotoDeletingId === selectedDiseasePhoto.photoId"
+                    @click="removeDiseasePhoto(selectedDiseasePhoto)"
+                  >
+                    <Trash2 :size="17" /> {{ diseasePhotoDeletingId === selectedDiseasePhoto.photoId ? '删除中...' : '删除图片' }}
+                  </button>
+                </template>
+                <p v-else class="empty-text">点击左侧缩略图查看完整图片和识别结果。</p>
+              </aside>
+            </div>
+          </section>
+        </div>
 
         <section v-show="activeView === 'ai'" class="view-stack">
           <section class="panel ai-panel">
@@ -3467,14 +3915,24 @@ onBeforeUnmount(() => {
       <aside v-if="assistantOpen" class="assistant-panel">
         <div class="assistant-panel__header">
           <div>
-            <span>全局对话</span>
+            <span>全局对话 · {{ activeAssistantThread?.title ?? '新对话' }}</span>
             <h2>AI 助手</h2>
           </div>
-          <button class="icon-button" type="button" title="关闭 AI 助手" @click="assistantOpen = false">
-            <X :size="18" />
-          </button>
+          <div class="assistant-header-actions">
+            <button class="icon-button" type="button" title="新对话" :disabled="chatSending" @click="createNewAssistantThread">
+              <Plus :size="18" />
+            </button>
+            <button class="icon-button" type="button" title="历史对话" @click="assistantHistoryOpen = true">
+              <History :size="18" />
+            </button>
+            <button class="icon-button" type="button" title="关闭 AI 助手" @click="assistantOpen = false">
+              <X :size="18" />
+            </button>
+          </div>
         </div>
-        <StatusPill :label="voiceMessage" :state="listening ? 'watch' : 'neutral'" />
+        <div class="assistant-voice-status">
+          <StatusPill :label="voiceMessage" :state="listening ? 'watch' : 'neutral'" />
+        </div>
         <div class="assistant-messages-wrap">
           <div ref="assistantMessagesRef" class="chat-list assistant-panel__messages" @scroll="handleAssistantMessagesScroll">
             <article
@@ -3552,6 +4010,61 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </aside>
+      <div v-if="assistantHistoryOpen" class="modal-backdrop" @click.self="assistantHistoryOpen = false">
+        <section class="modal-card assistant-history-modal" role="dialog" aria-modal="true" aria-labelledby="assistant-history-title">
+          <div class="modal-card__header">
+            <div>
+              <span>AI 助手</span>
+              <h2 id="assistant-history-title">历史对话</h2>
+            </div>
+            <button class="icon-button" type="button" title="关闭" @click="assistantHistoryOpen = false">
+              <X :size="18" />
+            </button>
+          </div>
+          <div class="assistant-history-list">
+            <article
+              v-for="thread in sortedAssistantThreads"
+              :key="thread.id"
+              class="assistant-history-item"
+              :class="{ 'assistant-history-item--active': thread.id === activeAssistantThreadId, 'assistant-history-item--pinned': thread.pinned }"
+            >
+              <button class="assistant-history-item__main" type="button" :disabled="chatSending" @click="switchAssistantThread(thread.id)">
+                <strong>
+                  <Pin v-if="thread.pinned" :size="14" />
+                  {{ thread.title }}
+                </strong>
+                <span>{{ assistantThreadPreview(thread) }}</span>
+                <time>{{ formatDateTime(thread.updated_at) }}</time>
+              </button>
+              <div v-if="renamingAssistantThreadId === thread.id" class="assistant-history-rename">
+                <input
+                  v-model="assistantThreadNameDraft"
+                  placeholder="对话名称"
+                  @keydown.enter.prevent="commitRenameAssistantThread(thread.id)"
+                  @keydown.esc.prevent="resetAssistantThreadRename"
+                />
+                <button class="icon-button" type="button" title="保存名称" @click="commitRenameAssistantThread(thread.id)">
+                  <Save :size="16" />
+                </button>
+                <button class="icon-button" type="button" title="取消" @click="resetAssistantThreadRename">
+                  <X :size="16" />
+                </button>
+              </div>
+              <div v-else class="assistant-history-actions">
+                <button class="icon-button" type="button" :title="thread.pinned ? '取消置顶' : '置顶对话'" @click="toggleAssistantThreadPinned(thread.id)">
+                  <Pin :size="16" />
+                </button>
+                <button class="icon-button" type="button" title="重命名" @click="beginRenameAssistantThread(thread)">
+                  <Pencil :size="16" />
+                </button>
+                <button class="icon-button" type="button" title="删除" :disabled="chatSending" @click="deleteAssistantThread(thread.id)">
+                  <Trash2 :size="16" />
+                </button>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>

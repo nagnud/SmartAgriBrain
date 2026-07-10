@@ -7,10 +7,12 @@ dependencies.lock
 # Python
 __pycache__/
 *.pyc
+.env
 .venv/
 venv/
 backend_api/.venv/
 backend_api/smartagribrain.db
+backend_api/uploads/
 *.sqlite
 *.sqlite3
 

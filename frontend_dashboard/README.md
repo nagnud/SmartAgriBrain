@@ -1,4 +1,4 @@
-# ESP32-C5 智慧农业 Web 前端
+﻿# ESP32-C5 智慧农业 Web 前端
 
 这是智慧农业电脑端 Web 管理平台，面向大棚环境监测、作物健康识别、知识库管理、AI 专家问答和远程设备控制等日常使用场景。
 
@@ -70,11 +70,11 @@ VITE_USE_MOCK_KNOWLEDGE=false
 
 如果只想让专家问答接入后端、AI 农事建议仍使用前端 Mock，把 `VITE_USE_MOCK_AI_ADVICE` 改回 `true` 即可。
 
-后端 AI 农事建议和专家问答使用 `backend_api/.env` 中的 DeepSeek 配置。这个文件会随项目一起推送，别人拿到代码后运行后端脚本即可使用同一套配置：
+后端 AI 农事建议和专家问答使用 `backend_api/.env` 中的 DeepSeek 配置。`.env` 是本地密钥文件，不要提交；别人拿到代码后可以复制 `backend_api/.env.example` 并填入自己的 Key：
 
 ```env
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_API_KEY=你的 DeepSeek API Key
+DEEPSEEK_API_KEY=your-deepseek-api-key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=90
 ```

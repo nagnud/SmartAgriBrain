@@ -52,6 +52,7 @@ def get_db() -> Generator[Session, None, None]:
 def init_database() -> None:
     import app_state_models  # noqa: F401
     import kb_models  # noqa: F401
+    import photo_models  # noqa: F401
     from kb_service import seed_initial_knowledge
 
     Base.metadata.create_all(bind=engine)
