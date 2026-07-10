@@ -29,6 +29,7 @@ import type {
   KnowledgeBaseInfo,
   KnowledgeItemInfo,
   KnowledgeTextAddResult,
+  PersistedDashboardState,
   TelemetryPayload,
   VoiceTranscriptionResponse,
   VoiceTranscriptionStatus,
@@ -43,19 +44,68 @@ const useMockAssistant = import.meta.env.VITE_USE_MOCK_ASSISTANT === undefined
 const useMockAiAdvice = import.meta.env.VITE_USE_MOCK_AI_ADVICE === undefined
   ? useMock
   : import.meta.env.VITE_USE_MOCK_AI_ADVICE !== 'false';
+const useMockKnowledge = import.meta.env.VITE_USE_MOCK_KNOWLEDGE === undefined
+  ? useMock
+  : import.meta.env.VITE_USE_MOCK_KNOWLEDGE !== 'false';
+const dashboardStateStorageKey = 'smartagribrain-dashboard-state';
 
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  });
+type RequestJsonInit = RequestInit & {
+  timeoutMs?: number;
+};
+
+async function requestJson<T>(path: string, init?: RequestJsonInit): Promise<T> {
+  const { timeoutMs, ...requestInit } = init ?? {};
+  const controller = timeoutMs ? new AbortController() : null;
+  const timeoutId = timeoutMs && controller
+    ? window.setTimeout(() => controller.abort(), timeoutMs)
+    : undefined;
+  let response!: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(requestInit.headers ?? {}),
+      },
+      ...requestInit,
+      signal: controller?.signal ?? requestInit.signal,
+    });
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  }
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<T>;
+}
+
+function readLocalDashboardState(): PersistedDashboardState | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(dashboardStateStorageKey);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as PersistedDashboardState;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (error) {
+    console.warn('Local dashboard state read failed.', error);
+    return null;
+  }
+}
+
+function writeLocalDashboardState(value: PersistedDashboardState): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(dashboardStateStorageKey, JSON.stringify(value));
+  } catch (error) {
+    console.warn('Local dashboard state save failed.', error);
+  }
 }
 
 function buildDisconnectedAiAnalysis(latest: TelemetryPayload, detail = 'AI 服务暂时不可用。'): AiAnalysisResponse {
@@ -116,6 +166,7 @@ export async function analyzeFarm(latest: TelemetryPayload): Promise<AiAnalysisR
         sensors: latest.sensors,
         status: latest.status,
       }),
+      timeoutMs: 2500,
     });
   } catch (error) {
     console.warn('AI farm advice API unavailable.', error);
@@ -145,6 +196,40 @@ export async function getCurrentWeather(): Promise<WeatherPayload> {
     return buildMockWeather();
   }
   return requestJson<WeatherPayload>('/api/weather/current');
+}
+
+export async function getPersistedDashboardState(): Promise<PersistedDashboardState | null> {
+  const localState = readLocalDashboardState();
+  if (localState) {
+    return localState;
+  }
+  try {
+    const result = await requestJson<{ key: string; value: PersistedDashboardState }>('/api/v1/state/dashboard', {
+      timeoutMs: 600,
+    });
+    const backendState = result.value && typeof result.value === 'object' ? result.value : null;
+    if (backendState && Object.keys(backendState).length > 0) {
+      writeLocalDashboardState(backendState);
+      return backendState;
+    }
+    return null;
+  } catch (error) {
+    console.warn('Persisted dashboard state unavailable.', error);
+    return localState;
+  }
+}
+
+export async function savePersistedDashboardState(value: PersistedDashboardState): Promise<void> {
+  writeLocalDashboardState(value);
+  try {
+    await requestJson<{ key: string; value: PersistedDashboardState; updatedAt: string }>('/api/v1/state/dashboard', {
+      method: 'POST',
+      body: JSON.stringify({ value }),
+      timeoutMs: 1200,
+    });
+  } catch (error) {
+    console.warn('Persisted dashboard state save failed.', error);
+  }
 }
 
 export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise<DiseaseDetectionResult> {
@@ -247,23 +332,23 @@ export async function getVoiceTranscriptionStatus(): Promise<VoiceTranscriptionS
 }
 
 export async function getKnowledgeBases(): Promise<KnowledgeBaseInfo[]> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return mockKnowledgeBases;
   }
-  const result = await requestJson<{ items: KnowledgeBaseInfo[] }>('/api/v1/kb/list');
+  const result = await requestJson<{ items: KnowledgeBaseInfo[] }>('/api/v1/kb/list', { timeoutMs: 2500 });
   return result.items;
 }
 
 export async function getKnowledgeItems(kbId: number): Promise<KnowledgeItemInfo[]> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return mockKnowledgeItems.filter((item) => item.kbId === kbId);
   }
-  const result = await requestJson<{ items: KnowledgeItemInfo[] }>(`/api/v1/kb/items?kbId=${encodeURIComponent(kbId)}`);
+  const result = await requestJson<{ items: KnowledgeItemInfo[] }>(`/api/v1/kb/items?kbId=${encodeURIComponent(kbId)}`, { timeoutMs: 2500 });
   return result.items;
 }
 
 export async function createKnowledgeBase(name: string, description: string): Promise<KnowledgeBaseInfo> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return createMockKnowledgeBase(name, description);
   }
   return requestJson<KnowledgeBaseInfo>('/api/v1/kb/create', {
@@ -273,7 +358,7 @@ export async function createKnowledgeBase(name: string, description: string): Pr
 }
 
 export async function updateKnowledgeBase(kbId: number, name: string, description: string): Promise<KnowledgeBaseInfo> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return updateMockKnowledgeBase(kbId, name, description);
   }
   return requestJson<KnowledgeBaseInfo>('/api/v1/kb/update', {
@@ -283,7 +368,7 @@ export async function updateKnowledgeBase(kbId: number, name: string, descriptio
 }
 
 export async function deleteKnowledgeBase(kbId: number): Promise<void> {
-  if (useMock) {
+  if (useMockKnowledge) {
     deleteMockKnowledgeBase(kbId);
     return;
   }
@@ -294,7 +379,7 @@ export async function deleteKnowledgeBase(kbId: number): Promise<void> {
 }
 
 export async function addKnowledgeItem(kbId: number, title: string, content: string): Promise<KnowledgeTextAddResult> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return addMockKnowledgeItem(kbId, title, content);
   }
   return requestJson<KnowledgeTextAddResult>('/api/v1/kb/add_text', {
@@ -304,7 +389,7 @@ export async function addKnowledgeItem(kbId: number, title: string, content: str
 }
 
 export async function updateKnowledgeItem(kbId: number, itemId: number, title: string, content: string): Promise<KnowledgeTextAddResult> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return updateMockKnowledgeItem(kbId, itemId, title, content);
   }
   return requestJson<KnowledgeTextAddResult>('/api/v1/kb/item/update', {
@@ -314,7 +399,7 @@ export async function updateKnowledgeItem(kbId: number, itemId: number, title: s
 }
 
 export async function deleteKnowledgeItem(kbId: number, itemId: number): Promise<void> {
-  if (useMock) {
+  if (useMockKnowledge) {
     deleteMockKnowledgeItem(kbId, itemId);
     return;
   }
@@ -325,7 +410,7 @@ export async function deleteKnowledgeItem(kbId: number, itemId: number): Promise
 }
 
 export async function analyzeKnowledge(kbId: number, fieldId: string, question: string): Promise<KnowledgeAnalyzeResult> {
-  if (useMock) {
+  if (useMockKnowledge) {
     return analyzeMockKnowledge(kbId, question);
   }
   return requestJson<KnowledgeAnalyzeResult>('/api/v1/kb/analyze', {

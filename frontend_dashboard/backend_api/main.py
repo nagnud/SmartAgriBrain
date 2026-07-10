@@ -3,7 +3,10 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from assistant_service import assistant_chat
+from app_state_routes import router as app_state_router
+from database import init_database
 from farm_advice_service import analyze_farm_advice
+from kb_routes import router as kb_router
 from schemas import (
     AssistantChatRequest,
     AssistantChatResponse,
@@ -30,6 +33,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(kb_router)
+app.include_router(app_state_router)
+
+
+@app.on_event("startup")
+def startup() -> None:
+    init_database()
 
 
 @app.get("/api/v1/health", response_model=HealthResponse)

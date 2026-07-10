@@ -50,6 +50,26 @@ export interface WeatherPayload {
   updated_at: number;
 }
 
+export interface PersistedDashboardState {
+  version: number;
+  activeView?: string;
+  selectedHistoryMetricKeys?: string[];
+  metricTargetRanges?: Record<string, MetricTargetRange>;
+  deviceStatus?: DeviceRuntimeStatus;
+  commandResults?: CommandResult[];
+  smartControlEnabled?: boolean;
+  smartControlParamStates?: Record<string, SmartControlParamState>;
+  smartControlLastPublishAt?: number | null;
+  smartControlPanelOpen?: boolean;
+  selectedKbId?: number;
+  knowledgeQuestion?: string;
+  knowledgeAnswer?: KnowledgeAnalyzeResult | null;
+  assistantOpen?: boolean;
+  assistantWidth?: number;
+  chatInput?: string;
+  chatMessages?: ChatMessage[];
+}
+
 export interface MetricTargetRange {
   min: number;
   max: number;

@@ -1,18 +1,23 @@
 <script setup lang="ts">
 import * as echarts from 'echarts';
 import type { EChartsOption } from 'echarts';
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const props = defineProps<{
   title: string;
   option: EChartsOption;
   active?: boolean;
+  minWidth?: number;
 }>();
 
 const chartEl = ref<HTMLDivElement | null>(null);
+const chartStyle = computed(() => ({
+  minWidth: props.minWidth ? `${props.minWidth}px` : undefined,
+}));
 let chart: echarts.ECharts | null = null;
 let resizeObserver: ResizeObserver | null = null;
-let frameId = 0;
+let renderFrameId = 0;
+let resizeFrameId = 0;
 
 function renderChart(): void {
   if (!chartEl.value) {
@@ -30,7 +35,7 @@ function renderChart(): void {
   chart.setOption(props.option, { notMerge: true, lazyUpdate: true });
 }
 
-function resizeChart(): void {
+function applyChartResize(): void {
   if (!chartEl.value || props.active === false) {
     return;
   }
@@ -43,18 +48,34 @@ function resizeChart(): void {
 }
 
 function scheduleRender(): void {
-  if (frameId) {
-    window.cancelAnimationFrame(frameId);
+  if (renderFrameId) {
+    window.cancelAnimationFrame(renderFrameId);
   }
-  frameId = window.requestAnimationFrame(() => {
-    frameId = window.requestAnimationFrame(() => {
+  renderFrameId = window.requestAnimationFrame(() => {
+    renderFrameId = window.requestAnimationFrame(() => {
+      renderFrameId = 0;
       renderChart();
     });
   });
 }
 
+function scheduleResize(): void {
+  if (resizeFrameId) {
+    return;
+  }
+  resizeFrameId = window.requestAnimationFrame(() => {
+    resizeFrameId = 0;
+    applyChartResize();
+  });
+}
+
 watch(
   () => props.option,
+  () => scheduleRender(),
+);
+
+watch(
+  () => props.minWidth,
   () => scheduleRender(),
 );
 
@@ -71,20 +92,23 @@ onMounted(async () => {
   scheduleRender();
   if (chartEl.value) {
     resizeObserver = new ResizeObserver(() => {
-      scheduleRender();
+      scheduleResize();
     });
     resizeObserver.observe(chartEl.value);
   }
-  window.addEventListener('resize', resizeChart);
+  window.addEventListener('resize', scheduleResize);
 });
 
 onBeforeUnmount(() => {
-  if (frameId) {
-    window.cancelAnimationFrame(frameId);
+  if (renderFrameId) {
+    window.cancelAnimationFrame(renderFrameId);
+  }
+  if (resizeFrameId) {
+    window.cancelAnimationFrame(resizeFrameId);
   }
   resizeObserver?.disconnect();
   resizeObserver = null;
-  window.removeEventListener('resize', resizeChart);
+  window.removeEventListener('resize', scheduleResize);
   chart?.dispose();
   chart = null;
 });
@@ -96,6 +120,8 @@ onBeforeUnmount(() => {
       <h2>{{ title }}</h2>
       <slot name="toolbar"></slot>
     </div>
-    <div ref="chartEl" class="chart-panel__canvas"></div>
+    <div class="chart-panel__viewport">
+      <div ref="chartEl" class="chart-panel__canvas" :style="chartStyle"></div>
+    </div>
   </section>
 </template>

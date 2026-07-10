@@ -4,7 +4,9 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from database import SessionLocal
 from deepseek_service import call_deepseek_chat, deepseek_api_key, strip_code_fence
+from kb_service import search_knowledge_references
 from schemas import (
     AssistantAction,
     AssistantChatMessage,
@@ -225,6 +227,19 @@ def sanitize_actions(raw_actions: Any) -> List[AssistantAction]:
 
 
 def references_from_payload(payload: AssistantChatRequest) -> List[KnowledgeReference]:
+    try:
+        with SessionLocal() as db:
+            references = search_knowledge_references(
+                db,
+                payload.question,
+                kb_id=payload.knowledge_base_id,
+                limit=5,
+            )
+            if references:
+                return references
+    except Exception as error:
+        print(f"knowledge reference database lookup unavailable: {error}")
+
     references: List[KnowledgeReference] = []
     kb_id = payload.knowledge_base_id
     for index, item in enumerate(payload.knowledge_items[:5], start=1):

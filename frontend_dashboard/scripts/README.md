@@ -24,6 +24,14 @@
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
 ```
 
+知识库使用后端数据库保存。默认配置为本地 SQLite，首次启动会自动创建 `backend_api/smartagribrain.db` 并写入初始知识库：
+
+```text
+DATABASE_URL=sqlite:///./smartagribrain.db
+```
+
+以后部署多人线上版时，可以在 `backend_api/.env` 中把 `DATABASE_URL` 改为 PostgreSQL 地址。
+
 真实语音识别需要填写：
 
 ```text

@@ -10,10 +10,18 @@ __pycache__/
 .venv/
 venv/
 backend_api/.venv/
+backend_api/smartagribrain.db
+*.sqlite
+*.sqlite3
 
 # Node / Vue
 node_modules/
 dist/
+tsconfig.tsbuildinfo
+
+# Local push cache
+.push-cache/
+.push-tmp/
 
 # VS Code
 .vscode/

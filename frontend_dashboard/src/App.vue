@@ -20,7 +20,6 @@ import {
   Leaf,
   Lightbulb,
   Mic,
-  MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
@@ -54,7 +53,9 @@ import {
   getKnowledgeBases,
   getKnowledgeItems,
   getLatestTelemetry,
+  getPersistedDashboardState,
   getVoiceTranscriptionStatus,
+  savePersistedDashboardState,
   sendDeviceCommand,
   sendExpertChatMessage,
   transcribeVoiceChunk,
@@ -68,12 +69,14 @@ import type {
   ChatMessage,
   CommandResult,
   DeviceCommand,
+  DeviceRuntimeStatus,
   DiseaseDetectionResult,
   HistoryPoint,
   KnowledgeAnalyzeResult,
   KnowledgeBaseInfo,
   KnowledgeItemInfo,
   MetricTargetRange,
+  PersistedDashboardState,
   SmartControlDecision,
   SmartControlDemands,
   SmartControlParamKey,
@@ -82,7 +85,7 @@ import type {
   TelemetryPayload,
   WeatherPayload,
 } from './types';
-import { airQualityFromGasResistance, formatDateTime, formatTime, numberText } from './utils/format';
+import { formatDateTime, formatTime, numberText } from './utils/format';
 import {
   applySmartControlOverrides,
   clampControlValue,
@@ -228,7 +231,7 @@ const chatSending = ref(false);
 const assistantOpen = ref(false);
 const defaultAssistantWidth = 460;
 const minAssistantWidth = 360;
-const minWorkspaceWidth = 640;
+const minWorkspaceWidth = 1220;
 const maxAssistantViewportRatio = 0.55;
 const assistantWidth = ref(defaultAssistantWidth);
 const assistantResizing = ref(false);
@@ -255,9 +258,12 @@ const itemTitleDraft = ref('番茄高湿病害风险');
 const itemContentDraft = ref('番茄在高湿、通风不足时容易出现叶斑病和霜霉病，应先通风降湿并减少叶面结露。');
 const editingKbId = ref(0);
 const editingItemId = ref(0);
+const knowledgeBaseDialogOpen = ref(false);
+const knowledgeItemDialogOpen = ref(false);
 const knowledgeQuestion = ref('结合当前农情，给出水泵、补光灯、风机和卷帘的管理建议。');
 const knowledgeAnswer = ref<KnowledgeAnalyzeResult | null>(null);
 const knowledgeLoading = ref(false);
+const knowledgeError = ref('');
 const selectedHistoryMetricKeys = ref<HistoryMetricKey[]>(historyMetricDefinitions.map((item) => item.key));
 const metricTargetRanges = ref<Record<HistoryMetricKey, MetricTargetRange>>({
   temperature: { min: 24, max: 30 },
@@ -274,6 +280,9 @@ const metricEditorChartActive = ref(false);
 const targetMinDraft = ref('');
 const targetMaxDraft = ref('');
 const targetRangeError = ref('');
+const targetRangeSavedMessage = ref('');
+const targetRangeSaving = ref(false);
+let targetRangeSavedTimer: number | undefined;
 const metricEditorStyle = ref<Record<string, string>>({
   '--metric-editor-left': '0px',
   '--metric-editor-top': '0px',
@@ -294,6 +303,8 @@ let activeVoiceStream: MediaStream | null = null;
 let activeBrowserSpeechRecognition: SpeechRecognitionLike | null = null;
 let assistantThinkingTimer: number | undefined;
 let assistantTypeRunId = 0;
+let assistantResizeFrame = 0;
+let pendingAssistantResizeClientX = 0;
 let voiceInputPrefix = '';
 let voiceInputSuffix = '';
 let voiceCurrentTranscript = '';
@@ -304,6 +315,10 @@ let voiceStopping = false;
 let voiceUploadQueue: Promise<void> = Promise.resolve();
 let metricEditorLastSourceRect: MetricEditorRect | null = null;
 const metricEditorSourceRects = new Map<HistoryMetricKey, MetricEditorRect>();
+let persistedDeviceStatus: DeviceRuntimeStatus | null = null;
+let persistentStateReady = false;
+let applyingPersistentState = false;
+let persistentStateSaveTimer: number | undefined;
 
 const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
   temperature: 0.01,
@@ -314,13 +329,6 @@ const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
   soil_ec: 0.01,
   gas_resistance: 10,
 };
-
-const currentAirQuality = computed(() => {
-  if (!latest.value) {
-    return { label: '等待数据', level: 'watch' as const };
-  }
-  return airQualityFromGasResistance(latest.value.sensors.gas_resistance);
-});
 
 const selectedKnowledgeBase = computed(() => knowledgeBases.value.find((item) => item.kbId === selectedKbId.value) ?? null);
 const activeAlarms = computed(() => alarms.value.filter((item) => !item.handled).length);
@@ -543,8 +551,6 @@ const smartControlParams = computed<SmartControlParamVm[]>(() => smartControlPar
   };
 }));
 
-const smartControlAutoCount = computed(() => smartControlParams.value.filter((item) => item.mode === 'auto').length);
-const smartControlManualCount = computed(() => smartControlParams.value.length - smartControlAutoCount.value);
 const smartControlStatusState = computed<StatusLevel>(() => {
   if (!smartControlEnabled.value) {
     return 'neutral';
@@ -600,25 +606,41 @@ function metricChartOptionFor(metric: HistoryMetricDefinition | null): EChartsOp
 
 const overviewChartOption = computed<EChartsOption>(() => buildMultiMetricChartOption(false));
 const historyChartOption = computed<EChartsOption>(() => buildMultiMetricChartOption(true));
+const multiMetricChartMinWidth = computed(() => {
+  const selectedCount = selectedHistoryMetricKeys.value.length;
+  const layout = multiMetricAxisLayout(selectedCount);
+  const plotWidth = selectedCount >= 7 ? 540 : selectedCount >= 5 ? 500 : selectedCount >= 3 ? 440 : 360;
+  return Math.max(720, layout.left + layout.right + plotWidth);
+});
+
+function multiMetricAxisLayout(selectedCount: number): { left: number; right: number; top: number; spacing: number } {
+  const leftAxisCount = Math.ceil(selectedCount / 2);
+  const rightAxisCount = selectedCount - leftAxisCount;
+  const spacing = selectedCount >= 7 ? 76 : selectedCount >= 5 ? 68 : 60;
+  return {
+    left: Math.max(86, 86 + Math.max(0, leftAxisCount - 1) * spacing),
+    right: Math.max(86, 86 + Math.max(0, rightAxisCount - 1) * spacing),
+    top: selectedCount >= 5 ? 82 : 66,
+    spacing,
+  };
+}
 
 function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
   const labels = historyPoints.value.map((point) => formatTime(point.timestamp));
   const selectedDefinitions = historyMetricDefinitions.filter((item) => selectedHistoryMetricKeys.value.includes(item.key));
   const selectedCount = selectedDefinitions.length;
-  const leftAxisCount = selectedDefinitions.filter((_, index) => index % 2 === 0).length;
-  const rightAxisCount = selectedDefinitions.length - leftAxisCount;
-  const axisSpacing = selectedCount >= 7 ? 76 : selectedCount >= 5 ? 68 : 60;
+  const axisLayout = multiMetricAxisLayout(selectedCount);
   return {
     tooltip: {
       trigger: 'axis',
-      axisPointer: { type: 'line' },
+      axisPointer: { type: 'line', snap: true },
       triggerOn: 'mousemove',
     },
     legend: { show: false },
     grid: {
-      left: Math.max(86, 86 + Math.max(0, leftAxisCount - 1) * axisSpacing),
-      right: Math.max(86, 86 + Math.max(0, rightAxisCount - 1) * axisSpacing),
-      top: selectedCount >= 5 ? 82 : 66,
+      left: axisLayout.left,
+      right: axisLayout.right,
+      top: axisLayout.top,
       bottom: 34,
     },
     xAxis: { type: 'category', boundaryGap: false, data: labels },
@@ -631,7 +653,7 @@ function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
         min: range.min,
         max: range.max,
         position: index % 2 === 0 ? 'left' : 'right',
-        offset: Math.floor(index / 2) * axisSpacing,
+        offset: Math.floor(index / 2) * axisLayout.spacing,
         axisLine: { show: true, lineStyle: { color: definition.color } },
         axisTick: { lineStyle: { color: definition.color } },
         axisLabel: { color: definition.color, margin: 8, hideOverlap: true },
@@ -650,18 +672,18 @@ function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
       name: definition.name,
       type: 'line',
       smooth: true,
-      showSymbol: showSymbols,
+      showSymbol: true,
       symbol: 'circle',
       symbolSize: showSymbols ? 6 : 8,
       yAxisIndex: index,
       data: historyPoints.value.map(definition.value),
       color: definition.color,
       lineStyle: { width: 3, color: definition.color },
-      itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2 },
+      itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2, opacity: showSymbols ? 1 : 0 },
       emphasis: {
         focus: 'series',
         scale: 1.18,
-        itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2 },
+        itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2, opacity: 1 },
       },
     })),
   };
@@ -683,6 +705,238 @@ function historyAxisRange(values: number[]): { min: number; max: number } {
   };
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isMetricTargetRangeValue(value: unknown): value is MetricTargetRange {
+  return isPlainRecord(value)
+    && typeof value.min === 'number'
+    && Number.isFinite(value.min)
+    && typeof value.max === 'number'
+    && Number.isFinite(value.max);
+}
+
+function persistedMetricTargetRanges(value: unknown): Record<HistoryMetricKey, MetricTargetRange> {
+  const ranges = { ...metricTargetRanges.value };
+  if (!isPlainRecord(value)) {
+    return ranges;
+  }
+  historyMetricDefinitions.forEach((definition) => {
+    const range = value[definition.key];
+    if (isMetricTargetRangeValue(range)) {
+      ranges[definition.key] = { min: range.min, max: range.max };
+    }
+  });
+  return ranges;
+}
+
+function isDeviceRuntimeStatus(value: unknown): value is DeviceRuntimeStatus {
+  return isPlainRecord(value)
+    && (value.wifi === 'connected' || value.wifi === 'disconnected' || value.wifi === 'warning')
+    && (value.mqtt === 'connected' || value.mqtt === 'disconnected' || value.mqtt === 'warning')
+    && typeof value.fan === 'number'
+    && typeof value.pump === 'number'
+    && typeof value.light === 'number'
+    && typeof value.alarm === 'number'
+    && typeof value.curtain === 'number';
+}
+
+function mergePersistedDeviceStatus(payload: TelemetryPayload): TelemetryPayload {
+  if (!persistedDeviceStatus) {
+    return payload;
+  }
+  return {
+    ...payload,
+    status: {
+      ...payload.status,
+      fan: persistedDeviceStatus.fan,
+      pump: persistedDeviceStatus.pump,
+      light: persistedDeviceStatus.light,
+      alarm: persistedDeviceStatus.alarm,
+      curtain: persistedDeviceStatus.curtain,
+    },
+  };
+}
+
+function statusAfterCommand(status: DeviceRuntimeStatus, command: string, value: number): DeviceRuntimeStatus {
+  const nextStatus = { ...status };
+  if (command.startsWith('fan_')) {
+    nextStatus.fan = value;
+  }
+  if (command.startsWith('pump_')) {
+    nextStatus.pump = value;
+  }
+  if (command.startsWith('light_')) {
+    nextStatus.light = value;
+  }
+  if (command.startsWith('alarm_')) {
+    nextStatus.alarm = value;
+  }
+  if (command.startsWith('curtain_')) {
+    nextStatus.curtain = value;
+  }
+  return nextStatus;
+}
+
+function persistedSmartControlParamStates(value: unknown): Record<SmartControlParamKey, SmartControlParamState> {
+  const states = defaultSmartControlParamStates();
+  if (!isPlainRecord(value)) {
+    return states;
+  }
+  smartControlParamKeys.forEach((key) => {
+    const item = value[key];
+    if (!isPlainRecord(item)) {
+      return;
+    }
+    const mode = item.mode === 'manual' ? 'manual' : 'auto';
+    const rawValue = typeof item.value === 'number' ? item.value : 0;
+    const rawLastManualValue = typeof item.lastManualValue === 'number' ? item.lastManualValue : rawValue;
+    states[key] = {
+      key,
+      mode,
+      value: clampControlValue(rawValue),
+      lastManualValue: clampControlValue(rawLastManualValue),
+    };
+  });
+  return states;
+}
+
+function persistedChatMessages(value: unknown): ChatMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is ChatMessage => (
+    isPlainRecord(item)
+    && (item.role === 'user' || item.role === 'assistant')
+    && typeof item.id === 'string'
+    && typeof item.content === 'string'
+    && typeof item.created_at === 'number'
+  )).map((item) => ({
+    ...item,
+    typing: false,
+    image_url: item.image_url?.startsWith('blob:') ? undefined : item.image_url,
+  })).slice(-30);
+}
+
+function serializableChatMessages(): ChatMessage[] {
+  return chatMessages.value
+    .filter((message) => !message.typing)
+    .map((message) => ({
+      ...message,
+      image_url: message.image_url?.startsWith('blob:') ? undefined : message.image_url,
+    }))
+    .slice(-30);
+}
+
+function serializeDashboardState(): PersistedDashboardState {
+  return {
+    version: 1,
+    activeView: activeView.value,
+    selectedHistoryMetricKeys: [...selectedHistoryMetricKeys.value],
+    metricTargetRanges: metricTargetRanges.value,
+    deviceStatus: latest.value?.status ?? persistedDeviceStatus ?? undefined,
+    commandResults: commandResults.value.slice(0, 10),
+    smartControlEnabled: smartControlEnabled.value,
+    smartControlParamStates: smartControlParamStates.value,
+    smartControlLastPublishAt: smartControlLastPublishAt.value,
+    smartControlPanelOpen: smartControlPanelOpen.value,
+    selectedKbId: selectedKbId.value,
+    knowledgeQuestion: knowledgeQuestion.value,
+    knowledgeAnswer: knowledgeAnswer.value,
+    assistantOpen: assistantOpen.value,
+    assistantWidth: assistantWidth.value,
+    chatInput: chatInput.value,
+    chatMessages: serializableChatMessages(),
+  };
+}
+
+async function savePersistentDashboardStateNow(): Promise<void> {
+  if (!persistentStateReady || applyingPersistentState) {
+    return;
+  }
+  if (persistentStateSaveTimer) {
+    window.clearTimeout(persistentStateSaveTimer);
+    persistentStateSaveTimer = undefined;
+  }
+  await savePersistedDashboardState(serializeDashboardState());
+}
+
+function schedulePersistentDashboardStateSave(delay = 300): void {
+  if (!persistentStateReady || applyingPersistentState || typeof window === 'undefined') {
+    return;
+  }
+  if (persistentStateSaveTimer) {
+    window.clearTimeout(persistentStateSaveTimer);
+  }
+  persistentStateSaveTimer = window.setTimeout(() => {
+    persistentStateSaveTimer = undefined;
+    void savePersistentDashboardStateNow();
+  }, delay);
+}
+
+async function loadPersistentDashboardState(): Promise<void> {
+  const state = await getPersistedDashboardState();
+  if (!state) {
+    return;
+  }
+  applyingPersistentState = true;
+  try {
+    if (state.activeView && isViewKey(state.activeView)) {
+      activeView.value = state.activeView;
+    }
+    if (Array.isArray(state.selectedHistoryMetricKeys)) {
+      const historyKeys = state.selectedHistoryMetricKeys.filter((key): key is HistoryMetricKey => (
+        typeof key === 'string' && historyMetricDefinitions.some((definition) => definition.key === key)
+      ));
+      if (historyKeys.length > 0) {
+        selectedHistoryMetricKeys.value = historyKeys;
+      }
+    }
+    metricTargetRanges.value = persistedMetricTargetRanges(state.metricTargetRanges);
+    if (isDeviceRuntimeStatus(state.deviceStatus)) {
+      persistedDeviceStatus = state.deviceStatus;
+    }
+    if (Array.isArray(state.commandResults)) {
+      commandResults.value = state.commandResults.slice(0, 10);
+    }
+    if (typeof state.smartControlEnabled === 'boolean') {
+      smartControlEnabled.value = state.smartControlEnabled;
+    }
+    smartControlParamStates.value = persistedSmartControlParamStates(state.smartControlParamStates);
+    if (typeof state.smartControlLastPublishAt === 'number' || state.smartControlLastPublishAt === null) {
+      smartControlLastPublishAt.value = state.smartControlLastPublishAt;
+    }
+    if (typeof state.smartControlPanelOpen === 'boolean') {
+      smartControlPanelOpen.value = state.smartControlPanelOpen;
+    }
+    if (typeof state.selectedKbId === 'number' && Number.isFinite(state.selectedKbId)) {
+      selectedKbId.value = state.selectedKbId;
+    }
+    if (typeof state.knowledgeQuestion === 'string') {
+      knowledgeQuestion.value = state.knowledgeQuestion;
+    }
+    if (state.knowledgeAnswer && isPlainRecord(state.knowledgeAnswer)) {
+      knowledgeAnswer.value = state.knowledgeAnswer as unknown as KnowledgeAnalyzeResult;
+    }
+    if (typeof state.assistantOpen === 'boolean') {
+      assistantOpen.value = state.assistantOpen;
+    }
+    if (typeof state.assistantWidth === 'number' && Number.isFinite(state.assistantWidth)) {
+      assistantWidth.value = clampAssistantWidth(state.assistantWidth);
+    }
+    if (typeof state.chatInput === 'string') {
+      chatInput.value = state.chatInput;
+    }
+    const savedMessages = persistedChatMessages(state.chatMessages);
+    if (savedMessages.length > 0) {
+      chatMessages.value = savedMessages;
+    }
+  } finally {
+    applyingPersistentState = false;
+  }
+}
+
 function isHistoryMetricSelected(key: HistoryMetricKey): boolean {
   return selectedHistoryMetricKeys.value.includes(key);
 }
@@ -693,9 +947,11 @@ function toggleHistoryMetric(key: HistoryMetricKey): void {
       return;
     }
     selectedHistoryMetricKeys.value = selectedHistoryMetricKeys.value.filter((item) => item !== key);
+    void savePersistentDashboardStateNow();
     return;
   }
   selectedHistoryMetricKeys.value = [...selectedHistoryMetricKeys.value, key];
+  void savePersistentDashboardStateNow();
 }
 
 function currentMetricValue(key: HistoryMetricKey): number {
@@ -962,6 +1218,8 @@ function hydrateMetricTargetDraft(key: HistoryMetricKey): void {
   targetMinDraft.value = String(range.min);
   targetMaxDraft.value = String(range.max);
   targetRangeError.value = '';
+  targetRangeSavedMessage.value = '';
+  targetRangeSaving.value = false;
 }
 
 function openMetricEditor(key: HistoryMetricKey, event?: MouseEvent | KeyboardEvent): void {
@@ -1004,6 +1262,12 @@ function closeMetricEditor(): void {
   metricEditorChartActive.value = false;
   clearMetricEditorChartTimer();
   targetRangeError.value = '';
+  targetRangeSavedMessage.value = '';
+  targetRangeSaving.value = false;
+  if (targetRangeSavedTimer) {
+    window.clearTimeout(targetRangeSavedTimer);
+    targetRangeSavedTimer = undefined;
+  }
   if (metricEditorTimer) {
     window.clearTimeout(metricEditorTimer);
   }
@@ -1013,7 +1277,7 @@ function closeMetricEditor(): void {
   }, 360);
 }
 
-function saveMetricTargetRange(): void {
+async function saveMetricTargetRange(): Promise<void> {
   if (!selectedMetricKey.value) {
     return;
   }
@@ -1021,18 +1285,32 @@ function saveMetricTargetRange(): void {
   const max = Number(targetMaxDraft.value);
   if (!Number.isFinite(min) || !Number.isFinite(max)) {
     targetRangeError.value = '请输入有效数字';
+    targetRangeSavedMessage.value = '';
     return;
   }
   if (min > max) {
     targetRangeError.value = '目标下限不能高于上限';
+    targetRangeSavedMessage.value = '';
     return;
   }
+  targetRangeSaving.value = true;
+  targetRangeSavedMessage.value = '正在保存目标区间...';
   metricTargetRanges.value = {
     ...metricTargetRanges.value,
     [selectedMetricKey.value]: { min, max },
   };
   targetRangeError.value = '';
   syncSmartControlValues();
+  await savePersistentDashboardStateNow();
+  targetRangeSaving.value = false;
+  targetRangeSavedMessage.value = `已保存：${min} - ${max} ${selectedMetricDefinition.value?.unit ?? ''}`.trim();
+  if (targetRangeSavedTimer) {
+    window.clearTimeout(targetRangeSavedTimer);
+  }
+  targetRangeSavedTimer = window.setTimeout(() => {
+    targetRangeSavedMessage.value = '';
+    targetRangeSavedTimer = undefined;
+  }, 2200);
 }
 
 function clampAssistantWidth(width: number): number {
@@ -1054,12 +1332,30 @@ function requestAssistantLayoutResize(): void {
   });
 }
 
+function applyPendingAssistantResize(): void {
+  assistantResizeFrame = 0;
+  if (!assistantResizing.value || typeof window === 'undefined') {
+    return;
+  }
+  assistantWidth.value = clampAssistantWidth(window.innerWidth - pendingAssistantResizeClientX);
+}
+
+function scheduleAssistantResize(clientX: number): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  pendingAssistantResizeClientX = clientX;
+  if (assistantResizeFrame) {
+    return;
+  }
+  assistantResizeFrame = window.requestAnimationFrame(applyPendingAssistantResize);
+}
+
 function handleAssistantResizeMove(event: PointerEvent): void {
   if (!assistantResizing.value) {
     return;
   }
-  assistantWidth.value = clampAssistantWidth(window.innerWidth - event.clientX);
-  requestAssistantLayoutResize();
+  scheduleAssistantResize(event.clientX);
 }
 
 function stopAssistantResize(): void {
@@ -1070,9 +1366,15 @@ function stopAssistantResize(): void {
   window.removeEventListener('pointerup', stopAssistantResize);
   window.removeEventListener('pointercancel', stopAssistantResize);
   document.body.classList.remove('is-resizing-assistant');
+  if (assistantResizeFrame) {
+    window.cancelAnimationFrame(assistantResizeFrame);
+    assistantResizeFrame = 0;
+  }
   if (assistantResizing.value) {
+    assistantWidth.value = clampAssistantWidth(window.innerWidth - pendingAssistantResizeClientX);
     assistantResizing.value = false;
     requestAssistantLayoutResize();
+    schedulePersistentDashboardStateSave();
   }
 }
 
@@ -1082,17 +1384,18 @@ function startAssistantResize(event: PointerEvent): void {
   }
   event.preventDefault();
   assistantResizing.value = true;
+  pendingAssistantResizeClientX = event.clientX;
   document.body.classList.add('is-resizing-assistant');
   assistantWidth.value = clampAssistantWidth(window.innerWidth - event.clientX);
   window.addEventListener('pointermove', handleAssistantResizeMove);
   window.addEventListener('pointerup', stopAssistantResize);
   window.addEventListener('pointercancel', stopAssistantResize);
-  requestAssistantLayoutResize();
 }
 
 function resetAssistantWidth(): void {
   assistantWidth.value = clampAssistantWidth(defaultAssistantWidth);
   requestAssistantLayoutResize();
+  schedulePersistentDashboardStateSave();
 }
 
 function handleAssistantViewportResize(): void {
@@ -1104,6 +1407,7 @@ watch(activeView, (view) => {
   if (view !== 'realtime') {
     closeMetricEditor();
   }
+  schedulePersistentDashboardStateSave();
 });
 
 watch(assistantOpen, (open) => {
@@ -1113,10 +1417,20 @@ watch(assistantOpen, (open) => {
   } else {
     assistantShowScrollButton.value = false;
   }
+  schedulePersistentDashboardStateSave();
+});
+
+watch(smartControlPanelOpen, () => {
+  schedulePersistentDashboardStateSave();
+});
+
+watch(knowledgeQuestion, () => {
+  schedulePersistentDashboardStateSave(800);
 });
 
 watch(chatInput, () => {
   void nextTick(resizeChatInput);
+  schedulePersistentDashboardStateSave(800);
 });
 
 function riskLabel(level: AiAnalysisResponse['risk_level']): string {
@@ -1129,17 +1443,29 @@ function riskLabel(level: AiAnalysisResponse['risk_level']): string {
   return '低风险';
 }
 
+function setKnowledgeError(action: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : '未知错误';
+  knowledgeError.value = `${action}失败：${message}`;
+}
+
 async function refreshKnowledge(preferredKbId = selectedKbId.value): Promise<void> {
-  const bases = await getKnowledgeBases();
-  knowledgeBases.value = [...bases];
-  if (bases.length === 0) {
-    selectedKbId.value = 0;
-    knowledgeItems.value = [];
-    return;
+  try {
+    const bases = await getKnowledgeBases();
+    knowledgeBases.value = [...bases];
+    if (bases.length === 0) {
+      selectedKbId.value = 0;
+      knowledgeItems.value = [];
+      knowledgeError.value = '';
+      return;
+    }
+    const selected = bases.find((item) => item.kbId === preferredKbId) ?? bases[0];
+    selectedKbId.value = selected.kbId;
+    knowledgeItems.value = await getKnowledgeItems(selected.kbId);
+    knowledgeError.value = '';
+    schedulePersistentDashboardStateSave();
+  } catch (error) {
+    setKnowledgeError('加载知识库', error);
   }
-  const selected = bases.find((item) => item.kbId === preferredKbId) ?? bases[0];
-  selectedKbId.value = selected.kbId;
-  knowledgeItems.value = await getKnowledgeItems(selected.kbId);
 }
 
 async function loadDashboard(isBackground = false): Promise<void> {
@@ -1149,7 +1475,7 @@ async function loadDashboard(isBackground = false): Promise<void> {
     loading.value = true;
   }
   try {
-    const nextLatest = await getLatestTelemetry();
+    const nextLatest = mergePersistedDeviceStatus(await getLatestTelemetry());
     latest.value = nextLatest;
     const [historyResult, aiResult, alarmsResult, weatherResult] = await Promise.allSettled([
       getDeviceHistory(),
@@ -1195,12 +1521,16 @@ async function applyCommand(command: string, value: number, reason: string): Pro
     reason,
   };
   const result = await sendDeviceCommand(payload);
-  commandResults.value = [result, ...commandResults.value].slice(0, 10);
+  const nextStatus = statusAfterCommand(latest.value.status, command, value);
+  const normalizedResult = { ...result, status: nextStatus };
+  persistedDeviceStatus = nextStatus;
+  commandResults.value = [normalizedResult, ...commandResults.value].slice(0, 10);
   latest.value = {
     ...latest.value,
-    timestamp: result.executed_at,
-    status: result.status,
+    timestamp: normalizedResult.executed_at,
+    status: nextStatus,
   };
+  void savePersistentDashboardStateNow();
 }
 
 function syncSmartControlValues(): void {
@@ -1259,12 +1589,17 @@ async function publishSmartControl(reason: string, action: 'smart_control_update
     ? cloneSmartControlDemands(zeroSmartControlDemands)
     : smartControlEffectiveDemands.value;
   const result = await sendDeviceCommand(buildSmartControlCommand(action, demands, reason));
-  commandResults.value = [result, ...commandResults.value].slice(0, 10);
+  const nextStatus = { ...latest.value.status };
+  const normalizedResult = { ...result, status: nextStatus };
+  persistedDeviceStatus = nextStatus;
+  commandResults.value = [normalizedResult, ...commandResults.value].slice(0, 10);
   smartControlLastPublishAt.value = result.executed_at;
   latest.value = {
     ...latest.value,
     timestamp: result.executed_at,
+    status: nextStatus,
   };
+  void savePersistentDashboardStateNow();
 }
 
 async function setSmartControlEnabled(enabled: boolean): Promise<void> {
@@ -1496,6 +1831,7 @@ function setAssistantActionStatus(action: AssistantAction, status: AssistantActi
   action.status = status;
   action.error = error;
   chatMessages.value = [...chatMessages.value];
+  schedulePersistentDashboardStateSave();
 }
 
 async function executeAssistantAction(action: AssistantAction): Promise<void> {
@@ -1815,6 +2151,7 @@ async function revealAssistantMessage(finalMessage: ChatMessage, replaceMessageI
     await nextTick();
     updateAssistantScrollState();
   }
+  schedulePersistentDashboardStateSave();
 }
 
 function handleChatKeydown(event: KeyboardEvent): void {
@@ -1849,6 +2186,7 @@ async function sendChat(): Promise<void> {
   };
   chatMessages.value = [...chatMessages.value, userMessage, thinkingMessage];
   chatInput.value = '';
+  schedulePersistentDashboardStateSave();
   await scrollAssistantToBottom();
   startAssistantThinking(thinkingMessage.id);
   chatSending.value = true;
@@ -1883,6 +2221,7 @@ async function sendChat(): Promise<void> {
   } finally {
     stopAssistantThinking();
     chatSending.value = false;
+    schedulePersistentDashboardStateSave();
   }
 }
 
@@ -2158,21 +2497,64 @@ async function startVoiceInput(): Promise<void> {
 }
 
 async function selectKnowledgeBase(kbId: number): Promise<void> {
-  selectedKbId.value = kbId;
-  knowledgeItems.value = await getKnowledgeItems(kbId);
-  knowledgeAnswer.value = null;
+  try {
+    selectedKbId.value = kbId;
+    knowledgeItems.value = await getKnowledgeItems(kbId);
+    knowledgeAnswer.value = null;
+    knowledgeError.value = '';
+    await savePersistentDashboardStateNow();
+  } catch (error) {
+    setKnowledgeError('切换知识库', error);
+  }
 }
 
 function beginEditKnowledgeBase(item: KnowledgeBaseInfo): void {
   editingKbId.value = item.kbId;
   kbNameDraft.value = item.name;
   kbDescriptionDraft.value = item.description;
+  knowledgeBaseDialogOpen.value = true;
+}
+
+function beginCreateKnowledgeBase(): void {
+  editingKbId.value = 0;
+  kbNameDraft.value = '';
+  kbDescriptionDraft.value = '';
+  knowledgeBaseDialogOpen.value = true;
+}
+
+function closeKnowledgeBaseDialog(): void {
+  knowledgeBaseDialogOpen.value = false;
+  editingKbId.value = 0;
+  kbNameDraft.value = '番茄结果期管理';
+  kbDescriptionDraft.value = '结果期水肥、光照、病害管理经验';
 }
 
 function beginEditKnowledgeItem(item: KnowledgeItemInfo): void {
   editingItemId.value = item.itemId;
   itemTitleDraft.value = item.title;
   itemContentDraft.value = item.content;
+  knowledgeItemDialogOpen.value = true;
+}
+
+function beginCreateKnowledgeItem(): void {
+  if (selectedKbId.value <= 0) {
+    return;
+  }
+  editingItemId.value = 0;
+  itemTitleDraft.value = '';
+  itemContentDraft.value = '';
+  knowledgeItemDialogOpen.value = true;
+}
+
+function closeKnowledgeItemDialog(): void {
+  knowledgeItemDialogOpen.value = false;
+  editingItemId.value = 0;
+  itemTitleDraft.value = '番茄高湿病害风险';
+  itemContentDraft.value = '番茄在高湿、通风不足时容易出现叶斑病和霜霉病，应先通风降湿并减少叶面结露。';
+}
+
+function confirmKnowledgeChange(message: string): boolean {
+  return window.confirm(message);
 }
 
 async function saveKnowledgeBase(): Promise<void> {
@@ -2181,21 +2563,37 @@ async function saveKnowledgeBase(): Promise<void> {
     return;
   }
   const description = kbDescriptionDraft.value.trim();
-  const saved = editingKbId.value > 0
-    ? await updateKnowledgeBase(editingKbId.value, name, description)
-    : await createKnowledgeBase(name, description);
-  editingKbId.value = 0;
-  kbNameDraft.value = '番茄结果期管理';
-  kbDescriptionDraft.value = '结果期水肥、光照、病害管理经验';
-  await refreshKnowledge(saved.kbId);
+  if (editingKbId.value > 0 && !confirmKnowledgeChange(`确认保存对知识库「${name}」的修改吗？`)) {
+    return;
+  }
+  try {
+    const saved = editingKbId.value > 0
+      ? await updateKnowledgeBase(editingKbId.value, name, description)
+      : await createKnowledgeBase(name, description);
+    closeKnowledgeBaseDialog();
+    await refreshKnowledge(saved.kbId);
+    knowledgeError.value = '';
+  } catch (error) {
+    setKnowledgeError('保存知识库', error);
+  }
 }
 
 async function removeKnowledgeBase(kbId: number): Promise<void> {
-  await deleteKnowledgeBase(kbId);
-  if (editingKbId.value === kbId) {
-    editingKbId.value = 0;
+  const target = knowledgeBases.value.find((base) => base.kbId === kbId);
+  const name = target?.name ?? '该知识库';
+  if (!confirmKnowledgeChange(`确认删除知识库「${name}」吗？该知识库下的知识条目也会一起删除。`)) {
+    return;
   }
-  await refreshKnowledge();
+  try {
+    await deleteKnowledgeBase(kbId);
+    if (editingKbId.value === kbId) {
+      closeKnowledgeBaseDialog();
+    }
+    await refreshKnowledge();
+    knowledgeError.value = '';
+  } catch (error) {
+    setKnowledgeError('删除知识库', error);
+  }
 }
 
 async function saveKnowledgeItem(): Promise<void> {
@@ -2207,26 +2605,42 @@ async function saveKnowledgeItem(): Promise<void> {
   if (title.length === 0 || content.length === 0) {
     return;
   }
-  if (editingItemId.value > 0) {
-    await updateKnowledgeItem(selectedKbId.value, editingItemId.value, title, content);
-  } else {
-    await addKnowledgeItem(selectedKbId.value, title, content);
+  if (editingItemId.value > 0 && !confirmKnowledgeChange(`确认保存对知识条目「${title}」的修改吗？`)) {
+    return;
   }
-  editingItemId.value = 0;
-  itemTitleDraft.value = '番茄高湿病害风险';
-  itemContentDraft.value = '番茄在高湿、通风不足时容易出现叶斑病和霜霉病，应先通风降湿并减少叶面结露。';
-  knowledgeItems.value = await getKnowledgeItems(selectedKbId.value);
+  try {
+    if (editingItemId.value > 0) {
+      await updateKnowledgeItem(selectedKbId.value, editingItemId.value, title, content);
+    } else {
+      await addKnowledgeItem(selectedKbId.value, title, content);
+    }
+    closeKnowledgeItemDialog();
+    knowledgeItems.value = await getKnowledgeItems(selectedKbId.value);
+    knowledgeError.value = '';
+  } catch (error) {
+    setKnowledgeError('保存知识条目', error);
+  }
 }
 
 async function removeKnowledgeItem(itemId: number): Promise<void> {
   if (selectedKbId.value <= 0) {
     return;
   }
-  await deleteKnowledgeItem(selectedKbId.value, itemId);
-  if (editingItemId.value === itemId) {
-    editingItemId.value = 0;
+  const target = knowledgeItems.value.find((item) => item.itemId === itemId);
+  const title = target?.title ?? '该知识条目';
+  if (!confirmKnowledgeChange(`确认删除知识条目「${title}」吗？删除后无法在页面中恢复。`)) {
+    return;
   }
-  knowledgeItems.value = await getKnowledgeItems(selectedKbId.value);
+  try {
+    await deleteKnowledgeItem(selectedKbId.value, itemId);
+    if (editingItemId.value === itemId) {
+      closeKnowledgeItemDialog();
+    }
+    knowledgeItems.value = await getKnowledgeItems(selectedKbId.value);
+    knowledgeError.value = '';
+  } catch (error) {
+    setKnowledgeError('删除知识条目', error);
+  }
 }
 
 async function runKnowledgeAnalysis(): Promise<void> {
@@ -2236,15 +2650,47 @@ async function runKnowledgeAnalysis(): Promise<void> {
   knowledgeLoading.value = true;
   try {
     knowledgeAnswer.value = await analyzeKnowledge(selectedKbId.value, latest.value?.device_id ?? 'field_001', knowledgeQuestion.value.trim());
+    knowledgeError.value = '';
+    await savePersistentDashboardStateNow();
+  } catch (error) {
+    setKnowledgeError('知识库分析', error);
   } finally {
     knowledgeLoading.value = false;
   }
 }
 
+async function initializeDashboard(): Promise<void> {
+  const stateLoad = loadPersistentDashboardState().catch((error) => {
+    console.warn('Dashboard state restore failed.', error);
+  });
+  await Promise.race([
+    stateLoad,
+    waitForAssistantTyping(220),
+  ]);
+  if (latest.value) {
+    latest.value = mergePersistedDeviceStatus(latest.value);
+    syncSmartControlValues();
+  }
+  await loadDashboard();
+  void refreshKnowledge(selectedKbId.value);
+  persistentStateReady = true;
+  void stateLoad.then(() => {
+    if (latest.value) {
+      latest.value = mergePersistedDeviceStatus(latest.value);
+      syncSmartControlValues();
+    }
+    void refreshKnowledge(selectedKbId.value);
+  });
+}
+
+function persistDashboardBeforeUnload(): void {
+  void savePersistentDashboardStateNow();
+}
+
 onMounted(() => {
-  void loadDashboard();
-  void refreshKnowledge();
+  void initializeDashboard();
   window.addEventListener('resize', handleAssistantViewportResize);
+  window.addEventListener('beforeunload', persistDashboardBeforeUnload);
   chatMessages.value = [
     {
       id: 'assistant-welcome',
@@ -2259,8 +2705,13 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (persistentStateSaveTimer) {
+    window.clearTimeout(persistentStateSaveTimer);
+    persistentStateSaveTimer = undefined;
+  }
   stopAssistantResize();
   window.removeEventListener('resize', handleAssistantViewportResize);
+  window.removeEventListener('beforeunload', persistDashboardBeforeUnload);
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
   }
@@ -2269,6 +2720,9 @@ onBeforeUnmount(() => {
   }
   if (metricEditorChartTimer) {
     window.clearTimeout(metricEditorChartTimer);
+  }
+  if (targetRangeSavedTimer) {
+    window.clearTimeout(targetRangeSavedTimer);
   }
   stopAssistantThinking();
   assistantTypeRunId += 1;
@@ -2379,7 +2833,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="two-column">
-            <EChartPanel title="近 6 小时环境趋势" :option="overviewChartOption" :active="activeView === 'overview'">
+            <EChartPanel title="近 6 小时环境趋势" :option="overviewChartOption" :active="activeView === 'overview'" :min-width="multiMetricChartMinWidth">
               <template #toolbar>
                 <div class="history-selector" aria-label="历史曲线变量选择">
                   <button
@@ -2526,9 +2980,12 @@ onBeforeUnmount(() => {
                   </label>
                 </div>
                 <p v-if="targetRangeError" class="form-error">{{ targetRangeError }}</p>
-                <button class="primary-button" type="button" @click="saveMetricTargetRange">
-                  <Save :size="18" />
-                  &#20445;&#23384;&#30446;&#26631;
+                <p v-if="targetRangeSavedMessage" class="form-success">{{ targetRangeSavedMessage }}</p>
+                <button class="primary-button target-save-button" type="button" :class="{ 'target-save-button--saved': targetRangeSavedMessage && !targetRangeSaving }" :disabled="targetRangeSaving" @click="saveMetricTargetRange">
+                  <RefreshCw v-if="targetRangeSaving" :size="18" class="spinning" />
+                  <ShieldCheck v-else-if="targetRangeSavedMessage" :size="18" />
+                  <Save v-else :size="18" />
+                  {{ targetRangeSaving ? '保存中' : targetRangeSavedMessage ? '已保存' : '保存目标' }}
                 </button>
               </section>
 
@@ -2552,7 +3009,7 @@ onBeforeUnmount(() => {
         </section>
 
         <section v-show="activeView === 'history'" class="view-stack">
-          <EChartPanel title="历史曲线" :option="historyChartOption" :active="activeView === 'history'">
+          <EChartPanel title="历史曲线" :option="historyChartOption" :active="activeView === 'history'" :min-width="multiMetricChartMinWidth">
             <template #toolbar>
               <div class="history-selector" aria-label="历史曲线变量选择">
                 <button
@@ -2823,23 +3280,26 @@ onBeforeUnmount(() => {
         </section>
 
         <section v-show="activeView === 'knowledge'" class="view-stack">
+          <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
           <div class="knowledge-layout">
-            <section class="panel">
+            <section class="panel knowledge-parent-panel">
               <div class="section-heading">
-                <h2>知识库管理</h2>
-                <span>参考 smartfarm7pack 的 RAG 知识维护流程</span>
-              </div>
-              <div class="form-stack">
-                <input v-model="kbNameDraft" placeholder="知识库名称" />
-                <textarea v-model="kbDescriptionDraft" placeholder="知识库描述"></textarea>
-                <button class="primary-button" type="button" @click="saveKnowledgeBase">
-                  <Save :size="18" /> {{ editingKbId ? '保存知识库' : '新建知识库' }}
+                <div>
+                  <h2>知识库管理</h2>
+                  <span>已有知识库作为父级，选择后查看下方知识条目</span>
+                </div>
+                <button class="primary-button" type="button" @click="beginCreateKnowledgeBase">
+                  <Plus :size="18" /> 新增知识库
                 </button>
               </div>
-              <div class="knowledge-list">
+              <div class="knowledge-tree">
                 <article v-for="base in knowledgeBases" :key="base.kbId" :class="{ selected: selectedKbId === base.kbId }" @click="selectKnowledgeBase(base.kbId)">
-                  <div>
-                    <strong>{{ base.name }}</strong>
+                  <i class="knowledge-tree__line"></i>
+                  <div class="knowledge-tree__body">
+                    <div class="knowledge-tree__title">
+                      <strong>{{ base.name }}</strong>
+                      <em v-if="selectedKbId === base.kbId">当前知识库</em>
+                    </div>
                     <span>{{ base.description || '暂无描述' }}</span>
                   </div>
                   <div class="row-actions">
@@ -2851,36 +3311,38 @@ onBeforeUnmount(() => {
                     </button>
                   </div>
                 </article>
+                <p v-if="knowledgeBases.length === 0" class="empty-text">暂无知识库，点击右上角按钮创建第一个知识库。</p>
               </div>
             </section>
 
-            <section class="panel">
+            <section class="panel knowledge-child-panel">
               <div class="section-heading">
-                <h2>知识条目</h2>
-                <span>{{ selectedKnowledgeBase?.name ?? '请选择知识库' }}</span>
-              </div>
-              <div class="form-stack">
-                <input v-model="itemTitleDraft" placeholder="知识标题" />
-                <textarea v-model="itemContentDraft" placeholder="知识正文"></textarea>
-                <button class="primary-button" type="button" :disabled="selectedKbId <= 0" @click="saveKnowledgeItem">
-                  <Plus :size="18" /> {{ editingItemId ? '保存知识' : '新增知识' }}
+                <div>
+                  <h2>{{ selectedKnowledgeBase?.name ?? '请选择知识库' }} / 知识条目</h2>
+                  <span>{{ selectedKnowledgeBase ? '当前知识库下的子级内容' : '先在左侧选择一个父级知识库' }}</span>
+                </div>
+                <button class="primary-button" type="button" :disabled="selectedKbId <= 0" @click="beginCreateKnowledgeItem">
+                  <Plus :size="18" /> 新增知识
                 </button>
               </div>
-              <div class="knowledge-list">
+              <div class="knowledge-child-list">
                 <article v-for="item in knowledgeItems" :key="item.itemId">
-                  <div>
+                  <i class="knowledge-child-list__line"></i>
+                  <div class="knowledge-child-list__body">
                     <strong>{{ item.title }}</strong>
                     <span>{{ item.content }}</span>
                   </div>
                   <div class="row-actions">
-                    <button class="icon-button" type="button" title="编辑" @click="beginEditKnowledgeItem(item)">
+                    <button class="icon-button" type="button" title="编辑" @click.stop="beginEditKnowledgeItem(item)">
                       <Pencil :size="16" />
                     </button>
-                    <button class="icon-button" type="button" title="删除" @click="removeKnowledgeItem(item.itemId)">
+                    <button class="icon-button" type="button" title="删除" @click.stop="removeKnowledgeItem(item.itemId)">
                       <Trash2 :size="16" />
                     </button>
                   </div>
                 </article>
+                <p v-if="selectedKbId > 0 && knowledgeItems.length === 0" class="empty-text">当前知识库还没有条目，点击右上角新增知识。</p>
+                <p v-if="selectedKbId <= 0" class="empty-text">请选择左侧知识库后查看子级知识条目。</p>
               </div>
             </section>
           </div>
@@ -2906,6 +3368,66 @@ onBeforeUnmount(() => {
               </div>
             </template>
           </section>
+
+          <div v-if="knowledgeBaseDialogOpen" class="modal-backdrop" @click.self="closeKnowledgeBaseDialog">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="knowledge-base-dialog-title">
+              <div class="modal-card__header">
+                <div>
+                  <span>知识库父级</span>
+                  <h2 id="knowledge-base-dialog-title">{{ editingKbId ? '编辑知识库' : '新增知识库' }}</h2>
+                </div>
+                <button class="icon-button" type="button" title="关闭" @click="closeKnowledgeBaseDialog">
+                  <X :size="18" />
+                </button>
+              </div>
+              <form class="modal-form" @submit.prevent="saveKnowledgeBase">
+                <label>
+                  <span>知识库名称</span>
+                  <input v-model="kbNameDraft" placeholder="例如：番茄结果期管理" />
+                </label>
+                <label>
+                  <span>知识库描述</span>
+                  <textarea v-model="kbDescriptionDraft" placeholder="描述这组知识的适用场景"></textarea>
+                </label>
+                <div class="modal-card__actions">
+                  <button class="text-button" type="button" @click="closeKnowledgeBaseDialog">取消</button>
+                  <button class="primary-button" type="submit">
+                    <Save :size="18" /> {{ editingKbId ? '保存修改' : '创建知识库' }}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <div v-if="knowledgeItemDialogOpen" class="modal-backdrop" @click.self="closeKnowledgeItemDialog">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="knowledge-item-dialog-title">
+              <div class="modal-card__header">
+                <div>
+                  <span>{{ selectedKnowledgeBase?.name ?? '未选择知识库' }}</span>
+                  <h2 id="knowledge-item-dialog-title">{{ editingItemId ? '编辑知识' : '新增知识' }}</h2>
+                </div>
+                <button class="icon-button" type="button" title="关闭" @click="closeKnowledgeItemDialog">
+                  <X :size="18" />
+                </button>
+              </div>
+              <form class="modal-form" @submit.prevent="saveKnowledgeItem">
+                <label>
+                  <span>知识标题</span>
+                  <input v-model="itemTitleDraft" placeholder="例如：番茄高湿病害风险" />
+                </label>
+                <label>
+                  <span>知识正文</span>
+                  <textarea v-model="itemContentDraft" placeholder="输入具体知识内容"></textarea>
+                </label>
+                <div class="modal-card__actions">
+                  <button class="text-button" type="button" @click="closeKnowledgeItemDialog">取消</button>
+                  <button class="primary-button" type="submit">
+                    <Save :size="18" /> {{ editingItemId ? '保存修改' : '创建知识' }}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
         </section>
 
         <section v-show="activeView === 'alarms'" class="view-stack">

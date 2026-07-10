@@ -55,6 +55,7 @@ npm run build
 VITE_API_BASE_URL=http://localhost:8000
 VITE_USE_MOCK=false
 VITE_USE_MOCK_ASSISTANT=false
+VITE_USE_MOCK_KNOWLEDGE=false
 ```
 
 如果只想让 AI 助手和 AI 农事建议真实接入、其他遥测/设备/视觉功能继续使用 Mock，可以保持：
@@ -64,6 +65,7 @@ VITE_API_BASE_URL=http://localhost:8000
 VITE_USE_MOCK=true
 VITE_USE_MOCK_ASSISTANT=false
 VITE_USE_MOCK_AI_ADVICE=false
+VITE_USE_MOCK_KNOWLEDGE=false
 ```
 
 如果只想让专家问答接入后端、AI 农事建议仍使用前端 Mock，把 `VITE_USE_MOCK_AI_ADVICE` 改回 `true` 即可。
@@ -75,6 +77,18 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_API_KEY=你的 DeepSeek API Key
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_TIMEOUT_SECONDS=90
+```
+
+知识库默认使用后端本地 SQLite 数据库，启动后会自动创建表并写入初始知识库：
+
+```env
+DATABASE_URL=sqlite:///./smartagribrain.db
+```
+
+生成的数据库文件位于 `backend_api/smartagribrain.db`，不会作为主要数据提交。未来需要多人线上部署时，可以把 `DATABASE_URL` 改成 PostgreSQL，例如：
+
+```env
+DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname
 ```
 
 前端的 AI 农事建议接口为 `POST /api/ai/analyze`；后端也兼容 `POST /api/v1/farm/ai/analyze`。

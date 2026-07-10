@@ -113,3 +113,97 @@ class VoiceTranscriptionStatus(BaseModel):
     provider: str = "backend"
     model: str = ""
     message: str = ""
+
+
+class KnowledgeBaseInfo(BaseModel):
+    kbId: int
+    name: str
+    description: str = ""
+    enabled: bool = True
+    updatedAt: str
+
+
+class KnowledgeItemInfo(BaseModel):
+    itemId: int
+    kbId: int
+    title: str
+    content: str
+    updatedAt: str
+
+
+class KnowledgeBaseListResponse(BaseModel):
+    items: List[KnowledgeBaseInfo] = Field(default_factory=list)
+
+
+class KnowledgeItemListResponse(BaseModel):
+    items: List[KnowledgeItemInfo] = Field(default_factory=list)
+
+
+class KnowledgeBaseCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    description: str = ""
+
+
+class KnowledgeBaseUpdateRequest(BaseModel):
+    kbId: int = Field(..., ge=1)
+    name: str = Field(..., min_length=1)
+    description: str = ""
+
+
+class KnowledgeBaseDeleteRequest(BaseModel):
+    kbId: int = Field(..., ge=1)
+
+
+class KnowledgeTextAddRequest(BaseModel):
+    kbId: int = Field(..., ge=1)
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+
+
+class KnowledgeItemUpdateRequest(BaseModel):
+    kbId: int = Field(..., ge=1)
+    itemId: int = Field(..., ge=1)
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+
+
+class KnowledgeItemDeleteRequest(BaseModel):
+    kbId: int = Field(..., ge=1)
+    itemId: int = Field(..., ge=1)
+
+
+class KnowledgeTextAddResult(BaseModel):
+    itemId: int
+    chunkCount: int
+    updatedAt: str
+
+
+class KnowledgeAnalyzeRequest(BaseModel):
+    kbId: int = Field(..., ge=1)
+    fieldId: str = ""
+    question: str = Field(..., min_length=1)
+
+
+class KnowledgeAnalyzeResult(BaseModel):
+    answer: str
+    references: List[KnowledgeReference] = Field(default_factory=list)
+    updatedAt: str
+
+
+class AppStateReadResponse(BaseModel):
+    key: str
+    value: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AppStateSaveRequest(BaseModel):
+    value: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AppStateSaveResponse(BaseModel):
+    key: str
+    value: Dict[str, Any] = Field(default_factory=dict)
+    updatedAt: str
+
+
+class OperationSuccess(BaseModel):
+    success: bool = True
