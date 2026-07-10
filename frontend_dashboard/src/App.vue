@@ -54,6 +54,8 @@ import {
   getDiseasePhotos,
   getDeviceHistory,
   getCurrentWeather,
+  getWeatherBundle,
+  getWeatherCities,
   getKnowledgeBases,
   getKnowledgeItems,
   getLatestTelemetry,
@@ -90,6 +92,10 @@ import type {
   StatusLevel,
   TelemetryPayload,
   WeatherPayload,
+  WeatherBundle,
+  WeatherCityOption,
+  WeatherDailyItem,
+  WeatherAlarmItem,
 } from './types';
 import { formatDateTime, formatTime, numberText } from './utils/format';
 import {
@@ -210,6 +216,21 @@ const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'gas_resistance', name: '空气质量', unit: 'Ω', color: '#53645A', value: (point) => point.gas_resistance },
 ];
 
+const commonWeatherCities: WeatherCityOption[] = [
+  { id: '无锡', name: '无锡', path: '无锡,江苏,中国' },
+  { id: '北京', name: '北京', path: '北京,北京,中国' },
+  { id: '上海', name: '上海', path: '上海,上海,中国' },
+  { id: '南京', name: '南京', path: '南京,江苏,中国' },
+  { id: '苏州', name: '苏州', path: '苏州,江苏,中国' },
+  { id: '杭州', name: '杭州', path: '杭州,浙江,中国' },
+  { id: '广州', name: '广州', path: '广州,广东,中国' },
+  { id: '深圳', name: '深圳', path: '深圳,广东,中国' },
+  { id: '成都', name: '成都', path: '成都,四川,中国' },
+  { id: '武汉', name: '武汉', path: '武汉,湖北,中国' },
+  { id: '西安', name: '西安', path: '西安,陕西,中国' },
+  { id: '郑州', name: '郑州', path: '郑州,河南,中国' },
+];
+
 const navItems: NavItem[] = [
   { key: 'overview', label: '首页总览', icon: Home },
   { key: 'control', label: '设备控制', icon: ToggleLeft },
@@ -232,6 +253,14 @@ function isSmartControlParamKey(value: unknown): value is SmartControlParamKey {
 const activeView = ref<ViewKey>('overview');
 const latest = ref<TelemetryPayload | null>(null);
 const currentWeather = ref<WeatherPayload | null>(null);
+const weatherBundle = ref<WeatherBundle | null>(null);
+const weatherCity = ref('无锡');
+const weatherCityDraft = ref('无锡');
+const weatherCityOptions = ref<WeatherCityOption[]>([]);
+const weatherCityDropdownOpen = ref(false);
+const weatherPanelOpen = ref(false);
+const weatherLoading = ref(false);
+const weatherError = ref('');
 const historyPoints = ref<HistoryPoint[]>([]);
 const aiAnalysis = ref<AiAnalysisResponse | null>(null);
 const alarms = ref<AlarmRecord[]>([]);
@@ -244,6 +273,8 @@ const diseasePhotoLibraryOpen = ref(false);
 const diseasePhotos = ref<DiseasePhotoInfo[]>([]);
 const selectedDiseasePhoto = ref<DiseasePhotoInfo | null>(null);
 const currentDiseasePhotoId = ref<number | null>(null);
+const cameraGrowthPanelRef = ref<{ captureAndAnalyze: () => Promise<void> } | null>(null);
+const cameraAnalysisResult = ref<DiseaseDetectionResult | null>(null);
 const diseasePhotoLoading = ref(false);
 const diseasePhotoDeletingId = ref<number | null>(null);
 const diseasePhotoError = ref('');
@@ -344,6 +375,7 @@ let persistedDeviceStatus: DeviceRuntimeStatus | null = null;
 let persistentStateReady = false;
 let applyingPersistentState = false;
 let persistentStateSaveTimer: number | undefined;
+let weatherCitySearchTimer: number | undefined;
 
 const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
   temperature: 0.01,
@@ -374,7 +406,29 @@ const diseasePhotoGroups = computed<DiseasePhotoGroup[]>(() => {
   }
   return [...groupMap.values()];
 });
+const diseaseDetectionBoxes = computed(() => (
+  diseaseResult.value?.detections.filter((item) => item.bbox.width > 0 && item.bbox.height > 0) ?? []
+));
 const selectedDiseasePhotoAnalysis = computed(() => diseasePhotoAnalysis(selectedDiseasePhoto.value));
+const weatherCurrentDetail = computed(() => (
+  weatherBundle.value?.current.available ? weatherBundle.value.current.data ?? null : null
+));
+const weatherDailyItems = computed<WeatherDailyItem[]>(() => (
+  weatherBundle.value?.daily.available && Array.isArray(weatherBundle.value.daily.data)
+    ? weatherBundle.value.daily.data
+    : []
+));
+const weatherAlarmItems = computed<WeatherAlarmItem[]>(() => (
+  weatherBundle.value?.alarms.available && Array.isArray(weatherBundle.value.alarms.data)
+    ? weatherBundle.value.alarms.data
+    : []
+));
+const weatherSearchOptions = computed<WeatherCityOption[]>(() => (
+  weatherCityDraft.value.trim().length > 0 ? weatherCityOptions.value : commonWeatherCities
+));
+const weatherDisplayLocation = computed(() => weatherLocationLabel(currentWeather.value?.location || weatherCity.value));
+const weatherPanelTitle = computed(() => `${weatherDisplayLocation.value} 天气`);
+const weatherImpactTips = computed(() => buildWeatherImpactTips());
 
 const statusSummary = computed<Array<{ label: string; state: StatusLevel }>>(() => {
   const status = latest.value?.status;
@@ -1027,6 +1081,8 @@ function serializeDashboardState(): PersistedDashboardState {
     chatMessages: serializableChatMessages(),
     assistantThreads: serializableAssistantThreads(),
     activeAssistantThreadId: activeAssistantThreadId.value,
+    weatherCity: weatherCity.value,
+    weatherPanelOpen: weatherPanelOpen.value,
   };
 }
 
@@ -1063,6 +1119,13 @@ async function loadPersistentDashboardState(): Promise<void> {
   try {
     if (state.activeView && isViewKey(state.activeView)) {
       activeView.value = state.activeView;
+    }
+    if (typeof state.weatherCity === 'string' && state.weatherCity.trim().length > 0) {
+      weatherCity.value = state.weatherCity.trim() === 'wuxi' ? '无锡' : state.weatherCity.trim();
+      weatherCityDraft.value = weatherCity.value;
+    }
+    if (typeof state.weatherPanelOpen === 'boolean') {
+      weatherPanelOpen.value = state.weatherPanelOpen;
     }
     if (Array.isArray(state.selectedHistoryMetricKeys)) {
       const historyKeys = state.selectedHistoryMetricKeys.filter((key): key is HistoryMetricKey => (
@@ -1661,6 +1724,10 @@ watch(smartControlPanelOpen, () => {
   schedulePersistentDashboardStateSave();
 });
 
+watch([weatherCity, weatherPanelOpen], () => {
+  schedulePersistentDashboardStateSave();
+});
+
 watch(knowledgeQuestion, () => {
   schedulePersistentDashboardStateSave(800);
 });
@@ -1678,6 +1745,114 @@ function riskLabel(level: AiAnalysisResponse['risk_level']): string {
     return '中等风险';
   }
   return '低风险';
+}
+
+function weatherValueText(value: unknown, unit = ''): string {
+  if (value === null || value === undefined || value === '') {
+    return '暂无';
+  }
+  return `${value}${unit}`;
+}
+
+function weatherModuleReason(module: { available: boolean; reason?: string } | undefined): string {
+  if (!module) {
+    return '暂未加载';
+  }
+  return module.available ? '' : '暂未开通';
+}
+
+function weatherCityLabel(city: WeatherCityOption): string {
+  return weatherLocationLabel(city.path || city.name || city.id || '未知城市');
+}
+
+function weatherCityValue(city: WeatherCityOption): string {
+  return city.name || city.id || weatherCityLabel(city);
+}
+
+function weatherLocationLabel(value: string): string {
+  const parts = value
+    .split(/[,\s·]+/)
+    .map((part) => part.trim())
+    .filter((part) => part && part !== '中国' && part !== 'CN');
+  const uniqueParts = parts.filter((part, index) => parts.indexOf(part) === index);
+  if (uniqueParts.length >= 3) {
+    return `${uniqueParts[0]} · ${uniqueParts[1]}`;
+  }
+  if (uniqueParts.length >= 2) {
+    return `${uniqueParts[0]} · ${uniqueParts[1]}`;
+  }
+  return uniqueParts[0] || value;
+}
+
+function weatherDayLabel(item: WeatherDailyItem, index: number): string {
+  if (index === 0) {
+    return '今天';
+  }
+  if (index === 1) {
+    return '明天';
+  }
+  return weatherDateText(item.date);
+}
+
+function weatherConditionText(item: WeatherDailyItem): string {
+  const day = item.condition_day || '--';
+  const night = item.condition_night || '--';
+  return day === night ? day : `${day}转${night}`;
+}
+
+function weatherRainText(item: WeatherDailyItem): string {
+  if (typeof item.rainfall === 'number' && item.rainfall > 0) {
+    return `降雨 ${item.rainfall}mm`;
+  }
+  if (typeof item.precip === 'number' && item.precip > 0) {
+    const precip = item.precip <= 1 ? Math.round(item.precip * 100) : Math.round(item.precip);
+    return `降雨概率 ${precip}%`;
+  }
+  return '降雨少';
+}
+
+function buildWeatherImpactTips(): string[] {
+  const tips: string[] = [];
+  const sensors = latest.value?.sensors;
+  const rainyDays = weatherDailyItems.value.filter((item) => {
+    const text = `${item.condition_day ?? ''}${item.condition_night ?? ''}`;
+    return /雨|雪|雷|storm|rain|shower/i.test(text) || (typeof item.rainfall === 'number' && item.rainfall > 0);
+  }).length;
+  const highHumidityDays = weatherDailyItems.value.filter((item) => typeof item.humidity === 'number' && item.humidity >= 80).length;
+  const maxHigh = Math.max(...weatherDailyItems.value.map((item) => item.high ?? -Infinity));
+
+  if (rainyDays > 0 || highHumidityDays > 0) {
+    tips.push('未来几天偏湿或有降雨，建议重点关注棚内湿度，必要时提前通风降湿。');
+  }
+  if (sensors && sensors.humidity > 70) {
+    tips.push(`当前棚内湿度 ${sensors.humidity}%RH 偏高，天气偏湿时更容易增加叶面病害风险。`);
+  }
+  if (Number.isFinite(maxHigh) && maxHigh >= 32) {
+    tips.push('室外最高温较高，午后注意遮阳、补水和风机联动，避免棚温快速升高。');
+  }
+  if (sensors && sensors.light < metricTargetRanges.value.light.min) {
+    tips.push('当前棚内光照偏低，阴雨天气下可考虑延长补光或适当打开卷帘。');
+  }
+  if (tips.length === 0) {
+    tips.push('未来天气对棚内管理压力不大，保持当前监测频率即可。');
+  }
+  return tips.slice(0, 3);
+}
+
+function weatherDateText(value?: string | null): string {
+  if (!value) {
+    return '暂无时间';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: value.includes('T') ? '2-digit' : undefined,
+    minute: value.includes('T') ? '2-digit' : undefined,
+  }).format(date);
 }
 
 function setKnowledgeError(action: string, error: unknown): void {
@@ -1705,6 +1880,128 @@ async function refreshKnowledge(preferredKbId = selectedKbId.value): Promise<voi
   }
 }
 
+function weatherPayloadFromBundle(bundle: WeatherBundle): WeatherPayload | null {
+  const data = bundle.current.available ? bundle.current.data : null;
+  if (!data) {
+    return null;
+  }
+  return {
+    location: weatherLocationLabel(data.location),
+    condition: data.condition,
+    temperature: data.temperature,
+    humidity: data.humidity,
+    wind_direction: data.wind_direction,
+    wind_level: data.wind_level,
+    updated_at: data.updated_at,
+  };
+}
+
+async function loadWeather(city = weatherCity.value): Promise<WeatherBundle | null> {
+  weatherLoading.value = true;
+  try {
+    const bundle = await getWeatherBundle(city);
+    weatherBundle.value = bundle;
+    currentWeather.value = weatherPayloadFromBundle(bundle);
+    weatherError.value = weatherModuleReason(bundle.current);
+    return bundle;
+  } catch (error) {
+    weatherBundle.value = null;
+    currentWeather.value = null;
+    weatherError.value = error instanceof Error ? error.message : '天气接口暂时不可用。';
+    console.warn('Weather bundle failed to load.', error);
+    try {
+      currentWeather.value = await getCurrentWeather(city);
+    } catch {
+      // Keep the explicit bundle error; no fallback mock is injected here.
+    }
+    return null;
+  } finally {
+    weatherLoading.value = false;
+  }
+}
+
+function openWeatherPanel(): void {
+  weatherPanelOpen.value = true;
+  schedulePersistentDashboardStateSave();
+  if (!weatherBundle.value && !weatherLoading.value) {
+    void loadWeather();
+  }
+}
+
+function closeWeatherPanel(): void {
+  weatherPanelOpen.value = false;
+  weatherCityDropdownOpen.value = false;
+  schedulePersistentDashboardStateSave();
+}
+
+async function searchWeatherCities(): Promise<void> {
+  const query = weatherCityDraft.value.trim();
+  if (!query) {
+    weatherCityOptions.value = [];
+    return;
+  }
+  try {
+    weatherCityOptions.value = await getWeatherCities(query);
+  } catch (error) {
+    weatherCityOptions.value = [];
+    weatherError.value = error instanceof Error ? error.message : '城市搜索失败。';
+  }
+}
+
+function scheduleWeatherCitySearch(): void {
+  weatherCityDropdownOpen.value = true;
+  const query = weatherCityDraft.value.trim();
+  if (weatherCitySearchTimer) {
+    window.clearTimeout(weatherCitySearchTimer);
+    weatherCitySearchTimer = undefined;
+  }
+  if (!query) {
+    weatherCityOptions.value = [];
+    return;
+  }
+  weatherCitySearchTimer = window.setTimeout(() => {
+    weatherCitySearchTimer = undefined;
+    void searchWeatherCities();
+  }, 180);
+}
+
+function openWeatherCityDropdown(): void {
+  weatherCityDropdownOpen.value = true;
+  if (weatherCityDraft.value.trim()) {
+    void searchWeatherCities();
+  }
+}
+
+async function applyWeatherCity(city = weatherCityDraft.value): Promise<void> {
+  const nextCity = city.trim();
+  if (!nextCity) {
+    return;
+  }
+  weatherCity.value = nextCity;
+  weatherCityDraft.value = nextCity;
+  weatherCityOptions.value = [];
+  weatherCityDropdownOpen.value = false;
+  schedulePersistentDashboardStateSave();
+  await loadWeather(nextCity);
+  if (latest.value) {
+    aiAnalysis.value = await analyzeFarm(latest.value, {
+      weather: currentWeather.value,
+      weatherBundle: weatherBundle.value,
+      history: historyPoints.value,
+      disease: diseaseResult.value,
+      cameraAnalysis: cameraAnalysisResult.value,
+    });
+  }
+}
+
+async function selectWeatherCity(city: WeatherCityOption): Promise<void> {
+  await applyWeatherCity(weatherCityValue(city));
+}
+
+function handleCameraAnalysisUpdated(result: DiseaseDetectionResult | null): void {
+  cameraAnalysisResult.value = result;
+}
+
 async function loadDashboard(isBackground = false): Promise<void> {
   if (isBackground) {
     refreshing.value = true;
@@ -1714,37 +2011,41 @@ async function loadDashboard(isBackground = false): Promise<void> {
   try {
     const nextLatest = mergePersistedDeviceStatus(await getLatestTelemetry());
     latest.value = nextLatest;
-    const [historyResult, aiResult, alarmsResult, weatherResult] = await Promise.allSettled([
+    const [historyResult, alarmsResult, weatherResult] = await Promise.allSettled([
       getDeviceHistory(),
-      analyzeFarm(nextLatest),
       getAlarmRecords(),
-      getCurrentWeather(),
+      loadWeather(weatherCity.value),
     ]);
     if (historyResult.status === 'fulfilled') {
       historyPoints.value = historyResult.value;
     } else {
       console.warn('History data failed to load.', historyResult.reason);
     }
-    if (aiResult.status === 'fulfilled') {
-      aiAnalysis.value = aiResult.value;
-    } else {
-      console.warn('AI analysis failed to load.', aiResult.reason);
-    }
     if (alarmsResult.status === 'fulfilled') {
       alarms.value = alarmsResult.value;
     } else {
       console.warn('Alarm records failed to load.', alarmsResult.reason);
     }
-    if (weatherResult.status === 'fulfilled') {
-      currentWeather.value = weatherResult.value;
-    } else {
+    if (weatherResult.status === 'rejected') {
       console.warn('Weather data failed to load.', weatherResult.reason);
     }
+    aiAnalysis.value = await analyzeFarm(nextLatest, {
+      weather: currentWeather.value,
+      weatherBundle: weatherBundle.value,
+      history: historyPoints.value,
+      disease: diseaseResult.value,
+      cameraAnalysis: cameraAnalysisResult.value,
+    });
     syncSmartControlValues();
   } finally {
     loading.value = false;
     refreshing.value = false;
   }
+}
+
+async function refreshDashboardAndCapture(): Promise<void> {
+  await loadDashboard(true);
+  await cameraGrowthPanelRef.value?.captureAndAnalyze();
 }
 
 async function applyCommand(command: string, value: number, reason: string): Promise<void> {
@@ -2711,6 +3012,10 @@ async function sendChat(): Promise<void> {
       image_url: pendingImageUrl || undefined,
       latest: latest.value,
       disease: diseaseResult.value,
+      weather: currentWeather.value,
+      weather_bundle: weatherBundle.value,
+      ai_analysis: aiAnalysis.value,
+      camera_analysis: cameraAnalysisResult.value,
       knowledge_base_id: selectedKbId.value || undefined,
       current_view: activeView.value,
       knowledge_bases: knowledgeBases.value,
@@ -3071,6 +3376,10 @@ onBeforeUnmount(() => {
     window.clearTimeout(persistentStateSaveTimer);
     persistentStateSaveTimer = undefined;
   }
+  if (weatherCitySearchTimer) {
+    window.clearTimeout(weatherCitySearchTimer);
+    weatherCitySearchTimer = undefined;
+  }
   stopAssistantResize();
   window.removeEventListener('resize', handleAssistantViewportResize);
   window.removeEventListener('beforeunload', persistDashboardBeforeUnload);
@@ -3141,7 +3450,7 @@ onBeforeUnmount(() => {
         <div class="topbar__actions">
           <StatusPill v-if="latest" :label="latest.device_id" state="neutral" />
           <StatusPill :label="`${activeAlarms} 条未处理报警`" :state="activeAlarms > 0 ? 'watch' : 'good'" />
-          <button class="icon-button" type="button" title="刷新数据" @click="loadDashboard(true)">
+          <button class="icon-button" type="button" title="刷新数据" @click="refreshDashboardAndCapture">
             <RefreshCw :class="{ spinning: refreshing }" :size="19" />
           </button>
         </div>
@@ -3154,8 +3463,8 @@ onBeforeUnmount(() => {
 
       <template v-else-if="latest">
         <section v-show="activeView === 'overview'" class="view-stack">
-          <div class="hero-panel">
-            <div class="hero-panel__copy">
+          <div class="hero-panel" :class="{ 'hero-panel--weather-open': weatherPanelOpen }">
+            <div v-if="!weatherPanelOpen" class="hero-panel__copy">
               <p class="eyebrow">端云协同状态</p>
               <h2>设备正在上报温湿度、光照、CO2、土壤湿度和 EC 数据</h2>
               <p>最近采样 {{ formatDateTime(latest.timestamp) }}，系统持续跟踪环境变化、作物健康和设备运行状态。</p>
@@ -3163,21 +3472,107 @@ onBeforeUnmount(() => {
                 <StatusPill v-for="item in statusSummary" :key="item.label" :label="item.label" :state="item.state" />
               </div>
             </div>
-            <div class="hero-panel__status">
-              <article v-if="currentWeather" class="weather-card">
+            <section v-else class="weather-detail-panel">
+              <div class="weather-detail-panel__header">
+                <div>
+                  <p class="eyebrow">天气详情</p>
+                  <h2>{{ weatherPanelTitle }}</h2>
+                  <p>天气会进入 AI 农事建议依据，下面只展示大棚管理需要看的内容。</p>
+                </div>
+                <div class="weather-detail-panel__actions">
+                  <button class="icon-button" type="button" title="刷新天气" :disabled="weatherLoading" @click="loadWeather()">
+                    <RefreshCw :class="{ spinning: weatherLoading }" :size="18" />
+                  </button>
+                  <button class="icon-button" type="button" title="关闭天气详情" @click="closeWeatherPanel">
+                    <X :size="18" />
+                  </button>
+                </div>
+              </div>
+              <div class="weather-toolbar">
+                <div class="weather-city-picker">
+                  <input
+                    v-model="weatherCityDraft"
+                    type="search"
+                    placeholder="输入城市，如 无锡 / 北京 / 上海"
+                    @focus="openWeatherCityDropdown"
+                    @input="scheduleWeatherCitySearch"
+                    @keydown.enter.prevent="weatherSearchOptions[0] ? selectWeatherCity(weatherSearchOptions[0]) : applyWeatherCity()"
+                  />
+                  <button class="text-button" type="button" @click="openWeatherCityDropdown">切换城市</button>
+                  <div v-if="weatherCityDropdownOpen" class="weather-city-dropdown">
+                    <button
+                      v-for="city in weatherSearchOptions"
+                      :key="city.id || weatherCityLabel(city)"
+                      type="button"
+                      @mousedown.prevent="selectWeatherCity(city)"
+                    >
+                      <strong>{{ weatherCityLabel(city).split(' · ')[0] }}</strong>
+                      <span>{{ weatherCityLabel(city).split(' · ').slice(1).join(' · ') || '常用城市' }}</span>
+                    </button>
+                    <p v-if="weatherCityDraft.trim() && !weatherSearchOptions.length">没有找到相关城市</p>
+                  </div>
+                </div>
+              </div>
+              <p v-if="weatherError" class="form-error">{{ weatherError }}</p>
+              <div class="weather-detail-grid">
+                <article class="weather-now-card">
+                  <CloudSun :size="34" />
+                  <div>
+                    <span>当前天气</span>
+                    <strong>{{ weatherCurrentDetail?.condition || currentWeather?.condition || '暂无' }} · {{ weatherValueText(weatherCurrentDetail?.temperature ?? currentWeather?.temperature, ' 摄氏度') }}</strong>
+                    <small>更新时间 {{ formatDateTime(weatherCurrentDetail?.updated_at ?? currentWeather?.updated_at ?? Date.now()) }}</small>
+                  </div>
+                </article>
+                <article class="weather-impact-card">
+                  <span>对大棚的影响</span>
+                  <ul>
+                    <li v-for="tip in weatherImpactTips" :key="tip">{{ tip }}</li>
+                  </ul>
+                </article>
+                <article class="weather-forecast-card">
+                  <div class="weather-section-title">
+                    <span>未来三天</span>
+                    <small>{{ weatherDailyItems.length ? '根据心知天气逐日预报' : weatherModuleReason(weatherBundle?.daily) || '暂无预报' }}</small>
+                  </div>
+                  <div v-if="weatherDailyItems.length" class="weather-forecast-list">
+                    <div v-for="(item, index) in weatherDailyItems.slice(0, 3)" :key="item.date" class="weather-forecast-item">
+                      <strong>{{ weatherDayLabel(item, index) }}</strong>
+                      <b>{{ weatherConditionText(item) }}</b>
+                      <small>{{ weatherValueText(item.low, '°') }} - {{ weatherValueText(item.high, '°') }}</small>
+                      <small>{{ weatherRainText(item) }} · 湿度 {{ weatherValueText(item.humidity, '%') }}</small>
+                      <small>{{ item.wind_direction || '风向暂无' }} {{ item.wind_scale ? `${item.wind_scale}级` : '' }}</small>
+                    </div>
+                  </div>
+                </article>
+                <article v-if="weatherAlarmItems.length" class="weather-warning-card">
+                  <span>天气预警</span>
+                  <p v-for="item in weatherAlarmItems" :key="`${item.title}-${item.pub_date}`">{{ item.title || item.type }} {{ item.level || '' }}</p>
+                </article>
+              </div>
+            </section>
+            <div v-if="!weatherPanelOpen" class="hero-panel__status">
+              <button v-if="currentWeather" class="weather-card weather-card--button" type="button" @click="openWeatherPanel">
                 <div>
                   <CloudSun :size="28" />
-                  <span>{{ currentWeather.location }}</span>
+                  <span>{{ weatherDisplayLocation }}</span>
                 </div>
                 <strong>{{ currentWeather.condition }} · {{ currentWeather.temperature }} 摄氏度</strong>
-                <p>湿度 {{ currentWeather.humidity }}%，{{ currentWeather.wind_direction }} {{ currentWeather.wind_level }}</p>
+                <p>湿度 {{ weatherValueText(currentWeather.humidity, '%') }}，{{ currentWeather.wind_direction }} {{ currentWeather.wind_level }}</p>
                 <time>更新 {{ formatDateTime(currentWeather.updated_at) }}</time>
-              </article>
+              </button>
+              <button v-else class="weather-card weather-card--button" type="button" @click="openWeatherPanel">
+                <div>
+                  <CloudSun :size="28" />
+                  <span>{{ weatherCity }}</span>
+                </div>
+                <strong>{{ weatherLoading ? '天气加载中' : '天气暂不可用' }}</strong>
+                <p>{{ weatherError || '点击打开天气详情并配置城市。' }}</p>
+              </button>
             </div>
           </div>
 
           <div class="overview-live-layout">
-            <CameraGrowthPanel :active="activeView === 'overview'" />
+            <CameraGrowthPanel ref="cameraGrowthPanelRef" :active="activeView === 'overview'" @analysis-updated="handleCameraAnalysisUpdated" />
             <section class="panel overview-metrics-panel">
               <div class="section-heading">
                 <div>
@@ -3434,7 +3829,7 @@ onBeforeUnmount(() => {
             <div class="section-heading">
               <div class="section-heading__copy">
               <h2>病害识别</h2>
-              <span>上传叶片图片后展示 YOLO 风格检测结果</span>
+              <span>上传叶片图片后调用火山方舟识别，并由 DeepSeek 生成分析建议</span>
               </div>
               <button class="text-button" type="button" @click="openDiseasePhotoLibrary">
                 <Image :size="18" /> 图片库
@@ -3445,7 +3840,7 @@ onBeforeUnmount(() => {
                 <label class="upload-drop">
                   <Upload :size="28" />
                   <strong>{{ diseaseImageUrl ? '重新上传叶片图片' : '上传叶片图片' }}</strong>
-                  <span>支持 jpg / png，上传后生成检测框和识别建议</span>
+                  <span>支持 jpg / png / webp，上传后生成图像分析和管理建议</span>
                   <input type="file" accept="image/*" @change="handleDiseaseUpload" />
                 </label>
                 <button v-if="diseaseImageUrl" class="text-button" type="button" @click="clearDiseaseImage">
@@ -3460,7 +3855,7 @@ onBeforeUnmount(() => {
                   <span>等待上传图片</span>
                 </div>
                 <div
-                  v-for="box in diseaseResult?.detections"
+                  v-for="box in diseaseDetectionBoxes"
                   :key="box.id"
                   class="detect-box"
                   :style="{ left: `${box.bbox.x}%`, top: `${box.bbox.y}%`, width: `${box.bbox.width}%`, height: `${box.bbox.height}%` }"
@@ -3473,7 +3868,7 @@ onBeforeUnmount(() => {
 
           <section class="panel">
             <div class="section-heading">
-              <h2>YOLO 结果展示</h2>
+              <h2>AI 图像识别结果</h2>
               <StatusPill v-if="diseaseResult" :label="diseaseResult.model" state="neutral" />
             </div>
             <p v-if="diseaseLoading" class="summary-text">正在分析图片...</p>

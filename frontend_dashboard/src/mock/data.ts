@@ -12,6 +12,7 @@ import type {
   KnowledgeReference,
   KnowledgeTextAddResult,
   TelemetryPayload,
+  WeatherBundle,
   WeatherPayload,
 } from '../types';
 
@@ -92,6 +93,91 @@ export function buildMockWeather(): WeatherPayload {
     wind_direction: '东南风',
     wind_level: '2 级',
     updated_at: Date.now(),
+  };
+}
+
+export function buildMockWeatherBundle(city = 'wuxi'): WeatherBundle {
+  const current = buildMockWeather();
+  const now = Date.now();
+  return {
+    city,
+    updated_at: now,
+    current: {
+      available: true,
+      name: '实况天气',
+      data: {
+        ...current,
+        city,
+        feels_like: current.temperature + 1,
+        wind_speed: 9,
+        wind_scale: 2,
+        pressure: 1008,
+        visibility: 12,
+      },
+      updated_at: now,
+    },
+    daily: {
+      available: true,
+      name: '逐日预报',
+      data: Array.from({ length: 5 }, (_, index) => ({
+        date: new Date(now + index * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        condition_day: index % 2 === 0 ? '多云' : '阵雨',
+        condition_night: '多云',
+        high: 31 - index,
+        low: 24 - Math.floor(index / 2),
+        rainfall: index === 1 ? 4.2 : 0,
+        precip: index === 1 ? 65 : 20,
+        humidity: 68 + index,
+        wind_direction: '东南风',
+        wind_speed: 8 + index,
+        wind_scale: 2,
+      })),
+      updated_at: now,
+    },
+    hourly: {
+      available: true,
+      name: '逐小时预报',
+      data: Array.from({ length: 8 }, (_, index) => ({
+        time: new Date(now + index * 60 * 60 * 1000).toISOString(),
+        condition: index % 3 === 0 ? '阵雨' : '多云',
+        temperature: 28 + Math.round(Math.sin(index / 2) * 2),
+        humidity: 66 + index,
+        rainfall: index % 3 === 0 ? 0.8 : 0,
+        precip: index % 3 === 0 ? 50 : 15,
+        wind_direction: '东南风',
+        wind_speed: 7 + index,
+        wind_scale: 2,
+      })),
+      updated_at: now,
+    },
+    air: {
+      available: true,
+      name: '空气质量',
+      data: { aqi: 46, quality: '优', pm25: 18, pm10: 36, o3: 82, no2: 22, so2: 8, co: 0.5 },
+      updated_at: now,
+    },
+    life: {
+      available: true,
+      name: '生活指数',
+      data: {
+        dressing: { brief: '热', details: '温度偏高，棚内巡检注意补水。' },
+        sport: { brief: '较适宜', details: '室外风力较小，适合短时巡棚。' },
+        uv: { brief: '中等', details: '午间光照强，注意遮阳和补水。' },
+      },
+      updated_at: now,
+    },
+    alarms: {
+      available: true,
+      name: '天气预警',
+      data: [],
+      updated_at: now,
+    },
+    registered_capabilities: [
+      { key: 'agriculture', name: '农业气象', available: false, reason: '模拟环境未开通。' },
+      { key: 'grid', name: '网格天气', available: false, reason: '模拟环境未开通。' },
+      { key: 'map_layer', name: '气象图层', available: false, reason: '模拟环境未开通。' },
+      { key: 'marine', name: '海洋天气', available: false, reason: '模拟环境未开通。' },
+    ],
   };
 }
 

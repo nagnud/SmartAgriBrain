@@ -140,8 +140,9 @@ export function computeSmartControlDecision(
 
   const outsideHot = weather ? excess(weather.temperature, tempTarget.max, 1, 12) : 0;
   const outsideCold = weather ? deficit(weather.temperature, tempTarget.min, 1, 12) : 0;
-  const outsideDry = weather ? deficit(weather.humidity, 45, 0, 40) : 0;
-  const outsideWet = weather ? excess(weather.humidity, 82, 0, 18) : 0;
+  const outsideHumidity = weather?.humidity ?? sensors.humidity;
+  const outsideDry = weather ? deficit(outsideHumidity, 45, 0, 40) : 0;
+  const outsideWet = weather ? excess(outsideHumidity, 82, 0, 18) : 0;
   const windy = excess(weatherWindLevel(weather), 5, 0, 5);
   const cloudy = /阴|云|雾|霾|cloud|overcast|fog|haze/i.test(weather?.condition ?? '') ? 1 : 0;
   const rainy = /雨|雪|雷|rain|storm|shower|snow/i.test(weather?.condition ?? '') ? 1 : 0;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { Camera, Expand, Minimize2, RefreshCw, ShieldAlert, Sparkles, X } from '@lucide/vue';
+import { Camera, Expand, Minimize2, Power, RefreshCw, ShieldAlert, Sparkles, X } from '@lucide/vue';
 import { analyzeGrowthFrame } from '../services/api';
 import type { DiseaseDetectionResult } from '../types';
 import { formatDateTime } from '../utils/format';
@@ -14,7 +14,12 @@ const props = withDefaults(defineProps<{
   active: true,
 });
 
-const captureIntervalMs = 20000;
+const emit = defineEmits<{
+  (event: 'analysis-updated', result: DiseaseDetectionResult | null): void;
+}>();
+
+const captureIntervalMs = 60000;
+const autoAnalysisStorageKey = 'smartagribrain-camera-auto-analysis';
 
 const videoRef = ref<HTMLVideoElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -29,9 +34,12 @@ const lastCaptureImageUrl = ref('');
 const cameraMode = ref<CameraMode>('live');
 const fullscreenOpen = ref(false);
 const analysisOpen = ref(false);
+const autoAnalysisEnabled = ref(readStoredAutoAnalysisEnabled());
 let captureTimer: number | undefined;
 
-const analysisDetections = computed(() => growthAnalysis.value?.detections ?? []);
+const analysisDetections = computed(() => (
+  growthAnalysis.value?.detections.filter((item) => item.bbox.width > 0 && item.bbox.height > 0) ?? []
+));
 
 const analysisStatusText = computed(() => {
   if (analyzing.value) {
@@ -42,6 +50,9 @@ const analysisStatusText = computed(() => {
   }
   if (lastCaptureImageUrl.value) {
     return '等待 AI 分析结果';
+  }
+  if (!autoAnalysisEnabled.value && cameraReady.value) {
+    return '自动状态分析已关闭';
   }
   if (cameraReady.value) {
     return '等待自动截图分析';
@@ -82,8 +93,28 @@ const growthStatusLabel = computed(() => {
   return '生长稳定';
 });
 
+const autoAnalysisHint = computed(() => (
+  autoAnalysisEnabled.value
+    ? '摄像头会每 1 分钟自动截图一次，AI 会在这里写出作物生长状况和管理建议。'
+    : '自动状态分析已关闭，不会定时消耗图像识别额度；需要时可点击截图按钮手动分析。'
+));
+
 function detectionSeverityClass(severity: GrowthSeverity): string {
   return `analysis-detect-box--${severity}`;
+}
+
+function readStoredAutoAnalysisEnabled(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  return window.localStorage.getItem(autoAnalysisStorageKey) === 'true';
+}
+
+function saveAutoAnalysisEnabled(enabled: boolean): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.localStorage.setItem(autoAnalysisStorageKey, String(enabled));
 }
 
 function clearCaptureTimer(): void {
@@ -91,6 +122,33 @@ function clearCaptureTimer(): void {
     window.clearInterval(captureTimer);
     captureTimer = undefined;
   }
+}
+
+function startCaptureTimer(): void {
+  clearCaptureTimer();
+  if (!autoAnalysisEnabled.value || !cameraReady.value) {
+    return;
+  }
+  captureTimer = window.setInterval(() => {
+    void captureAndAnalyze();
+  }, captureIntervalMs);
+}
+
+function setAutoAnalysisEnabled(enabled: boolean): void {
+  autoAnalysisEnabled.value = enabled;
+  saveAutoAnalysisEnabled(enabled);
+  if (!enabled) {
+    clearCaptureTimer();
+    return;
+  }
+  startCaptureTimer();
+  if (cameraReady.value && !growthAnalysis.value && !analyzing.value) {
+    void captureAndAnalyze();
+  }
+}
+
+function toggleAutoAnalysis(): void {
+  setAutoAnalysisEnabled(!autoAnalysisEnabled.value);
 }
 
 function revokeLastCaptureUrl(): void {
@@ -157,10 +215,10 @@ async function startCamera(): Promise<void> {
     }
     stream.value = nextStream;
     await attachStream(nextStream);
-    captureTimer = window.setInterval(() => {
+    startCaptureTimer();
+    if (autoAnalysisEnabled.value) {
       void captureAndAnalyze();
-    }, captureIntervalMs);
-    void captureAndAnalyze();
+    }
   } catch (error) {
     stopCamera();
     cameraError.value = cameraErrorText(error);
@@ -211,6 +269,7 @@ async function captureAndAnalyze(): Promise<void> {
   lastCaptureImageUrl.value = captureUrl;
   lastCaptureAt.value = Date.now();
   growthAnalysis.value = null;
+  emit('analysis-updated', null);
   analyzing.value = true;
   analysisError.value = '';
   try {
@@ -218,12 +277,27 @@ async function captureAndAnalyze(): Promise<void> {
       ...await analyzeGrowthFrame(file, captureUrl),
       image_url: captureUrl,
     };
+    emit('analysis-updated', growthAnalysis.value);
   } catch (error) {
     analysisError.value = error instanceof Error ? error.message : 'AI 生长状态分析失败。';
   } finally {
+    if (!growthAnalysis.value) {
+      emit('analysis-updated', null);
+    }
     analyzing.value = false;
   }
 }
+
+async function captureAndAnalyzeFromRefresh(): Promise<void> {
+  if (!autoAnalysisEnabled.value) {
+    return;
+  }
+  await captureAndAnalyze();
+}
+
+defineExpose({
+  captureAndAnalyze: captureAndAnalyzeFromRefresh,
+});
 
 function openFullscreen(): void {
   if (!cameraReady.value && !lastCaptureImageUrl.value) {
@@ -284,6 +358,16 @@ onBeforeUnmount(() => {
             状态分析
           </button>
         </div>
+        <button
+          class="camera-auto-toggle"
+          :class="{ 'camera-auto-toggle--on': autoAnalysisEnabled }"
+          type="button"
+          :title="autoAnalysisEnabled ? '关闭自动状态分析' : '开启自动状态分析'"
+          @click.stop="toggleAutoAnalysis"
+        >
+          <Power :size="16" />
+          <span>{{ autoAnalysisEnabled ? '自动分析开' : '自动分析关' }}</span>
+        </button>
         <button class="icon-button" type="button" title="截图并分析" :disabled="!cameraReady || analyzing" @click.stop="captureAndAnalyze">
           <RefreshCw :class="{ spinning: analyzing }" :size="18" />
         </button>
@@ -377,7 +461,7 @@ onBeforeUnmount(() => {
           <li v-for="suggestion in growthAnalysis.suggestions" :key="suggestion">{{ suggestion }}</li>
         </ul>
       </template>
-      <p v-else-if="!analysisError" class="summary-text">摄像头会每 20 秒自动截图一次，AI 会在这里写出作物生长状态和管理建议。</p>
+      <p v-else-if="!analysisError" class="summary-text">{{ autoAnalysisHint }}</p>
     </div>
   </section>
 </template>

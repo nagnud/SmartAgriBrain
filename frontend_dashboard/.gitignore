@@ -7,7 +7,6 @@ dependencies.lock
 # Python
 __pycache__/
 *.pyc
-.env
 .venv/
 venv/
 backend_api/.venv/

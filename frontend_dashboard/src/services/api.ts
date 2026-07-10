@@ -1,8 +1,8 @@
 ﻿import {
   addMockKnowledgeItem,
   analyzeMockKnowledge,
-  buildMockDiseaseDetection,
   buildMockExpertChat,
+  buildMockWeatherBundle,
   buildMockWeather,
   buildMockHistory,
   buildMockLatest,
@@ -32,6 +32,8 @@ import type {
   KnowledgeTextAddResult,
   PersistedDashboardState,
   TelemetryPayload,
+  WeatherBundle,
+  WeatherCityOption,
   WeatherPayload,
 } from '../types';
 
@@ -46,11 +48,22 @@ const useMockAiAdvice = import.meta.env.VITE_USE_MOCK_AI_ADVICE === undefined
 const useMockKnowledge = import.meta.env.VITE_USE_MOCK_KNOWLEDGE === undefined
   ? useMock
   : import.meta.env.VITE_USE_MOCK_KNOWLEDGE !== 'false';
+const useMockWeather = import.meta.env.VITE_USE_MOCK_WEATHER === undefined
+  ? useMock
+  : import.meta.env.VITE_USE_MOCK_WEATHER !== 'false';
 const dashboardStateStorageKey = 'smartagribrain-dashboard-state';
 
 type RequestJsonInit = RequestInit & {
   timeoutMs?: number;
 };
+
+export interface FarmAnalysisContext {
+  weather?: WeatherPayload | null;
+  weatherBundle?: WeatherBundle | null;
+  history?: HistoryPoint[];
+  disease?: DiseaseDetectionResult | null;
+  cameraAnalysis?: DiseaseDetectionResult | null;
+}
 
 async function requestJson<T>(path: string, init?: RequestJsonInit): Promise<T> {
   const { timeoutMs, ...requestInit } = init ?? {};
@@ -166,7 +179,10 @@ export async function getDeviceStatus(): Promise<TelemetryPayload['status']> {
   return requestJson<TelemetryPayload['status']>('/api/device/status');
 }
 
-export async function analyzeFarm(latest: TelemetryPayload): Promise<AiAnalysisResponse> {
+export async function analyzeFarm(
+  latest: TelemetryPayload,
+  context: FarmAnalysisContext = {},
+): Promise<AiAnalysisResponse> {
   if (useMockAiAdvice) {
     return buildDisconnectedAiAnalysis(latest, '当前前端配置为不请求 AI 农事建议接口。');
   }
@@ -178,8 +194,13 @@ export async function analyzeFarm(latest: TelemetryPayload): Promise<AiAnalysisR
         crop: 'tomato',
         sensors: latest.sensors,
         status: latest.status,
+        weather: context.weather ?? null,
+        weather_bundle: context.weatherBundle ?? null,
+        history: context.history ?? [],
+        disease: context.disease ?? null,
+        camera_analysis: context.cameraAnalysis ?? null,
       }),
-      timeoutMs: 2500,
+      timeoutMs: 120000,
     });
   } catch (error) {
     console.warn('AI farm advice API unavailable.', error);
@@ -204,11 +225,43 @@ export async function getAlarmRecords(): Promise<AlarmRecord[]> {
   return requestJson<AlarmRecord[]>('/api/device/alarms');
 }
 
-export async function getCurrentWeather(): Promise<WeatherPayload> {
-  if (useMock) {
+export async function getCurrentWeather(city?: string): Promise<WeatherPayload> {
+  if (useMockWeather) {
     return buildMockWeather();
   }
-  return requestJson<WeatherPayload>('/api/weather/current');
+  const query = city ? `?city=${encodeURIComponent(city)}` : '';
+  return requestJson<WeatherPayload>(`/api/weather/current${query}`);
+}
+
+export async function getWeatherBundle(city?: string): Promise<WeatherBundle> {
+  if (useMockWeather) {
+    return buildMockWeatherBundle(city);
+  }
+  const query = city ? `?city=${encodeURIComponent(city)}` : '';
+  return requestJson<WeatherBundle>(`/api/weather/bundle${query}`);
+}
+
+export async function getWeatherCities(query: string): Promise<WeatherCityOption[]> {
+  if (useMockWeather) {
+    const value = query.trim() || '无锡';
+    const cities: WeatherCityOption[] = [
+      { id: '无锡', name: '无锡', path: '无锡,江苏,中国', country: 'CN' },
+      { id: '北京', name: '北京', path: '北京,北京,中国', country: 'CN' },
+      { id: '上海', name: '上海', path: '上海,上海,中国', country: 'CN' },
+      { id: '南京', name: '南京', path: '南京,江苏,中国', country: 'CN' },
+      { id: '苏州', name: '苏州', path: '苏州,江苏,中国', country: 'CN' },
+      { id: '杭州', name: '杭州', path: '杭州,浙江,中国', country: 'CN' },
+      { id: '广州', name: '广州', path: '广州,广东,中国', country: 'CN' },
+      { id: '深圳', name: '深圳', path: '深圳,广东,中国', country: 'CN' },
+      { id: '成都', name: '成都', path: '成都,四川,中国', country: 'CN' },
+      { id: '武汉', name: '武汉', path: '武汉,湖北,中国', country: 'CN' },
+      { id: '西安', name: '西安', path: '西安,陕西,中国', country: 'CN' },
+      { id: '郑州', name: '郑州', path: '郑州,河南,中国', country: 'CN' },
+    ];
+    return cities.filter((city) => `${city.name}${city.path}`.includes(value)).slice(0, 8);
+  }
+  const result = await requestJson<{ items: WeatherCityOption[] }>(`/api/weather/cities?q=${encodeURIComponent(query)}`);
+  return result.items;
 }
 
 export async function getPersistedDashboardState(): Promise<PersistedDashboardState | null> {
@@ -246,9 +299,6 @@ export async function savePersistedDashboardState(value: PersistedDashboardState
 }
 
 export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise<DiseaseDetectionResult> {
-  if (useMock) {
-    return buildMockDiseaseDetection(imageUrl);
-  }
   const formData = new FormData();
   formData.append('image', file);
   const response = await fetch(`${apiBaseUrl}/api/vision/disease`, {
@@ -256,7 +306,14 @@ export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise
     body: formData,
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    let detail = '';
+    try {
+      const errorBody = await response.json() as { detail?: unknown };
+      detail = typeof errorBody.detail === 'string' ? errorBody.detail : JSON.stringify(errorBody.detail ?? errorBody);
+    } catch {
+      detail = response.statusText;
+    }
+    throw new Error(`${response.status} ${detail || response.statusText}`);
   }
   return response.json() as Promise<DiseaseDetectionResult>;
 }

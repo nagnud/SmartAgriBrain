@@ -67,6 +67,71 @@ def clamp_list(value: Any, limit: int, item_limit: int = 120) -> List[str]:
     return items
 
 
+def short_json(value: Any, limit: int = 1800) -> str:
+    text = json.dumps(value, ensure_ascii=False, default=str)
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def compact_history(history: List[Dict[str, Any]], limit: int = 24) -> List[Dict[str, Any]]:
+    if not isinstance(history, list):
+        return []
+    return [item for item in history[-limit:] if isinstance(item, dict)]
+
+
+def module_summary(module: Any, empty_label: str = "暂无数据") -> str:
+    if not isinstance(module, dict):
+        return empty_label
+    if module.get("available") is False:
+        return "未开通或暂无数据"
+    data = module.get("data", module)
+    return short_json(data, 420)
+
+
+def context_basis(payload: FarmAdviceRequest) -> List[str]:
+    basis: List[str] = []
+    sensors = payload.sensors if isinstance(payload.sensors, dict) else {}
+    if sensors:
+        basis.append(
+            "棚内参数："
+            f"温度{sensors.get('temperature', '--')}℃，"
+            f"湿度{sensors.get('humidity', '--')}%RH，"
+            f"光照{sensors.get('light', '--')}lux，"
+            f"CO2 {sensors.get('co2', '--')}ppm，"
+            f"土壤湿度{sensors.get('soil_moisture', '--')}%，"
+            f"土壤EC {sensors.get('soil_ec', '--')}mS/cm。"
+        )
+    if isinstance(payload.weather, dict) and payload.weather:
+        basis.append(
+            "天气实况："
+            f"{payload.weather.get('location', '--')}，"
+            f"{payload.weather.get('condition', '--')}，"
+            f"室外{payload.weather.get('temperature', '--')}℃，"
+            f"空气湿度{payload.weather.get('humidity', '--')}%，"
+            f"{payload.weather.get('wind_direction', '--')} {payload.weather.get('wind_level', '--')}。"
+        )
+    if isinstance(payload.weather_bundle, dict) and payload.weather_bundle:
+        current = payload.weather_bundle.get("current")
+        daily = payload.weather_bundle.get("daily")
+        hourly = payload.weather_bundle.get("hourly")
+        air = payload.weather_bundle.get("air")
+        alarms = payload.weather_bundle.get("alarms")
+        basis.append(f"天气详情-实况：{module_summary(current)}")
+        basis.append(f"天气详情-逐日预报：{module_summary(daily)}")
+        basis.append(f"天气详情-逐小时预报：{module_summary(hourly)}")
+        basis.append(f"天气详情-空气质量：{module_summary(air)}")
+        basis.append(f"天气详情-预警：{module_summary(alarms)}")
+    if isinstance(payload.disease, dict) and payload.disease:
+        basis.append(f"病害识别：{short_json(payload.disease, 700)}")
+    if isinstance(payload.camera_analysis, dict) and payload.camera_analysis:
+        basis.append(f"摄像头状态分析：{short_json(payload.camera_analysis, 700)}")
+    history = compact_history(payload.history, 12)
+    if history:
+        basis.append(f"历史趋势样本：最近{len(history)}条，{short_json(history, 900)}")
+    return basis[:10]
+
+
 def sanitize_risk(value: Any, fallback: RiskLevel) -> RiskLevel:
     text = safe_text(value).lower()
     if text in {"low", "medium", "high"}:
@@ -357,6 +422,11 @@ def evaluate_sensors(sensors: Dict[str, Any]) -> Tuple[RiskLevel, int, List[AiRi
 def fallback_advice(payload: FarmAdviceRequest) -> FarmAdviceResponse:
     sensors = payload.sensors if isinstance(payload.sensors, dict) else {}
     risk, score, factors, suggestions, basis, commands = evaluate_sensors(sensors)
+    extra_basis = context_basis(payload)
+    merged_basis = []
+    for item in [*extra_basis, *basis]:
+        if item and item not in merged_basis:
+            merged_basis.append(item)
     summary_prefix = {
         "low": "当前农情整体稳定",
         "medium": "当前农情存在轻中度偏离",
@@ -373,7 +443,7 @@ def fallback_advice(payload: FarmAdviceRequest) -> FarmAdviceResponse:
         summary=f"{summary_prefix}，建议按传感器偏离项做小幅调控并复查。",
         suggestions=suggestions,
         commands=commands,
-        basis=basis,
+        basis=merged_basis[:10],
         updated_at=now_ms(),
     )
 
@@ -408,10 +478,16 @@ def build_farm_advice_prompt(payload: FarmAdviceRequest, fallback: FarmAdviceRes
         "crop": payload.crop,
         "sensors": payload.sensors,
         "status": payload.status,
+        "weather": payload.weather,
+        "weather_bundle": payload.weather_bundle,
+        "disease": payload.disease,
+        "camera_analysis": payload.camera_analysis,
+        "history": compact_history(payload.history),
+        "available_basis": context_basis(payload),
         "local_rule_baseline": fallback.model_dump(mode="json"),
     }
     return (
-        "你是温室智慧农业农事顾问。请根据传感器数据生成面向种植者的农事建议。"
+        "你是温室智慧农业农事顾问。请根据所有已拿到的信息生成面向种植者的农事建议。"
         "只输出合法 JSON，不要 Markdown，不要声称已经执行任何设备动作。"
         "\n输出格式固定为："
         "{\"risk_level\":\"low|medium|high\",\"risk_score\":0到100的整数,\"risk_status\":\"较稳定|需关注|高风险\","
@@ -423,8 +499,10 @@ def build_farm_advice_prompt(payload: FarmAdviceRequest, fallback: FarmAdviceRes
         "\n3. suggestions 返回 2-4 条，每条必须具体、可执行，包含幅度或复查时间。"
         "\n4. commands 最多 3 条，只能使用 fan_on、fan_off、pump_on、pump_off、light_on、light_off、curtain_open、curtain_close、alarm_on、alarm_off，value 只能是 0 或 1。"
         "\n5. 如果不需要立刻控制设备，commands 返回空数组。"
-        "\n6. basis 返回 3-6 条，必须引用输入里的真实传感器数值或设备状态。"
-        "\n7. 涉及高温、高湿、低土壤湿度、强光或病害诱因时，风险等级和 risk_score 要相应提高。"
+        "\n6. basis 返回 5-10 条，必须覆盖所有可用依据：棚内参数、设备状态、天气实况、未来预报、空气质量、天气预警、病害识别、摄像头状态分析、历史趋势。"
+        "\n7. 如果某类信息不存在或 weather_bundle 模块 available=false，要在 basis 或 summary 中说明缺失/未开通，不要编造。"
+        "\n8. 涉及高温、高湿、低土壤湿度、强光、空气质量差、降雨/大风/预警或病害诱因时，风险等级和 risk_score 要相应提高。"
+        "\n9. 建议必须同时考虑棚内外：例如外部高湿/降雨时不建议盲目加大通风和灌溉，外部高温强光时注意遮光降温。"
         f"\n当前输入：{json.dumps(context, ensure_ascii=False)}"
     )
 
@@ -436,7 +514,7 @@ def parse_deepseek_advice(content: str, payload: FarmAdviceRequest, fallback: Fa
 
     summary = safe_text(parsed.get("summary"), fallback.summary)[:180]
     suggestions = clamp_list(parsed.get("suggestions"), 4)
-    basis = clamp_list(parsed.get("basis"), 6)
+    basis = clamp_list(parsed.get("basis"), 10, 180)
     commands = sanitize_commands(parsed.get("commands"))
     fallback_score = risk_score_from_level(fallback.risk_level)
     score = sanitize_risk_score(parsed.get("risk_score"), fallback.risk_score or fallback_score)
@@ -446,8 +524,13 @@ def parse_deepseek_advice(content: str, payload: FarmAdviceRequest, fallback: Fa
 
     if not suggestions:
         suggestions = fallback.suggestions
+    baseline_basis = context_basis(payload)
     if not basis:
         basis = fallback.basis
+    for item in baseline_basis:
+        if item and item not in basis:
+            basis.append(item)
+    basis = basis[:10]
 
     return FarmAdviceResponse(
         device_id=payload.device_id,

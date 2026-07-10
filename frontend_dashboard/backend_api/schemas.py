@@ -25,6 +25,11 @@ class FarmAdviceRequest(BaseModel):
     crop: str = "tomato"
     sensors: Dict[str, Any] = Field(default_factory=dict)
     status: Dict[str, Any] = Field(default_factory=dict)
+    weather: Optional[Dict[str, Any]] = None
+    weather_bundle: Optional[Dict[str, Any]] = None
+    history: List[Dict[str, Any]] = Field(default_factory=list)
+    disease: Optional[Dict[str, Any]] = None
+    camera_analysis: Optional[Dict[str, Any]] = None
 
 
 class FarmAdviceResponse(BaseModel):
@@ -77,6 +82,10 @@ class AssistantChatRequest(BaseModel):
     image_url: Optional[str] = None
     latest: Dict[str, Any] = Field(default_factory=dict)
     disease: Optional[Dict[str, Any]] = None
+    weather: Optional[Dict[str, Any]] = None
+    weather_bundle: Optional[Dict[str, Any]] = None
+    ai_analysis: Optional[Dict[str, Any]] = None
+    camera_analysis: Optional[Dict[str, Any]] = None
     knowledge_base_id: Optional[int] = None
     current_view: Optional[str] = None
     knowledge_bases: List[Dict[str, Any]] = Field(default_factory=list)

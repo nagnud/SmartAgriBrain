@@ -44,10 +44,106 @@ export interface WeatherPayload {
   location: string;
   condition: string;
   temperature: number;
-  humidity: number;
+  humidity: number | null;
   wind_direction: string;
   wind_level: string;
   updated_at: number;
+}
+
+export interface WeatherModule<T = unknown> {
+  available: boolean;
+  name?: string;
+  data?: T;
+  reason?: string;
+  updated_at?: number;
+}
+
+export interface WeatherCurrentDetail extends WeatherPayload {
+  city?: string;
+  feels_like?: number | null;
+  wind_speed?: number | null;
+  wind_scale?: number | null;
+  pressure?: number | null;
+  visibility?: number | null;
+  clouds?: number | null;
+  dew_point?: number | null;
+  last_update?: string;
+}
+
+export interface WeatherDailyItem {
+  date?: string;
+  condition_day?: string | null;
+  condition_night?: string | null;
+  high?: number | null;
+  low?: number | null;
+  rainfall?: number | null;
+  precip?: number | null;
+  humidity?: number | null;
+  wind_direction?: string | null;
+  wind_speed?: number | null;
+  wind_scale?: number | null;
+}
+
+export interface WeatherHourlyItem {
+  time?: string;
+  condition?: string | null;
+  temperature?: number | null;
+  humidity?: number | null;
+  rainfall?: number | null;
+  precip?: number | null;
+  wind_direction?: string | null;
+  wind_speed?: number | null;
+  wind_scale?: number | null;
+}
+
+export interface AirQualityData {
+  aqi?: number | null;
+  quality?: string | null;
+  pm25?: number | null;
+  pm10?: number | null;
+  o3?: number | null;
+  no2?: number | null;
+  so2?: number | null;
+  co?: number | null;
+}
+
+export type LifeIndexData = Record<string, { brief?: string | null; details?: string | null }>;
+
+export interface WeatherAlarmItem {
+  title?: string | null;
+  type?: string | null;
+  level?: string | null;
+  status?: string | null;
+  description?: string | null;
+  pub_date?: string | null;
+}
+
+export interface WeatherCapability {
+  key: string;
+  name: string;
+  available: boolean;
+  reason?: string;
+}
+
+export interface WeatherBundle {
+  city: string;
+  updated_at: number;
+  current: WeatherModule<WeatherCurrentDetail>;
+  daily: WeatherModule<WeatherDailyItem[]>;
+  hourly: WeatherModule<WeatherHourlyItem[]>;
+  air: WeatherModule<AirQualityData>;
+  life: WeatherModule<LifeIndexData>;
+  alarms: WeatherModule<WeatherAlarmItem[]>;
+  registered_capabilities: WeatherCapability[];
+}
+
+export interface WeatherCityOption {
+  id?: string;
+  name?: string;
+  path?: string;
+  country?: string;
+  timezone?: string;
+  timezone_offset?: string;
 }
 
 export interface PersistedDashboardState {
@@ -70,6 +166,8 @@ export interface PersistedDashboardState {
   chatMessages?: ChatMessage[];
   assistantThreads?: AssistantThread[];
   activeAssistantThreadId?: string;
+  weatherCity?: string;
+  weatherPanelOpen?: boolean;
 }
 
 export interface MetricTargetRange {
@@ -239,6 +337,10 @@ export interface ExpertChatRequest {
   image_url?: string;
   latest: TelemetryPayload;
   disease?: DiseaseDetectionResult | null;
+  weather?: WeatherPayload | null;
+  weather_bundle?: WeatherBundle | null;
+  ai_analysis?: AiAnalysisResponse | null;
+  camera_analysis?: DiseaseDetectionResult | null;
   knowledge_base_id?: number;
   current_view?: string;
   knowledge_bases?: KnowledgeBaseInfo[];

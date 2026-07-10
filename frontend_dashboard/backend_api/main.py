@@ -20,6 +20,8 @@ from schemas import (
     FarmAdviceResponse,
     HealthResponse,
 )
+from vision_service import analyze_disease_image
+from weather_service import current_payload, search_cities, weather_bundle
 
 load_dotenv()
 
@@ -66,38 +68,22 @@ def post_v1_farm_ai_analyze(payload: FarmAdviceRequest) -> FarmAdviceResponse:
 
 @app.post("/api/vision/disease")
 async def post_vision_disease(image: UploadFile = File(...)) -> dict[str, Any]:
-    await image.read()
-    return {
-        "image_url": "",
-        "crop": "tomato",
-        "model": "YOLO11n-demo",
-        "detections": [
-            {
-                "id": "det-1",
-                "label": "疑似叶斑病",
-                "class_name": "leaf_spot",
-                "confidence": 0.88,
-                "bbox": {"x": 31, "y": 24, "width": 30, "height": 28},
-                "severity": "medium",
-            },
-            {
-                "id": "det-2",
-                "label": "早期霜霉风险",
-                "class_name": "downy_mildew",
-                "confidence": 0.74,
-                "bbox": {"x": 58, "y": 48, "width": 22, "height": 20},
-                "severity": "low",
-            },
-        ],
-        "summary": "检测到 2 处疑似病斑，整体为中等风险，建议结合湿度趋势复核。",
-        "explanation": "图像中存在不规则黄褐色斑块，叠加近期湿度偏高，符合番茄叶斑病或霜霉病早期风险特征。",
-        "suggestions": [
-            "立即检查叶背是否有霉层，并拍摄更清晰的近景图片复核。",
-            "优先通风降湿，避免叶面长时间结露。",
-            "隔离明显病叶，必要时请人工确认后再用药。",
-        ],
-        "processed_at": int(time.time() * 1000),
-    }
+    return await analyze_disease_image(image)
+
+
+@app.get("/api/weather/current")
+def get_weather_current(city: str | None = None) -> dict[str, Any]:
+    return current_payload(city)
+
+
+@app.get("/api/weather/bundle")
+def get_weather_bundle(city: str | None = None) -> dict[str, Any]:
+    return weather_bundle(city)
+
+
+@app.get("/api/weather/cities")
+def get_weather_cities(q: str) -> dict[str, Any]:
+    return search_cities(q)
 
 
 @app.post("/api/v1/assistant/chat", response_model=AssistantChatResponse)
