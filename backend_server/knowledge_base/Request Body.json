@@ -1,0 +1,26 @@
+{
+  "device_id": "sensairshuttle_001",
+  "timestamp": 1710000000,
+  "sensors": {
+    "temperature": 26.5,
+    "humidity": 62.3,
+    "pressure": 101.2,
+    "gas_resistance": 15800,
+    "acc_x": 0.01,
+    "acc_y": -0.02,
+    "acc_z": 0.98,
+    "gyro_x": 0.1,
+    "gyro_y": 0.0,
+    "gyro_z": -0.1,
+    "mag_x": 12.3,
+    "mag_y": 8.6,
+    "mag_z": -35.1
+  },
+  "status": {
+    "wifi": "connected",
+    "mqtt": "connected",
+    "fan": 0,
+    "pump": 0,
+    "light": 0
+  }
+}
