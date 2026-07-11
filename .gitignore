@@ -9,7 +9,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Environment
 .env
+backend_server/.env
 
 # Node / Vue
 node_modules/
@@ -26,7 +29,7 @@ Thumbs.db
 # Logs
 *.log
 
-# Binary large files
+# Binary
 *.zip
 *.rar
 *.7z
