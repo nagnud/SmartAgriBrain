@@ -375,6 +375,27 @@ body.is-resizing-assistant * {
   line-height: 1.3;
 }
 
+.weather-card .weather-card__today {
+  display: grid;
+  justify-content: stretch;
+  gap: 4px;
+  padding: 9px 0;
+  color: #4f5d55;
+  border-top: 1px solid #e2e9df;
+  border-bottom: 1px solid #e2e9df;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.weather-card__today span {
+  min-width: 0;
+}
+
+.weather-card__today b {
+  margin-right: 4px;
+  color: #2f8f4e;
+}
+
 .weather-card p,
 .weather-card time {
   margin: 0;
@@ -1455,6 +1476,21 @@ body.is-resizing-assistant * {
   align-items: start;
 }
 
+.disease-layout {
+  grid-template-columns: minmax(260px, 0.65fr) minmax(0, 1.35fr);
+  min-width: 0;
+}
+
+.disease-layout > * {
+  min-width: 0;
+}
+
+@container (max-width: 1300px) {
+  .disease-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 @container (max-width: 1500px) {
   .two-column {
     grid-template-columns: 1fr;
@@ -1484,6 +1520,20 @@ body.is-resizing-assistant * {
   margin: 0;
   font-size: 18px;
   line-height: 1.3;
+}
+
+.ai-analysis-heading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ai-analysis-schedule {
+  margin: -4px 0 12px;
+  color: #7a857d;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .section-heading__copy {
@@ -1688,6 +1738,16 @@ body.is-resizing-assistant * {
   align-content: start;
 }
 
+.image-upload-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.image-upload-actions .text-button {
+  justify-content: center;
+}
+
 .upload-drop {
   display: grid;
   min-height: 230px;
@@ -1699,6 +1759,14 @@ body.is-resizing-assistant * {
   border: 1px dashed #9bd0a8;
   border-radius: 8px;
   background: #f2faf4;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.upload-drop--dragging {
+  border-color: #2f8f4e;
+  background: #e7f7eb;
+  box-shadow: 0 0 0 4px rgba(47, 143, 78, 0.14);
+  transform: translateY(-2px);
 }
 
 .upload-drop input {
@@ -1712,18 +1780,39 @@ body.is-resizing-assistant * {
 
 .detection-stage {
   position: relative;
-  display: grid;
-  min-height: 390px;
+  display: flex;
+  width: 100%;
+  height: clamp(360px, 58vh, 640px);
+  min-height: 360px;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   border: 1px solid #d9e2d7;
   border-radius: 8px;
   background: #17251d;
 }
 
-.detection-stage img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+.detection-media {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  max-height: 100%;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.detection-media img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: clamp(360px, 58vh, 640px);
+  object-fit: contain;
+}
+
+.detection-stage:not(.detection-stage--empty) {
+  background: #17251d;
 }
 
 .detection-stage--empty {
@@ -1734,6 +1823,8 @@ body.is-resizing-assistant * {
   display: grid;
   place-items: center;
   gap: 10px;
+  padding: 24px;
+  text-align: center;
   color: #7a857d;
 }
 
@@ -1746,14 +1837,19 @@ body.is-resizing-assistant * {
 .detect-box span {
   position: absolute;
   left: -3px;
-  top: -30px;
+  top: 4px;
   min-width: max-content;
+  max-width: min(240px, calc(100vw - 72px));
   padding: 4px 8px;
+  overflow: hidden;
   color: #17251d;
   border-radius: 6px;
   background: #f0c84b;
   font-size: 12px;
   font-weight: 800;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .disease-error {
@@ -1871,6 +1967,9 @@ body.is-resizing-assistant * {
 }
 
 .disease-photo-detail__image {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
   overflow: hidden;
   border: 1px solid #d9e2d7;
   border-radius: 8px;
@@ -1879,9 +1978,20 @@ body.is-resizing-assistant * {
 
 .disease-photo-detail__image img {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   max-height: 340px;
   object-fit: contain;
+}
+
+.image-load-placeholder {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 220px;
+  padding: 20px;
+  color: #c9d5cd;
+  text-align: center;
 }
 
 .disease-photo-detail__meta {
@@ -2110,6 +2220,45 @@ body.is-resizing-assistant .assistant-resizer::before {
   border-left: 1px solid #d9e2d7;
   background: #ffffff;
   box-shadow: -10px 0 28px rgba(30, 42, 34, 0.12);
+}
+
+.assistant-panel--dragging {
+  box-shadow: inset 0 0 0 3px #2f8f4e, -10px 0 28px rgba(30, 42, 34, 0.12);
+}
+
+.assistant-drop-overlay {
+  position: absolute;
+  z-index: 20;
+  inset: 12px;
+  display: grid;
+  place-content: center;
+  place-items: center;
+  gap: 8px;
+  color: #2f8f4e;
+  text-align: center;
+  pointer-events: none;
+  border: 2px dashed #2f8f4e;
+  border-radius: 10px;
+  background: rgba(237, 249, 241, 0.96);
+  box-shadow: 0 16px 42px rgba(30, 88, 48, 0.18);
+}
+
+.assistant-drop-overlay span,
+.assistant-send-stage {
+  color: #4f5d55;
+  font-size: 13px;
+}
+
+.assistant-image-error,
+.assistant-send-stage {
+  margin: 0;
+}
+
+.assistant-send-stage {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #edf9f1;
+  font-weight: 700;
 }
 
 .assistant-panel__header {
@@ -3495,6 +3644,19 @@ body.is-resizing-assistant .assistant-resizer::before {
 
   .disease-photo-detail {
     min-height: 360px;
+  }
+
+  .detection-stage {
+    height: clamp(280px, 52vh, 460px);
+    min-height: 280px;
+  }
+
+  .detection-media img {
+    max-height: clamp(280px, 52vh, 460px);
+  }
+
+  .image-upload-actions {
+    grid-template-columns: 1fr;
   }
 
   .ai-risk-detail ul {

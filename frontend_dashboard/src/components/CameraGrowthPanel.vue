@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Camera, Expand, Minimize2, Power, RefreshCw, ShieldAlert, Sparkles, X } from '@lucide/vue';
 import { analyzeGrowthFrame } from '../services/api';
 import type { DiseaseDetectionResult } from '../types';
-import { formatDateTime } from '../utils/format';
+import { confidenceText, formatDateTime, userErrorText } from '../utils/format';
 
 type CameraMode = 'live' | 'analysis';
 type GrowthSeverity = 'healthy' | 'low' | 'medium' | 'high';
@@ -18,7 +18,7 @@ const emit = defineEmits<{
   (event: 'analysis-updated', result: DiseaseDetectionResult | null): void;
 }>();
 
-const captureIntervalMs = 60000;
+const captureIntervalMs = 120000;
 const autoAnalysisStorageKey = 'smartagribrain-camera-auto-analysis';
 
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -36,6 +36,7 @@ const fullscreenOpen = ref(false);
 const analysisOpen = ref(false);
 const autoAnalysisEnabled = ref(readStoredAutoAnalysisEnabled());
 let captureTimer: number | undefined;
+let analysisCompletedAt: number | null = null;
 
 const analysisDetections = computed(() => (
   growthAnalysis.value?.detections.filter((item) => item.bbox.width > 0 && item.bbox.height > 0) ?? []
@@ -95,8 +96,8 @@ const growthStatusLabel = computed(() => {
 
 const autoAnalysisHint = computed(() => (
   autoAnalysisEnabled.value
-    ? '摄像头会每 1 分钟自动截图一次，AI 会在这里写出作物生长状况和管理建议。'
-    : '自动状态分析已关闭，不会定时消耗图像识别额度；需要时可点击截图按钮手动分析。'
+    ? '仅在总览页可见时每 2 分钟自动检查一次；离开页面后会暂停。'
+    : '自动状态分析已关闭；需要时可点击刷新按钮手动分析。'
 ));
 
 function detectionSeverityClass(severity: GrowthSeverity): string {
@@ -105,9 +106,10 @@ function detectionSeverityClass(severity: GrowthSeverity): string {
 
 function readStoredAutoAnalysisEnabled(): boolean {
   if (typeof window === 'undefined') {
-    return false;
+    return true;
   }
-  return window.localStorage.getItem(autoAnalysisStorageKey) === 'true';
+  const stored = window.localStorage.getItem(autoAnalysisStorageKey);
+  return stored === null ? true : stored === 'true';
 }
 
 function saveAutoAnalysisEnabled(enabled: boolean): void {
@@ -124,14 +126,25 @@ function clearCaptureTimer(): void {
   }
 }
 
-function startCaptureTimer(): void {
+function scheduleNextCapture(): void {
   clearCaptureTimer();
-  if (!autoAnalysisEnabled.value || !cameraReady.value) {
+  if (!props.active || !autoAnalysisEnabled.value || !cameraReady.value || analyzing.value) {
     return;
   }
-  captureTimer = window.setInterval(() => {
+
+  const elapsed = analysisCompletedAt === null
+    ? captureIntervalMs
+    : Date.now() - analysisCompletedAt;
+  const delay = Math.max(0, captureIntervalMs - elapsed);
+  if (delay === 0) {
     void captureAndAnalyze();
-  }, captureIntervalMs);
+    return;
+  }
+
+  captureTimer = window.setTimeout(() => {
+    captureTimer = undefined;
+    void captureAndAnalyze();
+  }, delay);
 }
 
 function setAutoAnalysisEnabled(enabled: boolean): void {
@@ -141,10 +154,7 @@ function setAutoAnalysisEnabled(enabled: boolean): void {
     clearCaptureTimer();
     return;
   }
-  startCaptureTimer();
-  if (cameraReady.value && !growthAnalysis.value && !analyzing.value) {
-    void captureAndAnalyze();
-  }
+  scheduleNextCapture();
 }
 
 function toggleAutoAnalysis(): void {
@@ -174,9 +184,7 @@ function cameraErrorText(error: unknown): string {
       return '没有找到可用摄像头，请检查本地摄像头连接。';
     }
   }
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
+  console.warn('Camera unavailable.', error);
   return '摄像头暂时不可用。';
 }
 
@@ -215,10 +223,7 @@ async function startCamera(): Promise<void> {
     }
     stream.value = nextStream;
     await attachStream(nextStream);
-    startCaptureTimer();
-    if (autoAnalysisEnabled.value) {
-      void captureAndAnalyze();
-    }
+    scheduleNextCapture();
   } catch (error) {
     stopCamera();
     cameraError.value = cameraErrorText(error);
@@ -243,6 +248,8 @@ async function captureAndAnalyze(): Promise<void> {
   if (!video || !canvas || !cameraReady.value || analyzing.value) {
     return;
   }
+
+  clearCaptureTimer();
 
   const width = video.videoWidth;
   const height = video.videoHeight;
@@ -279,12 +286,15 @@ async function captureAndAnalyze(): Promise<void> {
     };
     emit('analysis-updated', growthAnalysis.value);
   } catch (error) {
-    analysisError.value = error instanceof Error ? error.message : 'AI 生长状态分析失败。';
+    console.warn('Growth image analysis failed.', error);
+    analysisError.value = userErrorText(error, '生长状态分析没有完成，请稍后重试。');
   } finally {
     if (!growthAnalysis.value) {
       emit('analysis-updated', null);
     }
     analyzing.value = false;
+    analysisCompletedAt = Date.now();
+    scheduleNextCapture();
   }
 }
 
@@ -436,7 +446,7 @@ onBeforeUnmount(() => {
             :class="detectionSeverityClass(box.severity)"
             :style="{ left: `${box.bbox.x}%`, top: `${box.bbox.y}%`, width: `${box.bbox.width}%`, height: `${box.bbox.height}%` }"
           >
-            <span>{{ box.label }} {{ Math.round(box.confidence * 100) }}%</span>
+            <span>{{ box.label }} · {{ confidenceText(box.confidence) }}</span>
           </div>
         </template>
       </template>

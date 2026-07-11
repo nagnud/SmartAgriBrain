@@ -153,6 +153,8 @@ def clamp_text_list(value: Any, limit: int) -> List[str]:
 def build_ark_prompt() -> str:
     return (
         "你是农业图像识别助手。请分析这张作物图片中的病虫害风险和作物生长状况，只输出合法 JSON。"
+        "label、growth_status、pest_disease_status 和 observations 必须使用普通种植者能理解的简明中文，"
+        "不要在这些用户内容中出现模型名、接口名、内部字段名或调试术语。"
         "如果画面中存在可见的病斑、虫害、霉层、枯黄、坏死、卷叶等异常区域，detections 必须尽量返回对应的 bbox。"
         "bbox 使用百分比坐标：x/y 是异常区域左上角相对整张图片的百分比，width/height 是区域宽高百分比。"
         "如果画面里没有作物、没有可见异常，或无法可靠定位异常区域，detections 返回空数组，不要乱画框。"
@@ -254,12 +256,14 @@ def format_ark_error_detail(raw_detail: str) -> str:
 
 def build_deepseek_prompt(vision_result: Dict[str, Any]) -> str:
     return (
-        "你是智慧农业系统的自然语言分析助手。下面是火山方舟视觉模型对作物图片的结构化识别结果。"
-        "请严格基于该结果输出中文 JSON，不要增加视觉结果里没有依据的病害结论。"
-        "输出格式：{\"summary\":\"一句话概括生长和病虫害状况\","
-        "\"explanation\":\"结合图像证据说明原因\","
-        "\"suggestions\":[\"建议1\",\"建议2\",\"建议3\"]}。"
-        f"\n火山方舟识别结果：{json.dumps(vision_result, ensure_ascii=False)}"
+        "你是智慧农业系统的自然语言分析助手。下面是作物图片的结构化识别结果。"
+        "请严格基于该结果输出中文 JSON，不要增加没有图像依据的病害结论。"
+        "所有文字必须面向普通种植者，不得出现模型供应商、接口、JSON 字段、英文类别、内部 ID 或调试方法。"
+        "建议按当前情况、主要原因、建议行动和复查时间组织；无法确定时明确说明需要结合现场确认。"
+        "输出格式：{\"summary\":\"一句话概括当前情况\","
+        "\"explanation\":\"用通俗语言说明主要原因和图像依据\","
+        "\"suggestions\":[\"具体行动和复查时间1\",\"具体行动和复查时间2\"]}。"
+        f"\n识别结果：{json.dumps(vision_result, ensure_ascii=False)}"
     )
 
 
@@ -310,7 +314,7 @@ async def analyze_disease_image(upload: UploadFile) -> Dict[str, Any]:
         "model": vision_model(),
         "detections": sanitize_detections(vision_result.get("detections")),
         "summary": safe_text(deepseek_result.get("summary"), "图像识别已完成，但未生成摘要。")[:180],
-        "explanation": safe_text(deepseek_result.get("explanation"), "DeepSeek 未返回详细解释。")[:500],
+        "explanation": safe_text(deepseek_result.get("explanation"), "暂时没有生成详细说明，建议结合现场情况确认。")[:500],
         "suggestions": clamp_text_list(deepseek_result.get("suggestions"), 5),
         "processed_at": int(time.time() * 1000),
         "vision_observations": clamp_text_list(vision_result.get("observations"), 8),

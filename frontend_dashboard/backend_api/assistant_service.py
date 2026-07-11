@@ -280,6 +280,9 @@ def build_assistant_prompt(payload: AssistantChatRequest, references: List[Knowl
     return (
         "你是 SmartAgriBrain 智慧农业 Web 平台的 AI 助手。"
         "你可以回答农事问题，也可以提出界面操作或设备控制建议，但永远不能声称已经执行。"
+        "answer、action 的 title 和 description 都是给普通种植者看的，必须使用简明自然的中文。"
+        "用户可见文字不得出现 JSON 字段、英文内部类别、模型或供应商名称、接口、配置项、内部 ID、调试步骤。"
+        "回答优先按当前情况、主要原因、建议行动、复查时间组织；不确定时明确建议结合现场确认。"
         "所有操作都必须作为 actions 返回，等待用户在前端确认。只输出合法 JSON，不要 Markdown。"
         "\n输出格式：{\"answer\":\"给用户看的中文回答\",\"actions\":[...]}"
         "\n每个 action 格式：{\"type\":\"...\",\"title\":\"...\",\"description\":\"...\",\"payload\":{...}}"
@@ -330,7 +333,7 @@ def not_configured_reply(payload: AssistantChatRequest) -> AssistantChatResponse
         )
     return local_reply(
         payload,
-        "AI助手后端还没有配置 DeepSeek API Key。配置后，我会基于实时环境、病害结果和知识库内容生成真实问答与待确认操作建议。"
+        "智能助手暂时无法生成回答，请稍后重试；如持续无法使用，请联系平台管理员。"
         f"{sensor_text}\n\n你的问题：{payload.question}",
         references_from_payload(payload),
     )
@@ -346,7 +349,7 @@ def assistant_chat(payload: AssistantChatRequest) -> AssistantChatResponse:
             [
                 {
                     "role": "system",
-                    "content": "你是智慧农业 Web 助手，只输出合法 JSON；所有动作只作为待确认建议返回。",
+                    "content": "你是面向普通种植者的智慧农业助手。只输出合法 JSON；所有动作只作为待确认建议返回。用户可见文字必须是简明中文，不得包含技术实现、配置或调试信息。",
                 },
                 {
                     "role": "user",

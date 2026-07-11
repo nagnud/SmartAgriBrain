@@ -9,6 +9,7 @@ import {
   BarChart3,
   Bell,
   Bot,
+  ClipboardPaste,
   CloudSun,
   Cpu,
   Database,
@@ -18,6 +19,7 @@ import {
   History,
   Home,
   Image,
+  ImageOff,
   Leaf,
   Lightbulb,
   Mic,
@@ -97,7 +99,14 @@ import type {
   WeatherDailyItem,
   WeatherAlarmItem,
 } from './types';
-import { formatDateTime, formatTime, numberText } from './utils/format';
+import {
+  confidenceText,
+  formatDateTime,
+  formatTime,
+  numberText,
+  UserFacingError,
+  userErrorText,
+} from './utils/format';
 import {
   applySmartControlOverrides,
   clampControlValue,
@@ -263,15 +272,21 @@ const weatherLoading = ref(false);
 const weatherError = ref('');
 const historyPoints = ref<HistoryPoint[]>([]);
 const aiAnalysis = ref<AiAnalysisResponse | null>(null);
+const aiAnalysisLoading = ref(false);
+const aiAnalysisCompletedAt = ref<number | null>(null);
+const pageVisible = ref(typeof document === 'undefined' || document.visibilityState === 'visible');
 const alarms = ref<AlarmRecord[]>([]);
 const commandResults = ref<CommandResult[]>([]);
 const diseaseResult = ref<DiseaseDetectionResult | null>(null);
 const diseaseImageUrl = ref('');
+const diseaseImageLoadError = ref(false);
 const diseaseLoading = ref(false);
 const diseaseUploadError = ref('');
+const diseaseDragActive = ref(false);
 const diseasePhotoLibraryOpen = ref(false);
 const diseasePhotos = ref<DiseasePhotoInfo[]>([]);
 const selectedDiseasePhoto = ref<DiseasePhotoInfo | null>(null);
+const selectedDiseasePhotoImageError = ref(false);
 const currentDiseasePhotoId = ref<number | null>(null);
 const cameraGrowthPanelRef = ref<{ captureAndAnalyze: () => Promise<void> } | null>(null);
 const cameraAnalysisResult = ref<DiseaseDetectionResult | null>(null);
@@ -288,6 +303,10 @@ const chatInput = ref('番茄叶片有黄斑，结合当前环境应该怎么处
 const chatInputRef = ref<HTMLTextAreaElement | null>(null);
 const chatImageUrl = ref('');
 const chatImageFileName = ref('');
+const chatImageFile = ref<File | null>(null);
+const chatImageError = ref('');
+const chatDragActive = ref(false);
+const chatSendingStage = ref<'idle' | 'vision' | 'chat'>('idle');
 const chatSending = ref(false);
 const assistantOpen = ref(false);
 const defaultAssistantWidth = 460;
@@ -358,6 +377,8 @@ const metricEditorStyle = ref<Record<string, string>>({
 const loading = ref(true);
 const refreshing = ref(false);
 let refreshTimer: number | undefined;
+let aiAnalysisTimer: number | undefined;
+let aiAnalysisRequest: Promise<void> | null = null;
 let metricEditorTimer: number | undefined;
 let metricEditorChartTimer: number | undefined;
 let activeBrowserSpeechRecognition: SpeechRecognitionLike | null = null;
@@ -376,6 +397,12 @@ let persistentStateReady = false;
 let applyingPersistentState = false;
 let persistentStateSaveTimer: number | undefined;
 let weatherCitySearchTimer: number | undefined;
+const aiAnalysisIntervalMs = 120000;
+const maxUploadImageBytes = 10 * 1024 * 1024;
+const allowedUploadImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const sentChatImageUrls = new Set<string>();
+let diseaseDragDepth = 0;
+let chatDragDepth = 0;
 
 const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
   temperature: 0.01,
@@ -418,6 +445,24 @@ const weatherDailyItems = computed<WeatherDailyItem[]>(() => (
     ? weatherBundle.value.daily.data
     : []
 ));
+const weatherTodayDetail = computed(() => {
+  const today = weatherDailyItems.value[0];
+  const current = weatherCurrentDetail.value ?? currentWeather.value;
+  const condition = today ? weatherConditionText(today) : current?.condition || '天气暂无';
+  const temperature = today
+    ? `${weatherValueText(today.low, '°')} - ${weatherValueText(today.high, '°')}`
+    : `当前 ${weatherValueText(current?.temperature, ' 摄氏度')}`;
+  const rainfall = today ? weatherRainText(today) : '降雨暂无';
+  const humidityValue = today?.humidity ?? current?.humidity;
+  const humidity = typeof humidityValue === 'number'
+    ? `湿度 ${weatherValueText(humidityValue, '%')}${today?.humidity == null ? '（实时）' : ''}`
+    : '湿度暂无';
+  const windDirection = today?.wind_direction || current?.wind_direction || '风向暂无';
+  const windLevel = today?.wind_scale != null
+    ? `${today.wind_scale}级`
+    : current?.wind_level || '风力暂无';
+  return { condition, temperature, rainfall, humidity, wind: `${windDirection} ${windLevel}` };
+});
 const weatherAlarmItems = computed<WeatherAlarmItem[]>(() => (
   weatherBundle.value?.alarms.available && Array.isArray(weatherBundle.value.alarms.data)
     ? weatherBundle.value.alarms.data
@@ -492,6 +537,22 @@ const overviewMetricCards = computed(() => metricCards.value.map((metric) => ({
 
 const realtimeMetricCards = computed(() => metricCards.value);
 
+const aiAnalysisViewActive = computed(() => (
+  pageVisible.value && (activeView.value === 'overview' || activeView.value === 'ai')
+));
+
+const cameraPanelActive = computed(() => pageVisible.value && activeView.value === 'overview');
+
+const aiAnalysisUpdateText = computed(() => {
+  if (aiAnalysisLoading.value) {
+    return '正在生成最新分析';
+  }
+  if (aiAnalysisCompletedAt.value) {
+    return `更新 ${formatDateTime(aiAnalysisCompletedAt.value)}`;
+  }
+  return '尚未生成';
+});
+
 function clampRiskScore(value: unknown): number {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return 0;
@@ -514,7 +575,7 @@ function analysisStatusLabel(analysis: AiAnalysisResponse | null): string {
     return '等待 AI';
   }
   if (analysis.ai_connected === false) {
-    return 'AI 未连接';
+    return '智能分析暂不可用';
   }
   return analysis.risk_status || riskLabel(analysis.risk_level);
 }
@@ -566,7 +627,7 @@ const aiRiskStatus = computed<{ label: string; state: StatusLevel }>(() => {
     return { label: '等待数据', state: 'neutral' };
   }
   if (aiAnalysis.value?.ai_connected === false) {
-    return { label: 'AI 未连接', state: 'neutral' };
+    return { label: '智能分析暂不可用', state: 'neutral' };
   }
   if (aiAnalysis.value?.risk_status && typeof aiAnalysis.value.risk_score === 'number') {
     return {
@@ -1707,7 +1768,12 @@ watch(activeView, (view) => {
   if (view !== 'realtime') {
     closeMetricEditor();
   }
+  syncAiAnalysisSchedule();
   schedulePersistentDashboardStateSave();
+});
+
+watch(pageVisible, () => {
+  syncAiAnalysisSchedule();
 });
 
 watch(assistantOpen, (open) => {
@@ -1856,8 +1922,8 @@ function weatherDateText(value?: string | null): string {
 }
 
 function setKnowledgeError(action: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : '未知错误';
-  knowledgeError.value = `${action}失败：${message}`;
+  console.warn(`${action} failed.`, error);
+  knowledgeError.value = `${action}没有完成：${userErrorText(error)}`;
 }
 
 async function refreshKnowledge(preferredKbId = selectedKbId.value): Promise<void> {
@@ -1907,7 +1973,7 @@ async function loadWeather(city = weatherCity.value): Promise<WeatherBundle | nu
   } catch (error) {
     weatherBundle.value = null;
     currentWeather.value = null;
-    weatherError.value = error instanceof Error ? error.message : '天气接口暂时不可用。';
+    weatherError.value = userErrorText(error, '天气信息暂时无法获取，请稍后重试。');
     console.warn('Weather bundle failed to load.', error);
     try {
       currentWeather.value = await getCurrentWeather(city);
@@ -1944,7 +2010,7 @@ async function searchWeatherCities(): Promise<void> {
     weatherCityOptions.value = await getWeatherCities(query);
   } catch (error) {
     weatherCityOptions.value = [];
-    weatherError.value = error instanceof Error ? error.message : '城市搜索失败。';
+    weatherError.value = userErrorText(error, '城市搜索没有完成，请稍后重试。');
   }
 }
 
@@ -1983,15 +2049,6 @@ async function applyWeatherCity(city = weatherCityDraft.value): Promise<void> {
   weatherCityDropdownOpen.value = false;
   schedulePersistentDashboardStateSave();
   await loadWeather(nextCity);
-  if (latest.value) {
-    aiAnalysis.value = await analyzeFarm(latest.value, {
-      weather: currentWeather.value,
-      weatherBundle: weatherBundle.value,
-      history: historyPoints.value,
-      disease: diseaseResult.value,
-      cameraAnalysis: cameraAnalysisResult.value,
-    });
-  }
 }
 
 async function selectWeatherCity(city: WeatherCityOption): Promise<void> {
@@ -2000,6 +2057,69 @@ async function selectWeatherCity(city: WeatherCityOption): Promise<void> {
 
 function handleCameraAnalysisUpdated(result: DiseaseDetectionResult | null): void {
   cameraAnalysisResult.value = result;
+}
+
+function clearAiAnalysisTimer(): void {
+  if (aiAnalysisTimer !== undefined) {
+    window.clearTimeout(aiAnalysisTimer);
+    aiAnalysisTimer = undefined;
+  }
+}
+
+function syncAiAnalysisSchedule(): void {
+  clearAiAnalysisTimer();
+  if (!aiAnalysisViewActive.value || !latest.value || aiAnalysisRequest) {
+    return;
+  }
+
+  const elapsed = aiAnalysisCompletedAt.value === null
+    ? aiAnalysisIntervalMs
+    : Date.now() - aiAnalysisCompletedAt.value;
+  const delay = Math.max(0, aiAnalysisIntervalMs - elapsed);
+  if (delay === 0) {
+    void refreshAiAnalysis();
+    return;
+  }
+
+  aiAnalysisTimer = window.setTimeout(() => {
+    aiAnalysisTimer = undefined;
+    void refreshAiAnalysis();
+  }, delay);
+}
+
+async function refreshAiAnalysis(): Promise<void> {
+  if (aiAnalysisRequest) {
+    return aiAnalysisRequest;
+  }
+  if (!latest.value || !aiAnalysisViewActive.value) {
+    return;
+  }
+
+  clearAiAnalysisTimer();
+  aiAnalysisLoading.value = true;
+  const telemetry = latest.value;
+  const request = (async () => {
+    try {
+      aiAnalysis.value = await analyzeFarm(telemetry, {
+        weather: currentWeather.value,
+        weatherBundle: weatherBundle.value,
+        history: historyPoints.value,
+        disease: diseaseResult.value,
+        cameraAnalysis: cameraAnalysisResult.value,
+      });
+    } finally {
+      aiAnalysisCompletedAt.value = Date.now();
+      aiAnalysisLoading.value = false;
+      aiAnalysisRequest = null;
+      syncAiAnalysisSchedule();
+    }
+  })();
+  aiAnalysisRequest = request;
+  return request;
+}
+
+function handleDocumentVisibilityChange(): void {
+  pageVisible.value = document.visibilityState === 'visible';
 }
 
 async function loadDashboard(isBackground = false): Promise<void> {
@@ -2029,13 +2149,6 @@ async function loadDashboard(isBackground = false): Promise<void> {
     if (weatherResult.status === 'rejected') {
       console.warn('Weather data failed to load.', weatherResult.reason);
     }
-    aiAnalysis.value = await analyzeFarm(nextLatest, {
-      weather: currentWeather.value,
-      weatherBundle: weatherBundle.value,
-      history: historyPoints.value,
-      disease: diseaseResult.value,
-      cameraAnalysis: cameraAnalysisResult.value,
-    });
     syncSmartControlValues();
   } finally {
     loading.value = false;
@@ -2045,7 +2158,12 @@ async function loadDashboard(isBackground = false): Promise<void> {
 
 async function refreshDashboardAndCapture(): Promise<void> {
   await loadDashboard(true);
-  await cameraGrowthPanelRef.value?.captureAndAnalyze();
+  if (aiAnalysisViewActive.value) {
+    await refreshAiAnalysis();
+  }
+  if (cameraPanelActive.value) {
+    await cameraGrowthPanelRef.value?.captureAndAnalyze();
+  }
 }
 
 async function applyCommand(command: string, value: number, reason: string): Promise<void> {
@@ -2491,8 +2609,8 @@ async function executeAssistantAction(action: AssistantAction): Promise<void> {
     assistantConfirmActionId.value = null;
     setAssistantActionStatus(action, 'executed');
   } catch (error) {
-    const message = error instanceof Error ? error.message : '执行失败';
-    setAssistantActionStatus(action, 'failed', message);
+    console.warn('Assistant action failed.', error);
+    setAssistantActionStatus(action, 'failed', userErrorText(error, '操作没有完成，请稍后重试。'));
   } finally {
     assistantExecutingActionId.value = null;
   }
@@ -2515,7 +2633,86 @@ function cancelAssistantAction(action: AssistantAction): void {
 }
 
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : '未知错误';
+  return userErrorText(error);
+}
+
+function imageFileValidationError(file: File): string {
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  const allowedByExtension = ['jpg', 'jpeg', 'png', 'webp'].includes(extension);
+  if (!allowedUploadImageTypes.has(file.type.toLowerCase()) && !allowedByExtension) {
+    return '只支持 JPG、PNG、WebP 图片。';
+  }
+  if (file.size > maxUploadImageBytes) {
+    return '图片不能超过 10MB。';
+  }
+  return '';
+}
+
+function droppedSingleFile(event: DragEvent): File | null {
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  return files.length === 1 ? files[0] : null;
+}
+
+function isFileDrag(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+}
+
+function handleImageDragOver(event: DragEvent): void {
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'copy';
+  }
+}
+
+function handleDiseaseDragEnter(event: DragEvent): void {
+  if (!isFileDrag(event)) {
+    return;
+  }
+  diseaseDragDepth += 1;
+  diseaseDragActive.value = true;
+}
+
+function handleDiseaseDragLeave(): void {
+  diseaseDragDepth = Math.max(0, diseaseDragDepth - 1);
+  if (diseaseDragDepth === 0) {
+    diseaseDragActive.value = false;
+  }
+}
+
+async function handleDiseaseDrop(event: DragEvent): Promise<void> {
+  diseaseDragDepth = 0;
+  diseaseDragActive.value = false;
+  const file = droppedSingleFile(event);
+  if (!file) {
+    diseaseUploadError.value = '一次只能拖入一张图片。';
+    return;
+  }
+  await acceptDiseaseFile(file);
+}
+
+function handleChatDragEnter(event: DragEvent): void {
+  if (!isFileDrag(event)) {
+    return;
+  }
+  chatDragDepth += 1;
+  chatDragActive.value = true;
+}
+
+function handleChatDragLeave(): void {
+  chatDragDepth = Math.max(0, chatDragDepth - 1);
+  if (chatDragDepth === 0) {
+    chatDragActive.value = false;
+  }
+}
+
+function handleChatDrop(event: DragEvent): void {
+  chatDragDepth = 0;
+  chatDragActive.value = false;
+  const file = droppedSingleFile(event);
+  if (!file) {
+    chatImageError.value = '一次只能拖入一张图片。';
+    return;
+  }
+  attachChatImage(file);
 }
 
 function revokeCurrentDiseaseBlob(): void {
@@ -2599,9 +2796,11 @@ function closeDiseasePhotoLibrary(): void {
 
 function selectDiseasePhoto(photo: DiseasePhotoInfo): void {
   selectedDiseasePhoto.value = photo;
+  selectedDiseasePhotoImageError.value = false;
   currentDiseasePhotoId.value = photo.photoId;
   revokeCurrentDiseaseBlob();
   diseaseImageUrl.value = photo.url;
+  diseaseImageLoadError.value = false;
   diseaseResult.value = diseasePhotoAnalysis(photo);
   diseaseUploadError.value = diseaseResult.value ? '' : '这张图片还没有保存识别结果，可以重新上传或重新分析后保存。';
 }
@@ -2610,6 +2809,7 @@ async function processDiseaseFile(file: File): Promise<void> {
   revokeCurrentDiseaseBlob();
   const previewUrl = URL.createObjectURL(file);
   diseaseImageUrl.value = previewUrl;
+  diseaseImageLoadError.value = false;
   diseaseResult.value = null;
   currentDiseasePhotoId.value = null;
   diseaseUploadError.value = '';
@@ -2648,6 +2848,57 @@ async function processDiseaseFile(file: File): Promise<void> {
   }
 }
 
+async function acceptDiseaseFile(file: File): Promise<void> {
+  const validationError = imageFileValidationError(file);
+  if (validationError) {
+    diseaseUploadError.value = validationError;
+    return;
+  }
+  await processDiseaseFile(file);
+}
+
+function clipboardImageExtension(type: string): string {
+  if (type === 'image/jpeg') {
+    return 'jpg';
+  }
+  if (type === 'image/webp') {
+    return 'webp';
+  }
+  return 'png';
+}
+
+async function pasteDiseaseImage(): Promise<void> {
+  diseaseUploadError.value = '';
+  if (!window.isSecureContext || !navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+    diseaseUploadError.value = '当前浏览器无法直接读取剪贴板图片，请改用选择图片或拖入图片。';
+    return;
+  }
+
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const imageType = item.types.find((type) => allowedUploadImageTypes.has(type.toLowerCase()));
+      if (!imageType) {
+        continue;
+      }
+      const blob = await item.getType(imageType);
+      const extension = clipboardImageExtension(blob.type || imageType);
+      const file = new File([blob], `clipboard-image-${Date.now()}.${extension}`, {
+        type: blob.type || imageType,
+      });
+      await acceptDiseaseFile(file);
+      return;
+    }
+    throw new UserFacingError('剪贴板中没有可用图片，请先复制一张图片或截取屏幕。');
+  } catch (error) {
+    console.warn('Clipboard image read failed.', error);
+    diseaseUploadError.value = userErrorText(
+      error,
+      '没有读取到剪贴板图片，请允许剪贴板权限，或改用选择图片。',
+    );
+  }
+}
+
 async function handleDiseaseUpload(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -2655,7 +2906,7 @@ async function handleDiseaseUpload(event: Event): Promise<void> {
     return;
   }
   try {
-    await processDiseaseFile(file);
+    await acceptDiseaseFile(file);
   } finally {
     input.value = '';
   }
@@ -2664,6 +2915,7 @@ async function handleDiseaseUpload(event: Event): Promise<void> {
 function clearDiseaseImage(): void {
   revokeCurrentDiseaseBlob();
   diseaseImageUrl.value = '';
+  diseaseImageLoadError.value = false;
   diseaseResult.value = null;
   currentDiseasePhotoId.value = null;
   diseaseUploadError.value = '';
@@ -2692,10 +2944,10 @@ async function removeDiseasePhoto(photo: DiseasePhotoInfo): Promise<void> {
   }
 }
 
-function handleChatImageUpload(event: Event): void {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) {
+function attachChatImage(file: File): void {
+  const validationError = imageFileValidationError(file);
+  if (validationError) {
+    chatImageError.value = validationError;
     return;
   }
   if (chatImageUrl.value.startsWith('blob:')) {
@@ -2703,6 +2955,16 @@ function handleChatImageUpload(event: Event): void {
   }
   chatImageUrl.value = URL.createObjectURL(file);
   chatImageFileName.value = file.name;
+  chatImageFile.value = file;
+  chatImageError.value = '';
+}
+
+function handleChatImageUpload(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file) {
+    attachChatImage(file);
+  }
   input.value = '';
 }
 
@@ -2712,6 +2974,8 @@ function clearChatImage(): void {
   }
   chatImageUrl.value = '';
   chatImageFileName.value = '';
+  chatImageFile.value = null;
+  chatImageError.value = '';
 }
 
 function isAssistantMessagesAtBottom(element: HTMLElement): boolean {
@@ -2984,15 +3248,20 @@ async function sendChat(): Promise<void> {
     return;
   }
   const pendingImageUrl = chatImageUrl.value;
+  const pendingImageFile = chatImageFile.value;
+  const messageImageUrl = pendingImageFile ? URL.createObjectURL(pendingImageFile) : pendingImageUrl;
   stopVoiceInputAfterSend();
   clearChatComposerInput();
   const userMessage: ChatMessage = {
     id: `user-${Date.now()}`,
     role: 'user',
     content: question || '请分析这张作物图片。',
-    image_url: pendingImageUrl || undefined,
+    image_url: messageImageUrl || undefined,
     created_at: Date.now(),
   };
+  if (messageImageUrl.startsWith('blob:')) {
+    sentChatImageUrls.add(messageImageUrl);
+  }
   const thinkingMessage: ChatMessage = {
     id: `assistant-thinking-${Date.now()}`,
     role: 'assistant',
@@ -3007,11 +3276,21 @@ async function sendChat(): Promise<void> {
   startAssistantThinking(thinkingMessage.id);
   chatSending.value = true;
   try {
+    let chatDiseaseContext = diseaseResult.value;
+    if (pendingImageFile) {
+      chatSendingStage.value = 'vision';
+      stopAssistantThinking();
+      updateChatMessage(thinkingMessage.id, { content: '正在识别图片，请稍候…' });
+      chatDiseaseContext = await analyzeDiseaseImage(pendingImageFile, pendingImageUrl);
+    }
+    chatSendingStage.value = 'chat';
+    updateChatMessage(thinkingMessage.id, { content: '正在结合识别结果生成回答…' });
+    startAssistantThinking(thinkingMessage.id);
     const response = await sendExpertChatMessage({
       question: userMessage.content,
       image_url: pendingImageUrl || undefined,
       latest: latest.value,
-      disease: diseaseResult.value,
+      disease: chatDiseaseContext,
       weather: currentWeather.value,
       weather_bundle: weatherBundle.value,
       ai_analysis: aiAnalysis.value,
@@ -3026,13 +3305,15 @@ async function sendChat(): Promise<void> {
     await revealAssistantMessage(response.message, thinkingMessage.id, shouldFollowResponse);
     clearChatImage();
   } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误';
     const shouldFollowResponse = assistantAtBottom.value;
+    const failureContent = chatSendingStage.value === 'vision'
+      ? '图片识别没有完成，因此没有继续生成回答。请确认图片格式和大小符合要求，然后重试。'
+      : '智能助手暂时无法回答，请稍后重试；如持续无法使用，请联系平台管理员。';
     await revealAssistantMessage(
       {
         id: `assistant-error-${Date.now()}`,
         role: 'assistant',
-        content: `AI助手暂时没有连上后端服务。\n请确认 FastAPI 后端已启动，并且 http://localhost:8000/api/v1/health 可以访问。\n错误信息：${message}`,
+        content: failureContent,
         created_at: Date.now(),
       },
       thinkingMessage.id,
@@ -3041,6 +3322,7 @@ async function sendChat(): Promise<void> {
   } finally {
     stopAssistantThinking();
     chatSending.value = false;
+    chatSendingStage.value = 'idle';
     schedulePersistentDashboardStateSave();
   }
 }
@@ -3129,8 +3411,8 @@ function startBrowserSpeechInput(): boolean {
     voiceMessage.value = '正在启动浏览器实时语音输入...';
     return true;
   } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误';
-    voiceMessage.value = `浏览器语音输入启动失败：${message}`;
+    console.warn('Browser speech input failed to start.', error);
+    voiceMessage.value = userErrorText(error, '语音输入启动失败，请检查麦克风权限后重试。');
     activeBrowserSpeechRecognition = null;
     listening.value = false;
     return false;
@@ -3346,6 +3628,7 @@ async function initializeDashboard(): Promise<void> {
     syncSmartControlValues();
   }
   await loadDashboard();
+  syncAiAnalysisSchedule();
   void refreshKnowledge(selectedKbId.value);
   persistentStateReady = true;
   void stateLoad.then(() => {
@@ -3364,6 +3647,7 @@ function persistDashboardBeforeUnload(): void {
 onMounted(() => {
   ensureAssistantThreadState();
   void initializeDashboard();
+  document.addEventListener('visibilitychange', handleDocumentVisibilityChange);
   window.addEventListener('resize', handleAssistantViewportResize);
   window.addEventListener('beforeunload', persistDashboardBeforeUnload);
   refreshTimer = window.setInterval(() => {
@@ -3381,6 +3665,8 @@ onBeforeUnmount(() => {
     weatherCitySearchTimer = undefined;
   }
   stopAssistantResize();
+  clearAiAnalysisTimer();
+  document.removeEventListener('visibilitychange', handleDocumentVisibilityChange);
   window.removeEventListener('resize', handleAssistantViewportResize);
   window.removeEventListener('beforeunload', persistDashboardBeforeUnload);
   if (refreshTimer) {
@@ -3403,6 +3689,8 @@ onBeforeUnmount(() => {
   if (chatImageUrl.value.startsWith('blob:')) {
     URL.revokeObjectURL(chatImageUrl.value);
   }
+  sentChatImageUrls.forEach((url) => URL.revokeObjectURL(url));
+  sentChatImageUrls.clear();
   stopBrowserSpeechInput();
 });
 </script>
@@ -3557,7 +3845,12 @@ onBeforeUnmount(() => {
                   <span>{{ weatherDisplayLocation }}</span>
                 </div>
                 <strong>{{ currentWeather.condition }} · {{ currentWeather.temperature }} 摄氏度</strong>
-                <p>湿度 {{ weatherValueText(currentWeather.humidity, '%') }}，{{ currentWeather.wind_direction }} {{ currentWeather.wind_level }}</p>
+                <div class="weather-card__today">
+                  <span><b>今日</b> {{ weatherTodayDetail.condition }}</span>
+                  <span>{{ weatherTodayDetail.temperature }}</span>
+                  <span>{{ weatherTodayDetail.rainfall }} · {{ weatherTodayDetail.humidity }}</span>
+                  <span>{{ weatherTodayDetail.wind }}</span>
+                </div>
                 <time>更新 {{ formatDateTime(currentWeather.updated_at) }}</time>
               </button>
               <button v-else class="weather-card weather-card--button" type="button" @click="openWeatherPanel">
@@ -3572,7 +3865,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="overview-live-layout">
-            <CameraGrowthPanel ref="cameraGrowthPanelRef" :active="activeView === 'overview'" @analysis-updated="handleCameraAnalysisUpdated" />
+            <CameraGrowthPanel ref="cameraGrowthPanelRef" :active="cameraPanelActive" @analysis-updated="handleCameraAnalysisUpdated" />
             <section class="panel overview-metrics-panel">
               <div class="section-heading">
                 <div>
@@ -3623,13 +3916,19 @@ onBeforeUnmount(() => {
             <section class="panel">
               <div class="section-heading">
                 <h2>AI 摘要</h2>
-                <StatusPill
-                  v-if="aiAnalysis"
-                  :label="analysisStatusLabel(aiAnalysis)"
-                  :state="analysisStatusState(aiAnalysis)"
-                />
+                <div class="ai-analysis-heading-actions">
+                  <StatusPill
+                    v-if="aiAnalysis"
+                    :label="analysisStatusLabel(aiAnalysis)"
+                    :state="analysisStatusState(aiAnalysis)"
+                  />
+                  <button class="icon-button" type="button" title="立即重新生成 AI 摘要" :disabled="aiAnalysisLoading" @click="refreshAiAnalysis">
+                    <RefreshCw :class="{ spinning: aiAnalysisLoading }" :size="18" />
+                  </button>
+                </div>
               </div>
-              <p class="summary-text">{{ aiAnalysis?.summary }}</p>
+              <p class="ai-analysis-schedule">{{ aiAnalysisUpdateText }} · 仅在本页或 AI 农事建议页可见时每 2 分钟更新</p>
+              <p class="summary-text">{{ aiAnalysis?.summary ?? (aiAnalysisLoading ? '正在生成 AI 摘要...' : '等待首次 AI 分析。') }}</p>
               <ul class="suggestion-list">
                 <li v-for="suggestion in aiAnalysis?.suggestions" :key="suggestion">{{ suggestion }}</li>
               </ul>
@@ -3829,7 +4128,7 @@ onBeforeUnmount(() => {
             <div class="section-heading">
               <div class="section-heading__copy">
               <h2>病害识别</h2>
-              <span>上传叶片图片后调用火山方舟识别，并由 DeepSeek 生成分析建议</span>
+              <span>上传作物图片，识别健康问题并获得处理建议</span>
               </div>
               <button class="text-button" type="button" @click="openDiseasePhotoLibrary">
                 <Image :size="18" /> 图片库
@@ -3837,30 +4136,51 @@ onBeforeUnmount(() => {
             </div>
             <div class="disease-layout">
               <div class="image-uploader">
-                <label class="upload-drop">
+                <label
+                  class="upload-drop"
+                  :class="{ 'upload-drop--dragging': diseaseDragActive }"
+                  @dragenter.prevent="handleDiseaseDragEnter"
+                  @dragover.prevent="handleImageDragOver"
+                  @dragleave.prevent="handleDiseaseDragLeave"
+                  @drop.prevent="handleDiseaseDrop"
+                >
                   <Upload :size="28" />
-                  <strong>{{ diseaseImageUrl ? '重新上传叶片图片' : '上传叶片图片' }}</strong>
-                  <span>支持 jpg / png / webp，上传后生成图像分析和管理建议</span>
-                  <input type="file" accept="image/*" @change="handleDiseaseUpload" />
+                  <strong>{{ diseaseDragActive ? '松开以上传并识别图片' : diseaseImageUrl ? '重新上传叶片图片' : '上传叶片图片' }}</strong>
+                  <span>点击选择或拖入 jpg / png / webp，最大 10MB</span>
+                  <input type="file" accept="image/jpeg,image/png,image/webp" :disabled="diseaseLoading" @change="handleDiseaseUpload" />
                 </label>
-                <button v-if="diseaseImageUrl" class="text-button" type="button" @click="clearDiseaseImage">
-                  <X :size="16" /> 清除图片
-                </button>
+                <div class="image-upload-actions">
+                  <button class="text-button" type="button" :disabled="diseaseLoading" @click="pasteDiseaseImage">
+                    <ClipboardPaste :size="17" /> {{ diseaseLoading ? '正在识别' : '粘贴图片' }}
+                  </button>
+                  <button v-if="diseaseImageUrl" class="text-button" type="button" :disabled="diseaseLoading" @click="clearDiseaseImage">
+                    <X :size="16" /> 清除图片
+                  </button>
+                </div>
                 <p v-if="diseaseUploadError" class="form-error disease-error">{{ diseaseUploadError }}</p>
               </div>
-              <div class="detection-stage" :class="{ 'detection-stage--empty': !diseaseImageUrl }">
-                <img v-if="diseaseImageUrl" :src="diseaseImageUrl" alt="上传的叶片图片" />
-                <div v-if="!diseaseImageUrl" class="empty-visual">
-                  <Image :size="46" />
-                  <span>等待上传图片</span>
+              <div class="detection-stage" :class="{ 'detection-stage--empty': !diseaseImageUrl || diseaseImageLoadError }">
+                <div v-if="diseaseImageUrl && !diseaseImageLoadError" class="detection-media">
+                  <img
+                    :src="diseaseImageUrl"
+                    alt="上传的作物图片"
+                    @load="diseaseImageLoadError = false"
+                    @error="diseaseImageLoadError = true"
+                  />
+                  <div
+                    v-for="box in diseaseDetectionBoxes"
+                    :key="box.id"
+                    class="detect-box"
+                    :style="{ left: `${box.bbox.x}%`, top: `${box.bbox.y}%`, width: `${box.bbox.width}%`, height: `${box.bbox.height}%` }"
+                  >
+                    <span>{{ box.label }} · {{ confidenceText(box.confidence) }}</span>
+                  </div>
                 </div>
-                <div
-                  v-for="box in diseaseDetectionBoxes"
-                  :key="box.id"
-                  class="detect-box"
-                  :style="{ left: `${box.bbox.x}%`, top: `${box.bbox.y}%`, width: `${box.bbox.width}%`, height: `${box.bbox.height}%` }"
-                >
-                  <span>{{ box.label }} {{ Math.round(box.confidence * 100) }}%</span>
+                <div v-if="!diseaseImageUrl || diseaseImageLoadError" class="empty-visual">
+                  <ImageOff v-if="diseaseImageLoadError" :size="46" />
+                  <Image v-else :size="46" />
+                  <strong>{{ diseaseImageLoadError ? '图片加载失败' : '等待上传图片' }}</strong>
+                  <span>{{ diseaseImageLoadError ? '请重新选择、拖入或粘贴图片。' : '可以选择文件、拖入图片或点击粘贴图片。' }}</span>
                 </div>
               </div>
             </div>
@@ -3868,8 +4188,7 @@ onBeforeUnmount(() => {
 
           <section class="panel">
             <div class="section-heading">
-              <h2>AI 图像识别结果</h2>
-              <StatusPill v-if="diseaseResult" :label="diseaseResult.model" state="neutral" />
+              <h2>作物健康识别结果</h2>
             </div>
             <p v-if="diseaseLoading" class="summary-text">正在分析图片...</p>
             <template v-else-if="diseaseResult">
@@ -3877,9 +4196,7 @@ onBeforeUnmount(() => {
               <div class="result-grid">
                 <article v-for="det in diseaseResult.detections" :key="det.id">
                   <strong>{{ det.label }}</strong>
-                  <span>类别：{{ det.class_name }}</span>
-                  <span>置信度：{{ Math.round(det.confidence * 100) }}%</span>
-                  <span>检测框：x{{ det.bbox.x }} y{{ det.bbox.y }} w{{ det.bbox.width }} h{{ det.bbox.height }}</span>
+                  <span>{{ confidenceText(det.confidence) }}</span>
                 </article>
               </div>
               <p class="callout-text">{{ diseaseResult.explanation }}</p>
@@ -3887,7 +4204,7 @@ onBeforeUnmount(() => {
                 <li v-for="suggestion in diseaseResult.suggestions" :key="suggestion">{{ suggestion }}</li>
               </ul>
             </template>
-            <p v-else class="empty-text">暂无识别结果，上传图片后会展示检测框、类别、置信度、解释和建议。</p>
+            <p v-else class="empty-text">暂无识别结果，上传图片后会显示健康问题、判断依据和处理建议。</p>
           </section>
         </section>
 
@@ -3939,7 +4256,17 @@ onBeforeUnmount(() => {
               <aside class="disease-photo-detail" :class="{ 'disease-photo-detail--empty': !selectedDiseasePhoto }">
                 <template v-if="selectedDiseasePhoto">
                   <div class="disease-photo-detail__image">
-                    <img :src="selectedDiseasePhoto.url" :alt="selectedDiseasePhoto.originalName || '病害识别图片详情'" />
+                    <img
+                      v-if="!selectedDiseasePhotoImageError"
+                      :src="selectedDiseasePhoto.url"
+                      :alt="selectedDiseasePhoto.originalName || '病害识别图片详情'"
+                      @load="selectedDiseasePhotoImageError = false"
+                      @error="selectedDiseasePhotoImageError = true"
+                    />
+                    <div v-else class="image-load-placeholder">
+                      <ImageOff :size="34" />
+                      <span>图片暂时无法显示</span>
+                    </div>
                   </div>
                   <div class="disease-photo-detail__meta">
                     <strong>{{ selectedDiseasePhoto.originalName || '未命名图片' }}</strong>
@@ -3950,8 +4277,7 @@ onBeforeUnmount(() => {
                     <div class="result-grid disease-photo-detail__results">
                       <article v-for="det in selectedDiseasePhotoAnalysis.detections" :key="det.id">
                         <strong>{{ det.label }}</strong>
-                        <span>类别：{{ det.class_name }}</span>
-                        <span>置信度：{{ Math.round(det.confidence * 100) }}%</span>
+                        <span>{{ confidenceText(det.confidence) }}</span>
                       </article>
                     </div>
                     <p class="callout-text">{{ selectedDiseasePhotoAnalysis.explanation }}</p>
@@ -3979,13 +4305,19 @@ onBeforeUnmount(() => {
           <section class="panel ai-panel">
             <div class="section-heading">
               <h2>AI 农事建议</h2>
-              <StatusPill
-                v-if="aiAnalysis"
-                :label="analysisStatusLabel(aiAnalysis)"
-                :state="analysisStatusState(aiAnalysis)"
-              />
+              <div class="ai-analysis-heading-actions">
+                <StatusPill
+                  v-if="aiAnalysis"
+                  :label="analysisStatusLabel(aiAnalysis)"
+                  :state="analysisStatusState(aiAnalysis)"
+                />
+                <button class="icon-button" type="button" title="立即重新生成农事建议" :disabled="aiAnalysisLoading" @click="refreshAiAnalysis">
+                  <RefreshCw :class="{ spinning: aiAnalysisLoading }" :size="18" />
+                </button>
+              </div>
             </div>
-            <p class="summary-text">{{ aiAnalysis?.summary }}</p>
+            <p class="ai-analysis-schedule">{{ aiAnalysisUpdateText }} · 仅在总览或本页可见时每 2 分钟更新</p>
+            <p class="summary-text">{{ aiAnalysis?.summary ?? (aiAnalysisLoading ? '正在生成 AI 农事建议...' : '等待首次 AI 分析。') }}</p>
             <div class="suggestion-grid">
               <article v-for="suggestion in aiAnalysis?.suggestions" :key="suggestion">
                 <ShieldCheck :size="22" />
@@ -4212,7 +4544,7 @@ onBeforeUnmount(() => {
           <section class="panel">
             <div class="section-heading">
               <h2>知识库增强分析</h2>
-              <span>展示 RAG 引用片段和管理建议</span>
+              <span>结合已保存的种植知识生成管理建议</span>
             </div>
             <div class="inline-form">
               <input v-model="knowledgeQuestion" placeholder="输入分析问题" />
@@ -4296,7 +4628,7 @@ onBeforeUnmount(() => {
           <section class="panel">
             <div class="section-heading">
               <h2>报警记录</h2>
-              <span>来自传感器阈值、通信链路、YOLO 和 AI 风险判断</span>
+              <span>来自环境监测、设备连接、作物健康和智能分析</span>
             </div>
             <div class="alarm-list">
               <article v-for="alarm in alarms" :key="alarm.id" :class="`alarm-card alarm-card--${alarm.level}`">
@@ -4326,7 +4658,20 @@ onBeforeUnmount(() => {
       >
         <span class="assistant-resizer__tip">拖动调整宽度，双击恢复默认</span>
       </div>
-      <aside v-if="assistantOpen" class="assistant-panel">
+      <aside
+        v-if="assistantOpen"
+        class="assistant-panel"
+        :class="{ 'assistant-panel--dragging': chatDragActive }"
+        @dragenter.prevent="handleChatDragEnter"
+        @dragover.prevent="handleImageDragOver"
+        @dragleave.prevent="handleChatDragLeave"
+        @drop.prevent="handleChatDrop"
+      >
+        <div v-if="chatDragActive" class="assistant-drop-overlay">
+          <Image :size="34" />
+          <strong>松开以添加图片</strong>
+          <span>发送后会先识别图片，再生成回答</span>
+        </div>
         <div class="assistant-panel__header">
           <div>
             <span>全局对话 · {{ activeAssistantThread?.title ?? '新对话' }}</span>
@@ -4409,10 +4754,14 @@ onBeforeUnmount(() => {
             <X :size="16" />
           </button>
         </div>
+        <p v-if="chatImageError" class="form-error assistant-image-error">{{ chatImageError }}</p>
+        <p v-if="chatSendingStage !== 'idle'" class="assistant-send-stage">
+          {{ chatSendingStage === 'vision' ? '正在识别图片…' : '正在结合识别结果生成回答…' }}
+        </p>
         <div class="chat-composer assistant-composer">
           <label class="icon-button" title="上传图片">
             <Image :size="18" />
-            <input type="file" accept="image/*" @change="handleChatImageUpload" />
+            <input type="file" accept="image/jpeg,image/png,image/webp" :disabled="chatSending" @change="handleChatImageUpload" />
           </label>
           <button class="icon-button" type="button" :title="listening ? '停止语音输入' : '语音输入'" @click="startVoiceInput">
             <Mic :class="{ pulsing: listening }" :size="18" />

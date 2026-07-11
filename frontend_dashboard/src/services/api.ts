@@ -36,6 +36,7 @@ import type {
   WeatherCityOption,
   WeatherPayload,
 } from '../types';
+import { UserFacingError } from '../utils/format';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const useMock = import.meta.env.VITE_USE_MOCK !== 'false';
@@ -56,6 +57,39 @@ const dashboardStateStorageKey = 'smartagribrain-dashboard-state';
 type RequestJsonInit = RequestInit & {
   timeoutMs?: number;
 };
+
+function serviceErrorMessage(status: number): string {
+  if (status === 401 || status === 403) {
+    return '当前操作未获授权，请刷新页面后重试。';
+  }
+  if (status === 404) {
+    return '没有找到相关内容，可能已被删除。';
+  }
+  if (status === 413) {
+    return '图片不能超过 10MB。';
+  }
+  if (status === 429) {
+    return '操作过于频繁，请稍等片刻再试。';
+  }
+  return status >= 500
+    ? '服务暂时不可用，请稍后重试。'
+    : '提交的内容无法处理，请检查后重试。';
+}
+
+async function throwServiceError(response: Response, operation: string): Promise<never> {
+  let detail = '';
+  try {
+    detail = (await response.text()).slice(0, 800);
+  } catch {
+    // Keep the user-facing response independent from diagnostic parsing.
+  }
+  console.warn(`${operation} failed.`, {
+    status: response.status,
+    statusText: response.statusText,
+    detail,
+  });
+  throw new UserFacingError(serviceErrorMessage(response.status));
+}
 
 export interface FarmAnalysisContext {
   weather?: WeatherPayload | null;
@@ -81,13 +115,19 @@ async function requestJson<T>(path: string, init?: RequestJsonInit): Promise<T> 
       ...requestInit,
       signal: controller?.signal ?? requestInit.signal,
     });
+  } catch (error) {
+    console.warn('Service request unavailable.', { path, error });
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new UserFacingError('等待时间过长，请稍后重试。', error);
+    }
+    throw new UserFacingError('网络连接不稳定，请检查网络后重试。', error);
   } finally {
     if (timeoutId) {
       window.clearTimeout(timeoutId);
     }
   }
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    await throwServiceError(response, path);
   }
   return response.json() as Promise<T>;
 }
@@ -134,26 +174,26 @@ function writeLocalDashboardState(value: PersistedDashboardState): void {
   }
 }
 
-function buildDisconnectedAiAnalysis(latest: TelemetryPayload, detail = 'AI 服务暂时不可用。'): AiAnalysisResponse {
+function buildDisconnectedAiAnalysis(latest: TelemetryPayload, detail = '智能分析暂时不可用，请稍后重试。'): AiAnalysisResponse {
   return {
     device_id: latest.device_id,
     crop: 'tomato',
     ai_connected: false,
     risk_level: 'low',
     risk_score: 0,
-    risk_status: 'AI 未连接',
+    risk_status: '智能分析暂不可用',
     risk_factors: [
       {
         key: 'ai_disconnected',
-        label: 'AI 未连接',
+        label: '智能分析暂不可用',
         detail,
         state: 'neutral',
       },
     ],
-    summary: 'AI 未连接，暂时无法生成风险指数和农事建议。',
-    suggestions: ['请检查 DeepSeek API Key、后端服务和网络连接后重新生成 AI 分析。'],
+    summary: '智能分析暂时不可用，本次没有生成风险判断和农事建议。',
+    suggestions: ['请稍后重新生成；如持续无法使用，请联系平台管理员。'],
     commands: [],
-    basis: ['未连接 AI 服务，本次未生成 AI 分析结果。'],
+    basis: ['本次智能分析未完成。'],
     updated_at: Date.now(),
   };
 }
@@ -184,7 +224,7 @@ export async function analyzeFarm(
   context: FarmAnalysisContext = {},
 ): Promise<AiAnalysisResponse> {
   if (useMockAiAdvice) {
-    return buildDisconnectedAiAnalysis(latest, '当前前端配置为不请求 AI 农事建议接口。');
+    return buildDisconnectedAiAnalysis(latest);
   }
   try {
     return await requestJson<AiAnalysisResponse>('/api/ai/analyze', {
@@ -204,7 +244,7 @@ export async function analyzeFarm(
     });
   } catch (error) {
     console.warn('AI farm advice API unavailable.', error);
-    return buildDisconnectedAiAnalysis(latest, 'AI 农事建议接口不可用，请检查后端服务。');
+    return buildDisconnectedAiAnalysis(latest);
   }
 }
 
@@ -306,14 +346,7 @@ export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise
     body: formData,
   });
   if (!response.ok) {
-    let detail = '';
-    try {
-      const errorBody = await response.json() as { detail?: unknown };
-      detail = typeof errorBody.detail === 'string' ? errorBody.detail : JSON.stringify(errorBody.detail ?? errorBody);
-    } catch {
-      detail = response.statusText;
-    }
-    throw new Error(`${response.status} ${detail || response.statusText}`);
+    await throwServiceError(response, 'Disease image analysis');
   }
   return response.json() as Promise<DiseaseDetectionResult>;
 }
@@ -331,7 +364,7 @@ export async function uploadDiseasePhoto(file: File): Promise<DiseasePhotoInfo> 
     body: formData,
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    await throwServiceError(response, 'Disease photo upload');
   }
   return normalizeDiseasePhoto(await response.json() as DiseasePhotoInfo);
 }

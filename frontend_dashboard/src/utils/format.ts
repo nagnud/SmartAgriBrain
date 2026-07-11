@@ -28,3 +28,44 @@ export function airQualityFromGasResistance(value: number): { label: string; lev
   }
   return { label: '建议通风换气', level: 'danger' };
 }
+
+export function confidenceText(value: number): string {
+  if (value >= 0.8) {
+    return '判断把握较高';
+  }
+  if (value >= 0.6) {
+    return '判断把握一般';
+  }
+  return '判断把握较低';
+}
+
+export class UserFacingError extends Error {
+  cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = 'UserFacingError';
+    this.cause = cause;
+  }
+}
+
+export function userErrorText(error: unknown, fallback = '操作没有完成，请稍后重试。'): string {
+  if (error instanceof UserFacingError) {
+    return error.message;
+  }
+  if (error instanceof DOMException) {
+    if (error.name === 'NotAllowedError') {
+      return '未获得所需权限，请允许访问后重试。';
+    }
+    if (error.name === 'NotFoundError') {
+      return '没有找到可用内容，请检查后重试。';
+    }
+    if (error.name === 'AbortError') {
+      return '等待时间过长，请稍后重试。';
+    }
+    if (error.name === 'SecurityError') {
+      return '当前页面无法使用这项功能，请改用选择文件或拖入图片。';
+    }
+  }
+  return fallback;
+}

@@ -380,7 +380,7 @@ def analyze_knowledge(
     references = search_knowledge_references(db, question, kb_id=kb_id, user_id=user_id, limit=5)
     if not deepseek_api_key():
         return KnowledgeAnalyzeResult(
-            answer="AI 未连接：后端未配置 DeepSeek API Key。",
+            answer="知识分析暂时不可用，请稍后重试；如持续无法使用，请联系平台管理员。",
             references=references,
             updatedAt=now_text(),
         )
@@ -395,12 +395,12 @@ def analyze_knowledge(
             [
                 {
                     "role": "system",
-                    "content": "你是智慧农业知识库分析助手。只能根据给定知识库引用和问题回答，不要声称已经执行设备操作。输出 JSON。",
+                    "content": "你是面向普通种植者的智慧农业知识分析助手。只能根据给定知识引用和问题回答，不要声称已经执行设备操作。输出 JSON。用户可见文字必须使用简明中文，不得包含模型、接口、配置、内部字段或调试信息。",
                 },
                 {
                     "role": "user",
                     "content": (
-                        "请结合知识库引用回答用户问题，输出格式为 {\"answer\":\"...\"}。"
+                        "请结合知识引用回答用户问题，按当前情况、主要原因、建议行动和复查时间组织；不确定时建议结合现场确认。输出格式为 {\"answer\":\"...\"}。"
                         f"\n上下文：{json.dumps(context, ensure_ascii=False)}"
                     ),
                 },
@@ -413,6 +413,6 @@ def analyze_knowledge(
         answer = parse_knowledge_answer(content)
     except Exception as error:
         print(f"knowledge analysis unavailable: {error}")
-        answer = "AI 调用失败：DeepSeek API 暂时不可用，请检查 Key、网络或模型配置。"
+        answer = "知识分析暂时不可用，请稍后重试；如持续无法使用，请联系平台管理员。"
 
     return KnowledgeAnalyzeResult(answer=answer, references=references, updatedAt=now_text())

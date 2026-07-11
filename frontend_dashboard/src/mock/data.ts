@@ -205,7 +205,7 @@ export const mockAlarms = [
     level: 'danger' as const,
     title: '疑似病害风险',
     detail: '图像检测到疑似叶斑区域，叠加高湿环境后生成中等风险建议。',
-    source: 'YOLO / RAG',
+    source: '作物健康与知识分析',
     timestamp: Date.now() - 112 * 60 * 1000,
     handled: false,
   },

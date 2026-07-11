@@ -455,19 +455,19 @@ def disconnected_advice(payload: FarmAdviceRequest, detail: str) -> FarmAdviceRe
         ai_connected=False,
         risk_level="low",
         risk_score=0,
-        risk_status="AI 未连接",
+        risk_status="智能分析暂不可用",
         risk_factors=[
             AiRiskFactor(
                 key="ai_disconnected",
-                label="AI 未连接",
+                label="智能分析暂不可用",
                 detail=detail,
                 state="neutral",
             )
         ],
-        summary="AI 未连接，暂时无法生成风险指数和农事建议。",
-        suggestions=["请配置 DeepSeek API Key 并重启后端服务后再生成 AI 分析。"],
+        summary="智能分析暂时不可用，本次没有生成风险判断和农事建议。",
+        suggestions=["请稍后重新生成；如持续无法使用，请联系平台管理员。"],
         commands=[],
-        basis=["未连接 DeepSeek API，本次未生成 AI 分析结果。"],
+        basis=["本次智能分析未完成。"],
         updated_at=now_ms(),
     )
 
@@ -488,6 +488,8 @@ def build_farm_advice_prompt(payload: FarmAdviceRequest, fallback: FarmAdviceRes
     }
     return (
         "你是温室智慧农业农事顾问。请根据所有已拿到的信息生成面向种植者的农事建议。"
+        "所有用户可见文字必须使用简明中文，不得出现 JSON 字段、英文内部类别、模型或供应商名称、接口、配置项、内部 ID、调试步骤。"
+        "建议按当前情况、主要原因、建议行动和复查时间组织；不确定时明确说明需要结合现场确认。"
         "只输出合法 JSON，不要 Markdown，不要声称已经执行任何设备动作。"
         "\n输出格式固定为："
         "{\"risk_level\":\"low|medium|high\",\"risk_score\":0到100的整数,\"risk_status\":\"较稳定|需关注|高风险\","
@@ -551,14 +553,14 @@ def parse_deepseek_advice(content: str, payload: FarmAdviceRequest, fallback: Fa
 def analyze_farm_advice(payload: FarmAdviceRequest) -> FarmAdviceResponse:
     fallback = fallback_advice(payload)
     if not deepseek_api_key():
-        return disconnected_advice(payload, "后端未配置 DeepSeek API Key。")
+        return disconnected_advice(payload, "智能分析服务暂时不可用，请稍后重试。")
 
     try:
         content = call_deepseek_chat(
             [
                 {
                     "role": "system",
-                    "content": "你是专业农业分析师，只输出合法 JSON，设备动作只能作为待确认建议。",
+                    "content": "你是面向普通种植者的专业农业分析师，只输出合法 JSON，用户可见文字使用简明中文，设备动作只能作为待确认建议。",
                 },
                 {
                     "role": "user",
@@ -573,4 +575,4 @@ def analyze_farm_advice(payload: FarmAdviceRequest) -> FarmAdviceResponse:
         return parse_deepseek_advice(content, payload, fallback)
     except Exception as error:
         print(f"DeepSeek farm advice unavailable: {error}")
-        return disconnected_advice(payload, "DeepSeek API 调用失败，请检查 Key、网络或模型配置。")
+        return disconnected_advice(payload, "智能分析服务暂时不可用，请稍后重试。")
