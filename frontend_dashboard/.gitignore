@@ -23,6 +23,15 @@ tsconfig.tsbuildinfo
 # Local push cache
 .push-cache/
 .push-tmp/
+SmartAgriBrain/
+scripts/git/push*.md
+
+# Local secrets and credentials
+.env
+*.pem
+*.key
+id_rsa*
+id_ed25519*
 
 # VS Code
 .vscode/

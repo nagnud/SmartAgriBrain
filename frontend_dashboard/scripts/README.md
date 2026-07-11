@@ -41,4 +41,19 @@ AI 助手语音输入现在由浏览器 Web Speech API 实时写入输入框，�
 - `scripts/git/push-frontend.bat`
 - `scripts/git/push-frontend.ps1`
 
-网络稳定、GitHub 登录正常时，双击 `scripts/git/push-frontend.bat`，输入本次修改备注即可推送。
+双击 `scripts/git/push-frontend.bat`，输入本次修改备注即可推送。脚本固定通过
+GitHub SSH 的 443 端口连接，不会修改电脑的全局 Git 配置。
+
+第一次运行会创建一对仅用于本项目推送的 SSH 密钥，并打开 GitHub 的 SSH Key
+设置页面。按窗口说明把公钥添加到受邀的 GitHub 账号后，以后无需 token。
+旧的 `push输入.md` 明文 token 方案已经停用；不要重新创建该文件，并应在 GitHub
+设置中撤销曾经保存在其中的旧 token。
+
+如果网络不可用，提交会安全保存在 `.push-cache`，并明确显示“尚未上传”。网络
+恢复后再次双击同一个脚本即可继续推送，不需要修改或重新生成脚本。
+
+可以使用下面的命令做只读检查；它不会创建提交或连接远端：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/git/push-frontend.ps1 -ValidateOnly
+```

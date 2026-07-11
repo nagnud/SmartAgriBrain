@@ -16,17 +16,15 @@ while ($directory) {
     $candidateRootInfo = Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $candidate) "..\..") -ErrorAction SilentlyContinue
     if ($candidateRootInfo) {
       $candidateRoot = $candidateRootInfo.ProviderPath
-      $credential = Get-ChildItem -LiteralPath (Join-Path $candidateRoot "scripts\git") -File -Filter "push*.md" -ErrorAction SilentlyContinue | Select-Object -First 1
       if ((Test-Path -LiteralPath (Join-Path $candidateRoot "package.json")) -and
           (Test-Path -LiteralPath (Join-Path $candidateRoot "src")) -and
-          $credential) {
+          (Test-Path -LiteralPath (Join-Path $candidateRoot ".push-cache"))) {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $candidate @RemainingArguments
         exit $LASTEXITCODE
       }
     }
   }
-
   $directory = $directory.Parent
 }
 
-throw "Could not find the main push script under the outer pro project. Run pro\scripts\git\push-frontend.bat instead."
+throw "This is a generated forwarding script. Run the outer pro\scripts\git\push-frontend.bat instead."
