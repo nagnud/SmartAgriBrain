@@ -1,25 +1,59 @@
 {
   "crop": "tomato",
+
   "environmental_thresholds": {
-    "temperature": {"min": 15.0, "max": 30.0, "optimal": 25.0},
-    "humidity": {"min": 50.0, "max": 80.0, "warning": 85.0}
+    "temperature": {
+      "optimal": [20, 28],
+      "warning": 30,
+      "danger": 35
+    },
+
+    "humidity": {
+      "optimal": [55, 70],
+      "warning": 85
+    },
+
+    "pressure": {
+      "normal": [1000, 1030]
+    }
   },
+
   "diseases": [
     {
-      "name": "downy_mildew",
-      "alias": "霜霉病",
-      "symptom": "叶片出现不规则黄斑，叶背潮湿时可见霉层",
-      "risk_condition": "空气湿度高于85%，持续时间长，通风不足",
-      "suggestion": "立即开启风机加强通风降湿，减少叶面结露，早期可使用保护性药剂",
-      "forbidden": "高温强光时不建议立即喷药",
-      "device_action": {"target": "fan", "action": 1, "duration_sec": 300}
+      "name": "霜霉病",
+      "risk_condition": "湿度高于85%，温度20~25℃",
+      "symptom": "叶片出现黄色斑点，背面产生灰白色霉层",
+      "suggestion": [
+        "降低棚内湿度",
+        "加强通风",
+        "喷施对应杀菌剂"
+      ]
+    },
+    {
+      "name": "灰霉病",
+      "risk_condition": "湿度持续偏高",
+      "symptom": "叶片及果实出现灰色霉层",
+      "suggestion": [
+        "减少浇水",
+        "加强空气流通"
+      ]
     }
   ],
-  "sop": [
-    {
-      "operation": "ventilation",
-      "condition": "棚内温度高于32度或湿度高于85%",
-      "action": "开启风机"
+
+  "device_rules": {
+    "high_temperature": {
+      "condition": "temperature > 30",
+      "command": "fan_on"
+    },
+
+    "low_temperature": {
+      "condition": "temperature < 18",
+      "command": "fan_off"
+    },
+
+    "high_humidity": {
+      "condition": "humidity > 85",
+      "command": "fan_on"
     }
-  ]
+  }
 }

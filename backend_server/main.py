@@ -6,6 +6,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 import models
 from database import engine, get_db
+from ai.deepseek_client import chat
+from ai.prompt_builder import build_prompt
+from ai.decision_engine import make_decision
 
 # 启动时自动检查并在目录下创建 agri_brain.db 及数据表
 models.Base.metadata.create_all(bind=engine)
@@ -208,4 +211,49 @@ async def get_device_status(device_id: str = "sensairshuttle_001", db: Session =
             "pump": 0,  # 简化版数据库中暂未记录，占位供前端联调
             "light": 0  # 简化版数据库中暂未记录，占位供前端联调
         }
+    }
+
+@app.post("/api/ai/analyze")
+async def analyze_ai(
+    device_id: str = "sensairshuttle_001",
+    crop: str = "tomato",
+    db: Session = Depends(get_db)
+):
+
+    record = db.query(models.TelemetryRecord).filter(
+        models.TelemetryRecord.device_id == device_id
+    ).order_by(
+        models.TelemetryRecord.timestamp.desc()
+    ).first()
+
+    if not record:
+        return {
+            "status": "error",
+            "message": "暂无设备数据"
+        }
+
+    sensor_data = {
+        "temperature": record.temperature,
+        "humidity": record.humidity,
+        "pressure": record.pressure,
+        "gas_resistance": record.gas_resistance
+    }
+
+    prompt = build_prompt(
+        sensor_data,
+        AGRICULTURE_KB
+    )
+
+    result = chat(prompt)
+
+    result = make_decision(
+        result,
+        sensor_data
+    )
+
+    return {
+        "status": "success",
+        "device_id": device_id,
+        "crop": crop,
+        **result
     }
