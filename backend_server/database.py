@@ -1,13 +1,26 @@
+import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from dotenv import load_dotenv
 
-# 指定数据库文件生成在当前目录，命名为 agri_brain.db
-SQLALCHEMY_DATABASE_URL = "sqlite:///./agri_brain.db"
+# 加载 .env 环境变量
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
-# SQLite 特有配置：允许在不同的线程中共享数据库连接
+# 严格读取契约规定的 DATABASE_URL
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/smartagribrain.db")
+
+# 确保 data 目录存在，否则 SQLite 会报错
+db_dir = os.path.dirname(SQLALCHEMY_DATABASE_URL.replace("sqlite:///", ""))
+if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
+
+# 创建数据库引擎
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False}  # 仅限 SQLite 需要此参数
 )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
