@@ -77,7 +77,25 @@ def on_message(client, userdata, msg):
             finally:
                 db.close()
 
-        # ... 后续保留 /status 和 /capabilities 的判断 ...
+        # 契约 3.5: 状态变更
+        elif topic.endswith("/status"):
+            logger.info(f"🟢 [状态变更] 设备 {payload.get('device_id')} 在线状态: {payload.get('online')}")
+            # TODO: 后续补全 device_status 表更新逻辑
+
+        # 契约 3.3: 设备能力
+        elif topic.endswith("/capabilities"):
+            logger.info(
+                f"📋 [能力上报] 设备 {payload.get('device_id')} 固件版本: {payload.get('firmware', {}).get('version')}")
+            # TODO: 后续补全 device_capabilities 表更新逻辑
+
+        # 契约 3.6: 指令回执
+        elif topic.endswith("/command_ack"):
+            logger.info(f"🎯 [命令确认] 命令 {payload.get('command_id')} 状态: {payload.get('state')}")
+            # TODO: 后续补全 commands 表流转状态更新逻辑
+
+    # 这个就是你截图里缺失的、用来闭合最外层 try 的 except
+    except Exception as e:
+        logger.error(f"⚠️ 解析 MQTT 消息失败: {e} | Payload: {msg.payload}")
 
 # 初始化客户端实例
 mqtt_client = mqtt.Client(MQTT_CLIENT_ID)
