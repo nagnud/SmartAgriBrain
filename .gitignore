@@ -12,7 +12,7 @@ venv/
 
 # Environment
 .env
-backend_server/.env
+.env
 
 # Node / Vue
 node_modules/
