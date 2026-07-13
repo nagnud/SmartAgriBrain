@@ -13,14 +13,18 @@
   mockAlarms,
   mockKnowledgeBases,
   mockKnowledgeItems,
+  updateMockAlarmRanges,
   updateMockKnowledgeBase,
   updateMockKnowledgeItem,
 } from '../mock/data';
 import type {
   AiAnalysisResponse,
+  AgriSourceInfo,
   AlarmRecord,
+  AlarmSettingsResponse,
   CommandResult,
   DeviceCommand,
+  DeviceHealth,
   DiseasePhotoInfo,
   DiseaseDetectionResult,
   ExpertChatRequest,
@@ -30,13 +34,17 @@ import type {
   KnowledgeBaseInfo,
   KnowledgeItemInfo,
   KnowledgeTextAddResult,
+  MetricTargetRange,
   PersistedDashboardState,
   TelemetryPayload,
   WeatherBundle,
   WeatherCityOption,
   WeatherPayload,
+  HistoryMetricKey,
+  RetrievalMode,
 } from '../types';
 import { UserFacingError } from '../utils/format';
+import chinaWeatherRegions from '../../shared_data/china_weather_regions.json';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 const useMock = import.meta.env.VITE_USE_MOCK !== 'false';
@@ -97,6 +105,7 @@ export interface FarmAnalysisContext {
   history?: HistoryPoint[];
   disease?: DiseaseDetectionResult | null;
   cameraAnalysis?: DiseaseDetectionResult | null;
+  retrievalMode?: RetrievalMode;
 }
 
 async function requestJson<T>(path: string, init?: RequestJsonInit): Promise<T> {
@@ -194,6 +203,8 @@ function buildDisconnectedAiAnalysis(latest: TelemetryPayload, detail = '智能�
     suggestions: ['请稍后重新生成；如持续无法使用，请联系平台管理员。'],
     commands: [],
     basis: ['本次智能分析未完成。'],
+    references: [],
+    retrievalStatus: 'not_used',
     updated_at: Date.now(),
   };
 }
@@ -239,6 +250,7 @@ export async function analyzeFarm(
         history: context.history ?? [],
         disease: context.disease ?? null,
         camera_analysis: context.cameraAnalysis ?? null,
+        retrieval_mode: context.retrievalMode ?? 'auto',
       }),
       timeoutMs: 120000,
     });
@@ -265,6 +277,61 @@ export async function getAlarmRecords(): Promise<AlarmRecord[]> {
   return requestJson<AlarmRecord[]>('/api/device/alarms');
 }
 
+export async function acknowledgeAlarm(alarmId: string): Promise<AlarmRecord> {
+  if (useMock) {
+    const alarm = mockAlarms.find((item) => item.id === alarmId);
+    if (!alarm) {
+      throw new UserFacingError('没有找到这条提醒，请刷新后重试。');
+    }
+    alarm.handled = true;
+    alarm.state = 'acknowledged';
+    return alarm;
+  }
+  return requestJson<AlarmRecord>(`/api/device/alarms/${encodeURIComponent(alarmId)}/ack`, {
+    method: 'POST',
+  });
+}
+
+export async function getDeviceHealth(): Promise<DeviceHealth> {
+  if (useMock) {
+    return {
+      device_id: 'sensairshuttle_001',
+      device_name: '一号大棚设备',
+      online: true,
+      transport: 'http',
+      last_seen_at: Date.now(),
+      last_telemetry_at: Date.now(),
+      offline_after_seconds: 120,
+    };
+  }
+  return requestJson<DeviceHealth>('/api/device/health');
+}
+
+export async function getAlarmSettings(
+  deviceId: string,
+  fallbackRanges: Record<HistoryMetricKey, MetricTargetRange>,
+): Promise<AlarmSettingsResponse> {
+  if (useMock) {
+    updateMockAlarmRanges(fallbackRanges);
+    return { device_id: deviceId, configured: true, ranges: fallbackRanges };
+  }
+  return requestJson<AlarmSettingsResponse>(`/api/device/alarm-settings?device_id=${encodeURIComponent(deviceId)}`);
+}
+
+export async function saveAlarmSettings(
+  deviceId: string,
+  ranges: Record<HistoryMetricKey, MetricTargetRange>,
+): Promise<AlarmSettingsResponse> {
+  if (useMock) {
+    updateMockAlarmRanges(ranges);
+    return { device_id: deviceId, configured: true, ranges };
+  }
+  return requestJson<AlarmSettingsResponse>(`/api/device/alarm-settings?device_id=${encodeURIComponent(deviceId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ ranges }),
+  });
+}
+
 export async function getCurrentWeather(city?: string): Promise<WeatherPayload> {
   if (useMockWeather) {
     return buildMockWeather();
@@ -281,27 +348,58 @@ export async function getWeatherBundle(city?: string): Promise<WeatherBundle> {
   return requestJson<WeatherBundle>(`/api/weather/bundle${query}`);
 }
 
+type WeatherRegionSource = {
+  name: string;
+  direct: boolean;
+  cities: string[];
+};
+
+const weatherRegionSources = chinaWeatherRegions as WeatherRegionSource[];
+
+function weatherProvinceOption(region: WeatherRegionSource): WeatherCityOption {
+  return {
+    id: `province:${region.name}`,
+    name: region.name,
+    path: `${region.name},中国`,
+    country: 'CN',
+    level: 'province',
+    province: region.name,
+    direct: region.direct,
+    cities: region.cities.map((city) => ({
+      id: `city:${region.name}:${city}`,
+      name: city,
+      path: `${city},${region.name},中国`,
+      country: 'CN',
+      level: 'city',
+      province: region.name,
+      direct: false,
+    })),
+  };
+}
+
+const weatherRegionOptions = weatherRegionSources.map(weatherProvinceOption);
+
+export function getWeatherRegions(): WeatherCityOption[] {
+  return weatherRegionOptions;
+}
+
+export function getWeatherCitiesForProvince(province: string): WeatherCityOption[] {
+  return weatherRegionOptions.find((item) => item.name === province)?.cities ?? [];
+}
+
 export async function getWeatherCities(query: string): Promise<WeatherCityOption[]> {
-  if (useMockWeather) {
-    const value = query.trim() || '无锡';
-    const cities: WeatherCityOption[] = [
-      { id: '无锡', name: '无锡', path: '无锡,江苏,中国', country: 'CN' },
-      { id: '北京', name: '北京', path: '北京,北京,中国', country: 'CN' },
-      { id: '上海', name: '上海', path: '上海,上海,中国', country: 'CN' },
-      { id: '南京', name: '南京', path: '南京,江苏,中国', country: 'CN' },
-      { id: '苏州', name: '苏州', path: '苏州,江苏,中国', country: 'CN' },
-      { id: '杭州', name: '杭州', path: '杭州,浙江,中国', country: 'CN' },
-      { id: '广州', name: '广州', path: '广州,广东,中国', country: 'CN' },
-      { id: '深圳', name: '深圳', path: '深圳,广东,中国', country: 'CN' },
-      { id: '成都', name: '成都', path: '成都,四川,中国', country: 'CN' },
-      { id: '武汉', name: '武汉', path: '武汉,湖北,中国', country: 'CN' },
-      { id: '西安', name: '西安', path: '西安,陕西,中国', country: 'CN' },
-      { id: '郑州', name: '郑州', path: '郑州,河南,中国', country: 'CN' },
-    ];
-    return cities.filter((city) => `${city.name}${city.path}`.includes(value)).slice(0, 8);
+  const value = query.trim();
+  if (!value) {
+    return [];
   }
-  const result = await requestJson<{ items: WeatherCityOption[] }>(`/api/weather/cities?q=${encodeURIComponent(query)}`);
-  return result.items;
+  const provinces = weatherRegionOptions.filter((item) => item.name?.includes(value));
+  if (provinces.length > 0) {
+    return provinces;
+  }
+  return weatherRegionOptions
+    .flatMap((item) => item.cities ?? [])
+    .filter((item) => item.name?.includes(value))
+    .slice(0, 20);
 }
 
 export async function getPersistedDashboardState(): Promise<PersistedDashboardState | null> {
@@ -338,9 +436,14 @@ export async function savePersistedDashboardState(value: PersistedDashboardState
   }
 }
 
-export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise<DiseaseDetectionResult> {
+export async function analyzeDiseaseImage(
+  file: File,
+  imageUrl: string,
+  retrievalMode: RetrievalMode = 'force',
+): Promise<DiseaseDetectionResult> {
   const formData = new FormData();
   formData.append('image', file);
+  formData.append('retrieval_mode', retrievalMode);
   const response = await fetch(`${apiBaseUrl}/api/vision/disease`, {
     method: 'POST',
     body: formData,
@@ -353,7 +456,7 @@ export async function analyzeDiseaseImage(file: File, imageUrl: string): Promise
 
 export async function analyzeGrowthFrame(file: File, imageUrl: string): Promise<DiseaseDetectionResult> {
   // Future growth-specific AI API should replace this wrapper without changing the camera UI.
-  return analyzeDiseaseImage(file, imageUrl);
+  return analyzeDiseaseImage(file, imageUrl, 'auto');
 }
 
 export async function uploadDiseasePhoto(file: File): Promise<DiseasePhotoInfo> {
@@ -412,10 +515,79 @@ export async function sendExpertChatMessage(payload: ExpertChatRequest): Promise
     message: {
       ...response.message,
       references: response.message.references ?? response.references ?? [],
+      retrievalStatus: response.retrievalStatus ?? 'not_used',
       suggested_actions: actions.map((action) => ({ ...action, status: action.status ?? 'pending' })),
     },
     actions,
   };
+}
+
+const mockAgriSources: AgriSourceInfo[] = [
+  {
+    sourceId: 'agrovoc',
+    name: 'FAO AGROVOC',
+    description: '联合国粮农组织农业多语言词表，用于规范作物、病害和农业术语。',
+    sourceType: 'api',
+    enabled: true,
+    configured: true,
+    status: 'unknown',
+  },
+  {
+    sourceId: 'eppo',
+    name: 'EPPO Global Database',
+    description: '植物保护数据库，提供病虫害、寄主、分类和地理分布信息。',
+    sourceType: 'api',
+    enabled: false,
+    configured: false,
+    status: 'needs_configuration',
+  },
+  {
+    sourceId: 'natesc',
+    name: '全国农技推广网',
+    description: '全国农业技术推广服务中心公开农事、植保和作物生产资料。',
+    sourceType: 'website',
+    enabled: true,
+    configured: true,
+    status: 'unknown',
+  },
+];
+
+export async function getAgriSources(): Promise<AgriSourceInfo[]> {
+  if (useMockKnowledge) {
+    return mockAgriSources.map((item) => ({ ...item }));
+  }
+  const result = await requestJson<{ items: AgriSourceInfo[] }>('/api/v1/agri/sources', { timeoutMs: 8000 });
+  return result.items;
+}
+
+export async function updateAgriSource(sourceId: AgriSourceInfo['sourceId'], enabled: boolean): Promise<AgriSourceInfo> {
+  if (useMockKnowledge) {
+    const source = mockAgriSources.find((item) => item.sourceId === sourceId);
+    if (!source) throw new UserFacingError('没有找到该农业知识源。');
+    if (enabled && !source.configured) throw new UserFacingError('该来源尚未配置访问密钥，暂时无法启用。');
+    source.enabled = enabled;
+    source.status = enabled ? 'unknown' : 'disabled';
+    return { ...source };
+  }
+  return requestJson<AgriSourceInfo>(`/api/v1/agri/sources/${encodeURIComponent(sourceId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export async function testAgriSource(sourceId: AgriSourceInfo['sourceId']): Promise<{ source: AgriSourceInfo; sampleCount: number }> {
+  if (useMockKnowledge) {
+    const source = mockAgriSources.find((item) => item.sourceId === sourceId);
+    if (!source?.configured) throw new UserFacingError('该来源尚未配置访问密钥。');
+    if (!source) throw new UserFacingError('没有找到该农业知识源。');
+    source.status = 'available';
+    source.lastCheckedAt = new Date().toISOString();
+    return { source: { ...source }, sampleCount: 1 };
+  }
+  return requestJson<{ source: AgriSourceInfo; sampleCount: number }>(`/api/v1/agri/sources/${encodeURIComponent(sourceId)}/test`, {
+    method: 'POST',
+    timeoutMs: 15000,
+  });
 }
 
 export async function getKnowledgeBases(): Promise<KnowledgeBaseInfo[]> {

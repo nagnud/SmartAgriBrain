@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 
+from region_service import search_region_options
+
 
 SENIVERSE_BASE_URL = "https://api.seniverse.com/v3"
 DEFAULT_CITY = "无锡"
@@ -347,36 +349,4 @@ def weather_bundle(city: Optional[str] = None) -> Dict[str, Any]:
 
 
 def search_cities(query: str) -> Dict[str, Any]:
-    text = query.strip()
-    if not text:
-        return {"items": []}
-    params = {
-        "key": require_api_key(),
-        "q": text,
-        "language": weather_language(),
-        "limit": 10,
-    }
-    try:
-        with httpx.Client(timeout=timeout_seconds()) as client:
-            response = client.get(f"{SENIVERSE_BASE_URL}/location/search.json", params=params)
-        if response.status_code >= 400:
-            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
-        body = response.json()
-        results = body.get("results") if isinstance(body.get("results"), list) else []
-        items = []
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            items.append({
-                "id": item.get("id"),
-                "name": item.get("name"),
-                "path": item.get("path"),
-                "country": item.get("country"),
-                "timezone": item.get("timezone"),
-                "timezone_offset": item.get("timezone_offset"),
-            })
-        return {"items": items}
-    except HTTPException:
-        raise
-    except Exception as error:
-        raise HTTPException(status_code=502, detail=f"城市搜索失败：{error}") from error
+    return search_region_options(query)

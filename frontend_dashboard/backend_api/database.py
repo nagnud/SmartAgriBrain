@@ -50,11 +50,17 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_database() -> None:
+    import agri_source_models  # noqa: F401
     import app_state_models  # noqa: F401
+    import device_models  # noqa: F401
     import kb_models  # noqa: F401
+    import monitoring_models  # noqa: F401
     import photo_models  # noqa: F401
-    from kb_service import seed_initial_knowledge
+    from agri_source_service import seed_agri_source_settings
+    from kb_service import seed_initial_knowledge, seed_reference_tomato_knowledge
 
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
+        seed_agri_source_settings(db)
         seed_initial_knowledge(db)
+        seed_reference_tomato_knowledge(db)

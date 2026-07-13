@@ -32,6 +32,8 @@ DATABASE_URL=sqlite:///./smartagribrain.db
 
 以后部署多人线上版时，可以在 `backend_api/.env` 中把 `DATABASE_URL` 改为 PostgreSQL 地址。
 
+设备默认继续使用 HTTP 通信。只有在 `backend_api/.env` 中同时设置 `MQTT_ENABLED=true`、MQTT 服务器地址和 `DEVICE_COMMAND_TRANSPORT=mqtt` 时，后端才会启用 MQTT；未配置时不会发起连接，也不会影响现有功能。
+
 AI 助手语音输入现在由浏览器 Web Speech API 实时写入输入框，不需要后端语音识别 API Key。
 
 ## git

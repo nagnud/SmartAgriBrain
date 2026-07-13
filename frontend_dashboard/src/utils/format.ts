@@ -30,13 +30,14 @@ export function airQualityFromGasResistance(value: number): { label: string; lev
 }
 
 export function confidenceText(value: number): string {
+  const percentage = `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
   if (value >= 0.8) {
-    return '判断把握较高';
+    return `判断把握较高（${percentage}）`;
   }
   if (value >= 0.6) {
-    return '判断把握一般';
+    return `判断把握一般（${percentage}）`;
   }
-  return '判断把握较低';
+  return `判断把握较低（${percentage}）`;
 }
 
 export class UserFacingError extends Error {

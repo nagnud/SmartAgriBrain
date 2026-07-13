@@ -465,6 +465,24 @@ body.is-resizing-assistant * {
   box-shadow: 0 18px 44px rgba(29, 52, 38, 0.16);
 }
 
+.weather-city-dropdown__header {
+  position: sticky;
+  top: -8px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -8px -8px 4px;
+  padding: 8px;
+  border-bottom: 1px solid #e4ebe2;
+  background: #ffffff;
+}
+
+.weather-city-dropdown__header button {
+  color: #2f7d45;
+  font-weight: 700;
+}
+
 .weather-city-dropdown button {
   display: flex;
   align-items: center;
@@ -1499,6 +1517,69 @@ body.is-resizing-assistant * {
 
 .knowledge-layout {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.agri-sources-panel {
+  display: grid;
+  gap: 4px;
+}
+
+.agri-source-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.agri-source-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid #d8e3d8;
+  border-radius: 12px;
+  background: linear-gradient(150deg, #fbfdf9, #f2f8f1);
+}
+
+.agri-source-card__heading,
+.agri-source-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agri-source-card__heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.agri-source-card__heading strong {
+  overflow-wrap: anywhere;
+  color: #244d35;
+  font-size: 15px;
+}
+
+.agri-source-card__heading span,
+.agri-source-card small,
+.agri-source-card em {
+  color: #78857d;
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.agri-source-card p {
+  min-height: 42px;
+  margin: 0;
+  color: #536159;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.agri-source-card em {
+  color: #a86612;
 }
 
 .panel,
@@ -2572,10 +2653,22 @@ body.is-resizing-assistant .assistant-resizer::before {
   font-size: 12px;
 }
 
-.reference-list span {
+.reference-list span,
+.reference-list a {
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+.reference-list a {
+  color: #2f7146;
+  line-height: 1.5;
+  text-decoration: none;
+}
+
+.reference-list a:hover {
+  color: #1c5732;
+  text-decoration: underline;
 }
 
 .reference-list strong {
@@ -3399,6 +3492,31 @@ body.is-resizing-assistant .assistant-resizer::before {
   line-height: 1.55;
 }
 
+.alarm-card__actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.alarm-card__actions .status-pill {
+  white-space: nowrap;
+}
+
+.alarm-action-message,
+.alarm-empty {
+  margin: 0 0 12px;
+  color: #526158;
+  line-height: 1.6;
+}
+
+.alarm-empty {
+  padding: 24px;
+  border: 1px dashed #c8d8cb;
+  border-radius: 8px;
+  background: #f7faf6;
+  text-align: center;
+}
+
 @keyframes metric-editor-open {
   from {
     opacity: 0.96;
@@ -3491,7 +3609,8 @@ body.is-resizing-assistant .assistant-resizer::before {
   .control-grid,
   .smart-demand-grid,
   .suggestion-grid,
-  .result-grid {
+  .result-grid,
+  .agri-source-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -3532,6 +3651,10 @@ body.is-resizing-assistant .assistant-resizer::before {
 }
 
 @media (max-width: 1040px) {
+  .agri-source-grid {
+    grid-template-columns: 1fr;
+  }
+
   .weather-forecast-list {
     grid-template-columns: 1fr;
   }

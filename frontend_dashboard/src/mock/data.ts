@@ -1,4 +1,5 @@
 import type {
+  AlarmRecord,
   CommandResult,
   DeviceCommand,
   DeviceRuntimeStatus,
@@ -6,11 +7,13 @@ import type {
   ExpertChatRequest,
   ExpertChatResponse,
   HistoryPoint,
+  HistoryMetricKey,
   KnowledgeAnalyzeResult,
   KnowledgeBaseInfo,
   KnowledgeItemInfo,
   KnowledgeReference,
   KnowledgeTextAddResult,
+  MetricTargetRange,
   TelemetryPayload,
   WeatherBundle,
   WeatherPayload,
@@ -33,6 +36,64 @@ let nextKnowledgeBaseId = 4;
 let nextKnowledgeItemId = 9;
 let lastDiseaseResult: DiseaseDetectionResult | null = null;
 
+type MockAlarmDirection = 'low' | 'high';
+
+type MockAlarmRuleState = {
+  direction: MockAlarmDirection | null;
+  abnormalCount: number;
+  normalCount: number;
+  currentAlarmId: string | null;
+};
+
+type MockMetricDefinition = {
+  label: string;
+  unit: string;
+  advice: Record<MockAlarmDirection, string>;
+};
+
+const mockMetricKeys: HistoryMetricKey[] = [
+  'temperature',
+  'humidity',
+  'light',
+  'co2',
+  'soil_moisture',
+  'soil_ec',
+  'gas_resistance',
+];
+
+const mockMetricDefinitions: Record<HistoryMetricKey, MockMetricDefinition> = {
+  temperature: { label: '棚内温度', unit: '摄氏度', advice: { low: '建议检查保温和加热设备。', high: '建议检查通风和遮阳设备。' } },
+  humidity: { label: '棚内湿度', unit: '%RH', advice: { low: '建议检查灌溉和加湿安排。', high: '建议加强通风并检查叶面结露。' } },
+  light: { label: '光照强度', unit: 'lux', advice: { low: '建议检查补光灯和卷帘状态。', high: '建议检查遮阳和卷帘状态。' } },
+  co2: { label: '二氧化碳浓度', unit: 'ppm', advice: { low: '建议检查通风时段和二氧化碳补充安排。', high: '建议加强通风并检查气体来源。' } },
+  soil_moisture: { label: '土壤湿度', unit: '%', advice: { low: '建议检查灌溉和水泵状态。', high: '建议减少灌溉并检查排水情况。' } },
+  soil_ec: { label: '土壤肥力', unit: 'mS/cm', advice: { low: '建议检查养分供应和施肥计划。', high: '建议检查施肥浓度并评估是否需要冲洗基质。' } },
+  gas_resistance: { label: '空气质量', unit: 'Ω', advice: { low: '建议加强通风并排查异常气味来源。', high: '建议继续观察空气质量变化。' } },
+};
+
+let mockAlarmRanges: Record<HistoryMetricKey, MetricTargetRange> = {
+  temperature: { min: 24, max: 30 },
+  humidity: { min: 55, max: 72 },
+  light: { min: 14000, max: 24000 },
+  co2: { min: 520, max: 900 },
+  soil_moisture: { min: 48, max: 66 },
+  soil_ec: { min: 1.2, max: 2.6 },
+  gas_resistance: { min: 12000, max: 22000 },
+};
+
+const mockAlarmRuleStates = Object.fromEntries(
+  mockMetricKeys.map((key) => [key, {
+    direction: null,
+    abnormalCount: 0,
+    normalCount: 0,
+    currentAlarmId: null,
+  }]),
+) as Record<HistoryMetricKey, MockAlarmRuleState>;
+
+export const mockAlarms: AlarmRecord[] = [];
+let lastMockTelemetry: TelemetryPayload | null = null;
+let nextMockAlarmId = 1;
+
 const nowText = () => new Intl.DateTimeFormat('zh-CN', {
   month: '2-digit',
   day: '2-digit',
@@ -45,10 +106,133 @@ function rounded(value: number, digits = 1): number {
   return Math.round(value * base) / base;
 }
 
+function mockAlarmDirection(value: number, range: MetricTargetRange): MockAlarmDirection | null {
+  if (value < range.min) {
+    return 'low';
+  }
+  if (value > range.max) {
+    return 'high';
+  }
+  return null;
+}
+
+function mockAlarmById(alarmId: string | null): AlarmRecord | undefined {
+  return alarmId ? mockAlarms.find((alarm) => alarm.id === alarmId && alarm.state !== 'resolved') : undefined;
+}
+
+function mockAlarmText(
+  key: HistoryMetricKey,
+  direction: MockAlarmDirection,
+  value: number,
+  range: MetricTargetRange,
+): Pick<AlarmRecord, 'title' | 'detail'> {
+  const definition = mockMetricDefinitions[key];
+  const directionText = direction === 'high' ? '高于' : '低于';
+  const countText = direction === 'high' ? '偏高' : '偏低';
+  return {
+    title: `${definition.label}${directionText}目标范围`,
+    detail: `当前 ${value} ${definition.unit}，目标范围为 ${range.min} 至 ${range.max} ${definition.unit}，已连续 3 次${countText}。${definition.advice[direction]}`,
+  };
+}
+
+function evaluateMockAlarmMetric(key: HistoryMetricKey, value: number, timestamp: number): void {
+  const range = mockAlarmRanges[key];
+  const direction = mockAlarmDirection(value, range);
+  const ruleState = mockAlarmRuleStates[key];
+  let alarm = mockAlarmById(ruleState.currentAlarmId);
+
+  if (direction === null) {
+    ruleState.direction = null;
+    ruleState.abnormalCount = 0;
+    ruleState.normalCount += 1;
+    if (alarm && ruleState.normalCount >= 3) {
+      alarm.state = 'resolved';
+      alarm.resolved_at = timestamp;
+      alarm.detail = `${alarm.detail} 该指标已连续 3 次回到目标范围。`;
+      ruleState.currentAlarmId = null;
+      ruleState.normalCount = 0;
+    }
+    return;
+  }
+
+  ruleState.normalCount = 0;
+  if (ruleState.direction !== direction) {
+    if (alarm) {
+      alarm.state = 'resolved';
+      alarm.resolved_at = timestamp;
+      alarm.detail = `${alarm.detail} 指标越界方向已经改变。`;
+      ruleState.currentAlarmId = null;
+      alarm = undefined;
+    }
+    ruleState.direction = direction;
+    ruleState.abnormalCount = 1;
+  } else {
+    ruleState.abnormalCount += 1;
+  }
+
+  if (ruleState.abnormalCount < 3) {
+    return;
+  }
+
+  const text = mockAlarmText(key, direction, value, range);
+  if (alarm) {
+    alarm.title = text.title;
+    alarm.detail = text.detail;
+    alarm.timestamp = timestamp;
+    return;
+  }
+
+  const created: AlarmRecord = {
+    id: `ALM-MOCK-${String(nextMockAlarmId).padStart(4, '0')}`,
+    device_id: deviceId,
+    level: 'warning',
+    title: text.title,
+    detail: text.detail,
+    source: '大棚环境监测',
+    timestamp,
+    handled: false,
+    state: 'open',
+    handled_at: null,
+    resolved_at: null,
+  };
+  nextMockAlarmId += 1;
+  mockAlarms.unshift(created);
+  ruleState.currentAlarmId = created.id;
+}
+
+function evaluateMockTelemetry(telemetry: TelemetryPayload): void {
+  const timestamp = telemetry.timestamp;
+  mockMetricKeys.forEach((key) => evaluateMockAlarmMetric(key, telemetry.sensors[key], timestamp));
+}
+
+export function updateMockAlarmRanges(ranges: Record<HistoryMetricKey, MetricTargetRange>): void {
+  mockAlarmRanges = Object.fromEntries(
+    mockMetricKeys.map((key) => [key, { ...ranges[key] }]),
+  ) as Record<HistoryMetricKey, MetricTargetRange>;
+
+  if (!lastMockTelemetry) {
+    return;
+  }
+  mockMetricKeys.forEach((key) => {
+    const ruleState = mockAlarmRuleStates[key];
+    const alarm = mockAlarmById(ruleState.currentAlarmId);
+    const direction = mockAlarmDirection(lastMockTelemetry!.sensors[key], mockAlarmRanges[key]);
+    ruleState.direction = direction;
+    ruleState.abnormalCount = 0;
+    ruleState.normalCount = 0;
+    if (alarm && direction === null) {
+      alarm.state = 'resolved';
+      alarm.resolved_at = Date.now();
+      alarm.detail = `${alarm.detail} 目标范围调整后，该指标已处于正常范围。`;
+      ruleState.currentAlarmId = null;
+    }
+  });
+}
+
 export function buildMockLatest(): TelemetryPayload {
   tick += 1;
   const phase = tick / 4;
-  return {
+  const telemetry: TelemetryPayload = {
     device_id: deviceId,
     timestamp: Date.now(),
     sensors: {
@@ -63,6 +247,9 @@ export function buildMockLatest(): TelemetryPayload {
     },
     status: { ...runtimeStatus },
   };
+  lastMockTelemetry = telemetry;
+  evaluateMockTelemetry(telemetry);
+  return telemetry;
 }
 
 export function buildMockHistory(): HistoryPoint[] {
@@ -181,36 +368,6 @@ export function buildMockWeatherBundle(city = 'wuxi'): WeatherBundle {
   };
 }
 
-export const mockAlarms = [
-  {
-    id: 'ALM-20260707-001',
-    level: 'warning' as const,
-    title: '棚内湿度接近上限',
-    detail: '湿度连续 3 次高于 68%RH，建议开启风机并检查叶面结露。',
-    source: 'ESP32-C5 / 环境传感器',
-    timestamp: Date.now() - 18 * 60 * 1000,
-    handled: false,
-  },
-  {
-    id: 'ALM-20260707-002',
-    level: 'info' as const,
-    title: 'MQTT 链路恢复',
-    detail: '设备重新连接云端 Broker，遥测数据恢复上传。',
-    source: 'Wi-Fi / MQTT',
-    timestamp: Date.now() - 54 * 60 * 1000,
-    handled: true,
-  },
-  {
-    id: 'ALM-20260707-003',
-    level: 'danger' as const,
-    title: '疑似病害风险',
-    detail: '图像检测到疑似叶斑区域，叠加高湿环境后生成中等风险建议。',
-    source: '作物健康与知识分析',
-    timestamp: Date.now() - 112 * 60 * 1000,
-    handled: false,
-  },
-];
-
 export function executeMockCommand(command: DeviceCommand): CommandResult {
   const status = { ...runtimeStatus };
   if (command.command.startsWith('fan_')) {
@@ -231,7 +388,7 @@ export function executeMockCommand(command: DeviceCommand): CommandResult {
   runtimeStatus = status;
   return {
     success: true,
-    message: '模拟执行成功，等待 ESP32-C5 返回真实执行结果',
+    message: '操作已发送，正在等待设备返回结果',
     command,
     executed_at: Date.now(),
     status: { ...runtimeStatus },
@@ -274,7 +431,7 @@ export function buildMockDiseaseDetection(imageUrl: string): DiseaseDetectionRes
 }
 
 export const mockKnowledgeBases: KnowledgeBaseInfo[] = [
-  { kbId: 1, name: '番茄管理知识库', description: '温室番茄水肥、光照、CO2 和病害管理经验', enabled: true, updatedAt: nowText() },
+  { kbId: 1, name: '番茄管理知识库', description: '温室番茄水肥、光照、二氧化碳和病害管理经验', enabled: true, updatedAt: nowText() },
   { kbId: 2, name: '病虫害防治库', description: '叶斑病、霜霉病、白粉病等识别与处理建议', enabled: true, updatedAt: nowText() },
   { kbId: 3, name: '设备控制规则库', description: '风机、水泵、补光灯、卷帘联动规则', enabled: true, updatedAt: nowText() },
 ];
@@ -290,8 +447,8 @@ export const mockKnowledgeItems: KnowledgeItemInfo[] = [
   {
     itemId: 2,
     kbId: 1,
-    title: '土壤 EC 管理',
-    content: '番茄基质 EC 建议维持在 1.5 到 2.4 mS/cm，过高会造成盐害，过低会影响养分供应。',
+    title: '土壤肥力管理',
+    content: '番茄土壤肥力指标建议维持在 1.5 到 2.4 mS/cm，过高会造成盐害，过低会影响养分供应。',
     updatedAt: nowText(),
   },
   {
@@ -345,7 +502,7 @@ export function buildMockExpertChat(request: ExpertChatRequest): ExpertChatRespo
       role: 'assistant',
       created_at: Date.now(),
       content: [
-        `结合当前数据，棚内温度 ${sensors.temperature} 摄氏度、湿度 ${sensors.humidity}%RH、光照 ${sensors.light} lux、CO2 ${sensors.co2} ppm。`,
+        `结合当前数据，棚内温度 ${sensors.temperature} 摄氏度、湿度 ${sensors.humidity}%RH、光照 ${sensors.light} lux、二氧化碳 ${sensors.co2} ppm。`,
         diseaseText,
         sensors.humidity > 68
           ? '建议先开启风机通风降湿，再观察叶片病斑是否扩散。'

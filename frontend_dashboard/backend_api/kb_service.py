@@ -69,6 +69,39 @@ SEED_BASES = [
     },
 ]
 
+REFERENCE_TOMATO_BASE = {
+    "name": "番茄种植规则与病害防治",
+    "description": "面向温室番茄的环境管理、常见病害与设备调节建议",
+    "items": [
+        {
+            "title": "番茄适宜环境与日常观察",
+            "content": (
+                "番茄生长需要稳定的温度、湿度、光照、二氧化碳和根区水肥环境。"
+                "管理时应以种植人员在系统中设置的目标范围为准，连续观察变化趋势，"
+                "避免因为单次波动频繁调节设备。高温时优先检查通风和遮阳，低温时注意保温；"
+                "湿度长期偏高会增加叶面结露和病害风险。"
+            ),
+        },
+        {
+            "title": "霜霉病和灰霉病风险管理",
+            "content": (
+                "霜霉病常在高湿、通风不足和昼夜温差较大时发生，叶片可能出现不规则黄斑，"
+                "潮湿时叶背可见霉层。灰霉病也容易在湿度持续偏高、植株过密和叶面长时间潮湿时发生。"
+                "发现风险后应加强通风、减少叶面结露、及时清理病叶，并结合现场情况选择合适的防治措施。"
+            ),
+        },
+        {
+            "title": "通风、灌溉与补光建议",
+            "content": (
+                "环境温度或湿度高于目标范围时，可检查风机和卷帘并逐步加强通风；"
+                "土壤湿度低于目标范围时应检查供水并适量灌溉，高于目标范围时应暂停灌溉并检查排水；"
+                "光照不足时优先利用自然光，仍不足时再开启补光。每次设备调节后都应观察新的环境数据，"
+                "确认效果后再继续调整。"
+            ),
+        },
+    ],
+}
+
 
 def now_text(value: Optional[datetime] = None) -> str:
     current = value or datetime.utcnow()
@@ -171,6 +204,39 @@ def seed_initial_knowledge(db: Session, user_id: str = DEFAULT_USER_ID) -> None:
             db.add(item)
             db.flush()
             create_chunks(db, item)
+    db.commit()
+
+
+def seed_reference_tomato_knowledge(db: Session, user_id: str = DEFAULT_USER_ID) -> None:
+    exists = (
+        db.query(KnowledgeBase)
+        .filter(
+            KnowledgeBase.user_id == user_id,
+            KnowledgeBase.name == REFERENCE_TOMATO_BASE["name"],
+        )
+        .first()
+    )
+    if exists is not None:
+        return
+
+    base = KnowledgeBase(
+        user_id=user_id,
+        name=REFERENCE_TOMATO_BASE["name"],
+        description=REFERENCE_TOMATO_BASE["description"],
+        enabled=True,
+    )
+    db.add(base)
+    db.flush()
+    for item_data in REFERENCE_TOMATO_BASE["items"]:
+        item = KnowledgeItem(
+            kb_id=base.id,
+            user_id=user_id,
+            title=item_data["title"],
+            content=item_data["content"],
+        )
+        db.add(item)
+        db.flush()
+        create_chunks(db, item)
     db.commit()
 
 
@@ -353,6 +419,9 @@ def search_knowledge_references(
                 title=item.title,
                 content=chunk.content[:420],
                 score=round(score, 2),
+                referenceId=f"local:{item.id}:{chunk.chunk_index}",
+                sourceType="local",
+                sourceName="本地知识库",
             )
         )
     return references

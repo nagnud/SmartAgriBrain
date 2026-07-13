@@ -1,5 +1,6 @@
 export type ConnectionState = 'connected' | 'disconnected' | 'warning';
 export type StatusLevel = 'good' | 'watch' | 'danger' | 'neutral';
+export type HistoryMetricKey = 'temperature' | 'humidity' | 'light' | 'co2' | 'soil_moisture' | 'soil_ec' | 'gas_resistance';
 
 export interface SensorSnapshot {
   temperature: number;
@@ -144,6 +145,10 @@ export interface WeatherCityOption {
   country?: string;
   timezone?: string;
   timezone_offset?: string;
+  level?: 'province' | 'city';
+  province?: string;
+  direct?: boolean;
+  cities?: WeatherCityOption[];
 }
 
 export interface PersistedDashboardState {
@@ -223,6 +228,8 @@ export interface AiAnalysisResponse {
   suggestions: string[];
   commands: AiCommand[];
   basis: string[];
+  references?: KnowledgeReference[];
+  retrievalStatus?: RetrievalStatus;
   updated_at: number;
 }
 
@@ -258,12 +265,33 @@ export interface CommandResult {
 
 export interface AlarmRecord {
   id: string;
+  device_id?: string;
   level: 'info' | 'warning' | 'danger';
   title: string;
   detail: string;
   source: string;
   timestamp: number;
   handled: boolean;
+  state: 'open' | 'acknowledged' | 'resolved';
+  handled_at?: number | null;
+  resolved_at?: number | null;
+}
+
+export interface DeviceHealth {
+  device_id: string;
+  device_name: string;
+  online: boolean;
+  transport: 'http' | 'mqtt';
+  last_seen_at: number;
+  last_telemetry_at: number;
+  offline_after_seconds: number;
+}
+
+export interface AlarmSettingsResponse {
+  device_id: string;
+  configured: boolean;
+  ranges: Record<HistoryMetricKey, MetricTargetRange>;
+  updated_at?: string | null;
 }
 
 export interface DetectionBox {
@@ -290,6 +318,8 @@ export interface DiseaseDetectionResult {
   summary: string;
   explanation: string;
   suggestions: string[];
+  references?: KnowledgeReference[];
+  retrievalStatus?: RetrievalStatus;
   processed_at: number;
 }
 
@@ -304,12 +334,21 @@ export interface DiseasePhotoInfo {
 }
 
 export interface KnowledgeReference {
-  itemId: number;
-  chunkId: number;
+  itemId?: number;
+  chunkId?: number;
   title: string;
   content: string;
   score: number;
+  referenceId?: string;
+  sourceType?: 'local' | 'online';
+  sourceName?: string;
+  url?: string | null;
+  publishedAt?: string | null;
+  retrievedAt?: string | null;
 }
+
+export type RetrievalMode = 'auto' | 'force' | 'off';
+export type RetrievalStatus = 'not_used' | 'success' | 'partial' | 'unavailable';
 
 export interface ChatMessage {
   id: string;
@@ -319,6 +358,7 @@ export interface ChatMessage {
   created_at: number;
   typing?: boolean;
   references?: KnowledgeReference[];
+  retrievalStatus?: RetrievalStatus;
   suggested_commands?: AiCommand[];
   suggested_actions?: AssistantAction[];
 }
@@ -346,12 +386,26 @@ export interface ExpertChatRequest {
   knowledge_bases?: KnowledgeBaseInfo[];
   knowledge_items?: KnowledgeItemInfo[];
   command_results?: CommandResult[];
+  retrieval_mode?: RetrievalMode;
 }
 
 export interface ExpertChatResponse {
   message: ChatMessage;
   references?: KnowledgeReference[];
   actions?: AssistantAction[];
+  retrievalStatus?: RetrievalStatus;
+}
+
+export interface AgriSourceInfo {
+  sourceId: 'agrovoc' | 'eppo' | 'natesc';
+  name: string;
+  description: string;
+  sourceType: 'api' | 'website';
+  enabled: boolean;
+  configured: boolean;
+  status: 'unknown' | 'available' | 'unavailable' | 'needs_configuration' | 'disabled';
+  lastCheckedAt?: string | null;
+  lastError?: string;
 }
 
 export interface KnowledgeBaseInfo {

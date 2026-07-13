@@ -45,6 +45,7 @@ import EChartPanel from './components/EChartPanel.vue';
 import StatusPill from './components/StatusPill.vue';
 import {
   addKnowledgeItem,
+  acknowledgeAlarm,
   analyzeDiseaseImage,
   analyzeFarm,
   analyzeKnowledge,
@@ -53,26 +54,36 @@ import {
   deleteKnowledgeBase,
   deleteKnowledgeItem,
   getAlarmRecords,
+  getAlarmSettings,
+  getAgriSources,
   getDiseasePhotos,
   getDeviceHistory,
+  getDeviceHealth,
   getCurrentWeather,
   getWeatherBundle,
   getWeatherCities,
+  getWeatherCitiesForProvince,
+  getWeatherRegions,
   getKnowledgeBases,
   getKnowledgeItems,
   getLatestTelemetry,
   getPersistedDashboardState,
   savePersistedDashboardState,
+  saveAlarmSettings,
   saveDiseasePhotoAnalysis,
   sendDeviceCommand,
   sendExpertChatMessage,
+  testAgriSource,
+  updateAgriSource,
   updateKnowledgeBase,
   updateKnowledgeItem,
   uploadDiseasePhoto,
 } from './services/api';
 import type {
   AiAnalysisResponse,
+  AgriSourceInfo,
   AlarmRecord,
+  DeviceHealth,
   AssistantAction,
   AssistantThread,
   ChatMessage,
@@ -82,9 +93,11 @@ import type {
   DiseaseDetectionResult,
   DiseasePhotoInfo,
   HistoryPoint,
+  HistoryMetricKey,
   KnowledgeAnalyzeResult,
   KnowledgeBaseInfo,
   KnowledgeItemInfo,
+  KnowledgeReference,
   MetricTargetRange,
   PersistedDashboardState,
   SmartControlDecision,
@@ -92,6 +105,8 @@ import type {
   SmartControlParamKey,
   SmartControlParamState,
   StatusLevel,
+  RetrievalMode,
+  RetrievalStatus,
   TelemetryPayload,
   WeatherPayload,
   WeatherBundle,
@@ -177,8 +192,6 @@ interface SpeechRecognitionLike {
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
-type HistoryMetricKey = 'temperature' | 'humidity' | 'light' | 'co2' | 'soil_moisture' | 'soil_ec' | 'gas_resistance';
-
 interface HistoryMetricDefinition {
   key: HistoryMetricKey;
   name: string;
@@ -219,25 +232,10 @@ const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'temperature', name: '温度', unit: '摄氏度', color: '#D68C1F', value: (point) => point.temperature },
   { key: 'humidity', name: '湿度', unit: '%RH', color: '#2C7DA0', value: (point) => point.humidity },
   { key: 'light', name: '光照', unit: 'lux', color: '#E6B325', value: (point) => point.light },
-  { key: 'co2', name: 'CO2', unit: 'ppm', color: '#7A5CFA', value: (point) => point.co2 },
+  { key: 'co2', name: '二氧化碳', unit: 'ppm', color: '#7A5CFA', value: (point) => point.co2 },
   { key: 'soil_moisture', name: '土壤湿度', unit: '%', color: '#2F8F4E', value: (point) => point.soil_moisture },
-  { key: 'soil_ec', name: 'EC', unit: 'mS/cm', color: '#8A6A47', value: (point) => point.soil_ec },
+  { key: 'soil_ec', name: '土壤肥力', unit: 'mS/cm', color: '#8A6A47', value: (point) => point.soil_ec },
   { key: 'gas_resistance', name: '空气质量', unit: 'Ω', color: '#53645A', value: (point) => point.gas_resistance },
-];
-
-const commonWeatherCities: WeatherCityOption[] = [
-  { id: '无锡', name: '无锡', path: '无锡,江苏,中国' },
-  { id: '北京', name: '北京', path: '北京,北京,中国' },
-  { id: '上海', name: '上海', path: '上海,上海,中国' },
-  { id: '南京', name: '南京', path: '南京,江苏,中国' },
-  { id: '苏州', name: '苏州', path: '苏州,江苏,中国' },
-  { id: '杭州', name: '杭州', path: '杭州,浙江,中国' },
-  { id: '广州', name: '广州', path: '广州,广东,中国' },
-  { id: '深圳', name: '深圳', path: '深圳,广东,中国' },
-  { id: '成都', name: '成都', path: '成都,四川,中国' },
-  { id: '武汉', name: '武汉', path: '武汉,湖北,中国' },
-  { id: '西安', name: '西安', path: '西安,陕西,中国' },
-  { id: '郑州', name: '郑州', path: '郑州,河南,中国' },
 ];
 
 const navItems: NavItem[] = [
@@ -267,6 +265,8 @@ const weatherCity = ref('无锡');
 const weatherCityDraft = ref('无锡');
 const weatherCityOptions = ref<WeatherCityOption[]>([]);
 const weatherCityDropdownOpen = ref(false);
+const weatherPickerMode = ref<'provinces' | 'cities' | 'search'>('search');
+const weatherSelectedProvince = ref('');
 const weatherPanelOpen = ref(false);
 const weatherLoading = ref(false);
 const weatherError = ref('');
@@ -276,6 +276,10 @@ const aiAnalysisLoading = ref(false);
 const aiAnalysisCompletedAt = ref<number | null>(null);
 const pageVisible = ref(typeof document === 'undefined' || document.visibilityState === 'visible');
 const alarms = ref<AlarmRecord[]>([]);
+const deviceHealth = ref<DeviceHealth | null>(null);
+const alarmActionMessage = ref('');
+const acknowledgingAlarmId = ref('');
+const alarmSettingsSyncPending = ref(false);
 const commandResults = ref<CommandResult[]>([]);
 const diseaseResult = ref<DiseaseDetectionResult | null>(null);
 const diseaseImageUrl = ref('');
@@ -344,6 +348,10 @@ const knowledgeQuestion = ref('结合当前农情，给出水泵、补光灯、�
 const knowledgeAnswer = ref<KnowledgeAnalyzeResult | null>(null);
 const knowledgeLoading = ref(false);
 const knowledgeError = ref('');
+const agriSources = ref<AgriSourceInfo[]>([]);
+const agriSourcesLoading = ref(false);
+const agriSourceBusyId = ref<AgriSourceInfo['sourceId'] | null>(null);
+const agriSourceError = ref('');
 const selectedHistoryMetricKeys = ref<HistoryMetricKey[]>(historyMetricDefinitions.map((item) => item.key));
 const metricTargetRanges = ref<Record<HistoryMetricKey, MetricTargetRange>>({
   temperature: { min: 24, max: 30 },
@@ -415,7 +423,7 @@ const metricTargetInputSteps: Record<HistoryMetricKey, number> = {
 };
 
 const selectedKnowledgeBase = computed(() => knowledgeBases.value.find((item) => item.kbId === selectedKbId.value) ?? null);
-const activeAlarms = computed(() => alarms.value.filter((item) => !item.handled).length);
+const activeAlarms = computed(() => alarms.value.filter((item) => item.state === 'open').length);
 const diseasePhotoGroups = computed<DiseasePhotoGroup[]>(() => {
   const groupMap = new Map<string, DiseasePhotoGroup>();
   for (const photo of diseasePhotos.value) {
@@ -468,12 +476,53 @@ const weatherAlarmItems = computed<WeatherAlarmItem[]>(() => (
     ? weatherBundle.value.alarms.data
     : []
 ));
-const weatherSearchOptions = computed<WeatherCityOption[]>(() => (
-  weatherCityDraft.value.trim().length > 0 ? weatherCityOptions.value : commonWeatherCities
-));
+const weatherSearchOptions = computed<WeatherCityOption[]>(() => {
+  if (weatherPickerMode.value === 'provinces') {
+    return getWeatherRegions();
+  }
+  if (weatherPickerMode.value === 'cities') {
+    return getWeatherCitiesForProvince(weatherSelectedProvince.value);
+  }
+  return weatherCityOptions.value;
+});
 const weatherDisplayLocation = computed(() => weatherLocationLabel(currentWeather.value?.location || weatherCity.value));
 const weatherPanelTitle = computed(() => `${weatherDisplayLocation.value} 天气`);
 const weatherImpactTips = computed(() => buildWeatherImpactTips());
+const deviceDisplayName = computed(() => deviceHealth.value?.device_name || '一号大棚设备');
+const deviceOnlineLabel = computed(() => deviceHealth.value?.online === false ? '设备离线' : '设备在线');
+const deviceOnlineState = computed<StatusLevel>(() => deviceHealth.value?.online === false ? 'danger' : 'good');
+
+function lastDataUpdateText(timestamp?: number): string {
+  if (!timestamp) {
+    return '正在等待设备数据';
+  }
+  const elapsed = Math.max(0, Date.now() - timestamp);
+  if (elapsed < 60_000) {
+    return '数据刚刚更新';
+  }
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) {
+    return `数据更新于 ${minutes} 分钟前`;
+  }
+  return `最近更新 ${formatDateTime(timestamp)}`;
+}
+
+function alarmStateLabel(alarm: AlarmRecord): string {
+  if (alarm.state === 'resolved') {
+    return '已恢复';
+  }
+  if (alarm.state === 'acknowledged') {
+    return '已确认';
+  }
+  return '待处理';
+}
+
+function alarmStateLevel(alarm: AlarmRecord): StatusLevel {
+  if (alarm.state === 'resolved') {
+    return 'good';
+  }
+  return alarm.level === 'danger' ? 'danger' : 'watch';
+}
 
 const statusSummary = computed<Array<{ label: string; state: StatusLevel }>>(() => {
   const status = latest.value?.status;
@@ -481,8 +530,8 @@ const statusSummary = computed<Array<{ label: string; state: StatusLevel }>>(() 
     return [];
   }
   return [
-    { label: `Wi-Fi ${status.wifi === 'connected' ? '已连接' : '异常'}`, state: status.wifi === 'connected' ? 'good' : 'danger' },
-    { label: `MQTT ${status.mqtt === 'connected' ? '在线' : '离线'}`, state: status.mqtt === 'connected' ? 'good' : 'danger' },
+    { label: `设备网络${status.wifi === 'connected' ? '正常' : '异常'}`, state: status.wifi === 'connected' ? 'good' : 'danger' },
+    { label: `云端连接${status.mqtt === 'connected' ? '正常' : '中断'}`, state: status.mqtt === 'connected' ? 'good' : 'danger' },
     { label: status.fan ? '风机运行' : '风机待机', state: status.fan ? 'watch' : 'neutral' },
     { label: status.pump ? '水泵运行' : '水泵待机', state: status.pump ? 'watch' : 'neutral' },
     { label: status.light ? '补光开启' : '补光关闭', state: status.light ? 'watch' : 'neutral' },
@@ -588,6 +637,38 @@ function analysisStatusState(analysis: AiAnalysisResponse | null): StatusLevel {
     return riskScoreState(analysis.risk_score);
   }
   return analysis.risk_level === 'low' ? 'good' : analysis.risk_level === 'medium' ? 'watch' : 'danger';
+}
+
+function retrievalStatusLabel(status?: RetrievalStatus): string {
+  if (status === 'success') return '已联网检索';
+  if (status === 'partial') return '部分来源可用';
+  if (status === 'unavailable') return '在线资料暂不可用';
+  return '未使用联网资料';
+}
+
+function retrievalStatusState(status?: RetrievalStatus): StatusLevel {
+  if (status === 'success') return 'good';
+  if (status === 'partial') return 'watch';
+  return 'neutral';
+}
+
+function sourceStatusLabel(source: AgriSourceInfo): string {
+  if (!source.configured) return '待配置';
+  if (!source.enabled) return '已停用';
+  if (source.status === 'available') return '连接正常';
+  if (source.status === 'unavailable') return '连接异常';
+  return '等待检查';
+}
+
+function sourceStatusState(source: AgriSourceInfo): StatusLevel {
+  if (source.status === 'available') return 'good';
+  if (source.status === 'unavailable') return 'danger';
+  if (!source.configured) return 'watch';
+  return 'neutral';
+}
+
+function referenceKey(reference: KnowledgeReference): string {
+  return reference.referenceId || `${reference.sourceType || 'local'}-${reference.itemId || 0}-${reference.chunkId || 0}-${reference.title}`;
 }
 
 const aiRiskScore = computed(() => {
@@ -1312,13 +1393,13 @@ function metricDisplayTitle(key: HistoryMetricKey): string {
     return '光照强度';
   }
   if (key === 'co2') {
-    return 'CO2 浓度';
+    return '二氧化碳浓度';
   }
   if (key === 'soil_moisture') {
     return '土壤湿度';
   }
   if (key === 'soil_ec') {
-    return '土壤 EC';
+    return '土壤肥力';
   }
   return '空气质量';
 }
@@ -1663,8 +1744,17 @@ async function saveMetricTargetRange(): Promise<void> {
   targetRangeError.value = '';
   syncSmartControlValues();
   await savePersistentDashboardStateNow();
+  try {
+    await saveAlarmSettings(latest.value?.device_id ?? 'sensairshuttle_001', metricTargetRanges.value);
+    alarmSettingsSyncPending.value = false;
+  } catch (error) {
+    console.warn('Alarm reminder settings sync failed.', error);
+    alarmSettingsSyncPending.value = true;
+  }
   targetRangeSaving.value = false;
-  targetRangeSavedMessage.value = `已保存：${min} - ${max} ${selectedMetricDefinition.value?.unit ?? ''}`.trim();
+  targetRangeSavedMessage.value = alarmSettingsSyncPending.value
+    ? '目标范围已保存，报警提醒暂未同步，将自动重试'
+    : `已保存：${min} - ${max} ${selectedMetricDefinition.value?.unit ?? ''}`.trim();
   if (targetRangeSavedTimer) {
     window.clearTimeout(targetRangeSavedTimer);
   }
@@ -1672,6 +1762,46 @@ async function saveMetricTargetRange(): Promise<void> {
     targetRangeSavedMessage.value = '';
     targetRangeSavedTimer = undefined;
   }, 2200);
+}
+
+async function syncDeviceAlarmSettings(pushLocalRanges = false): Promise<void> {
+  const deviceId = latest.value?.device_id ?? 'sensairshuttle_001';
+  try {
+    if (pushLocalRanges) {
+      await saveAlarmSettings(deviceId, metricTargetRanges.value);
+      alarmSettingsSyncPending.value = false;
+      return;
+    }
+    const settings = await getAlarmSettings(deviceId, metricTargetRanges.value);
+    if (settings.configured) {
+      metricTargetRanges.value = persistedMetricTargetRanges(settings.ranges);
+      syncSmartControlValues();
+    } else {
+      await saveAlarmSettings(deviceId, metricTargetRanges.value);
+    }
+    alarmSettingsSyncPending.value = false;
+  } catch (error) {
+    console.warn('Alarm reminder settings unavailable.', error);
+    alarmSettingsSyncPending.value = true;
+  }
+}
+
+async function confirmAlarmHandled(alarm: AlarmRecord): Promise<void> {
+  if (alarm.state !== 'open' || acknowledgingAlarmId.value) {
+    return;
+  }
+  acknowledgingAlarmId.value = alarm.id;
+  alarmActionMessage.value = '';
+  try {
+    const updated = await acknowledgeAlarm(alarm.id);
+    alarms.value = alarms.value.map((item) => item.id === updated.id ? updated : item);
+    alarmActionMessage.value = '已确认处理，我们会继续观察后续数据。';
+  } catch (error) {
+    console.warn('Alarm acknowledgement failed.', error);
+    alarmActionMessage.value = '暂时无法确认，请稍后重试。';
+  } finally {
+    acknowledgingAlarmId.value = '';
+  }
 }
 
 function clampAssistantWidth(width: number): number {
@@ -1767,6 +1897,9 @@ function handleAssistantViewportResize(): void {
 watch(activeView, (view) => {
   if (view !== 'realtime') {
     closeMetricEditor();
+  }
+  if (view === 'knowledge' && agriSources.value.length === 0) {
+    void refreshAgriSources();
   }
   syncAiAnalysisSchedule();
   schedulePersistentDashboardStateSave();
@@ -1926,6 +2059,52 @@ function setKnowledgeError(action: string, error: unknown): void {
   knowledgeError.value = `${action}没有完成：${userErrorText(error)}`;
 }
 
+function replaceAgriSource(nextSource: AgriSourceInfo): void {
+  agriSources.value = agriSources.value.map((source) => (
+    source.sourceId === nextSource.sourceId ? nextSource : source
+  ));
+}
+
+async function refreshAgriSources(): Promise<void> {
+  agriSourcesLoading.value = true;
+  try {
+    agriSources.value = await getAgriSources();
+    agriSourceError.value = '';
+  } catch (error) {
+    agriSourceError.value = userErrorText(error, '在线农业知识源状态暂时无法获取。');
+  } finally {
+    agriSourcesLoading.value = false;
+  }
+}
+
+async function toggleAgriSource(source: AgriSourceInfo): Promise<void> {
+  if (agriSourceBusyId.value) return;
+  agriSourceBusyId.value = source.sourceId;
+  try {
+    replaceAgriSource(await updateAgriSource(source.sourceId, !source.enabled));
+    agriSourceError.value = '';
+  } catch (error) {
+    agriSourceError.value = userErrorText(error, '来源设置没有保存。');
+  } finally {
+    agriSourceBusyId.value = null;
+  }
+}
+
+async function testOnlineAgriSource(source: AgriSourceInfo): Promise<void> {
+  if (agriSourceBusyId.value) return;
+  agriSourceBusyId.value = source.sourceId;
+  try {
+    const result = await testAgriSource(source.sourceId);
+    replaceAgriSource(result.source);
+    agriSourceError.value = '';
+  } catch (error) {
+    agriSourceError.value = userErrorText(error, '测试连接没有完成。');
+    await refreshAgriSources();
+  } finally {
+    agriSourceBusyId.value = null;
+  }
+}
+
 async function refreshKnowledge(preferredKbId = selectedKbId.value): Promise<void> {
   try {
     const bases = await getKnowledgeBases();
@@ -2007,6 +2186,7 @@ async function searchWeatherCities(): Promise<void> {
     return;
   }
   try {
+    weatherPickerMode.value = 'search';
     weatherCityOptions.value = await getWeatherCities(query);
   } catch (error) {
     weatherCityOptions.value = [];
@@ -2016,6 +2196,7 @@ async function searchWeatherCities(): Promise<void> {
 
 function scheduleWeatherCitySearch(): void {
   weatherCityDropdownOpen.value = true;
+  weatherPickerMode.value = 'search';
   const query = weatherCityDraft.value.trim();
   if (weatherCitySearchTimer) {
     window.clearTimeout(weatherCitySearchTimer);
@@ -2023,6 +2204,7 @@ function scheduleWeatherCitySearch(): void {
   }
   if (!query) {
     weatherCityOptions.value = [];
+    weatherPickerMode.value = 'provinces';
     return;
   }
   weatherCitySearchTimer = window.setTimeout(() => {
@@ -2033,9 +2215,26 @@ function scheduleWeatherCitySearch(): void {
 
 function openWeatherCityDropdown(): void {
   weatherCityDropdownOpen.value = true;
+  weatherPickerMode.value = 'search';
   if (weatherCityDraft.value.trim()) {
     void searchWeatherCities();
   }
+}
+
+function openWeatherProvinceDropdown(): void {
+  weatherCityDropdownOpen.value = true;
+  weatherPickerMode.value = 'provinces';
+  weatherSelectedProvince.value = '';
+}
+
+function returnToWeatherProvinces(): void {
+  weatherSelectedProvince.value = '';
+  if (weatherCityDraft.value.trim()) {
+    weatherPickerMode.value = 'search';
+    void searchWeatherCities();
+    return;
+  }
+  weatherPickerMode.value = 'provinces';
 }
 
 async function applyWeatherCity(city = weatherCityDraft.value): Promise<void> {
@@ -2052,7 +2251,18 @@ async function applyWeatherCity(city = weatherCityDraft.value): Promise<void> {
 }
 
 async function selectWeatherCity(city: WeatherCityOption): Promise<void> {
+  if (city.level === 'province' && !city.direct) {
+    weatherSelectedProvince.value = city.name ?? '';
+    weatherPickerMode.value = 'cities';
+    return;
+  }
   await applyWeatherCity(weatherCityValue(city));
+}
+
+async function confirmWeatherCitySearch(): Promise<void> {
+  if (weatherSearchOptions.value.length === 1) {
+    await selectWeatherCity(weatherSearchOptions.value[0]);
+  }
 }
 
 function handleCameraAnalysisUpdated(result: DiseaseDetectionResult | null): void {
@@ -2077,17 +2287,17 @@ function syncAiAnalysisSchedule(): void {
     : Date.now() - aiAnalysisCompletedAt.value;
   const delay = Math.max(0, aiAnalysisIntervalMs - elapsed);
   if (delay === 0) {
-    void refreshAiAnalysis();
+    void refreshAiAnalysis('auto');
     return;
   }
 
   aiAnalysisTimer = window.setTimeout(() => {
     aiAnalysisTimer = undefined;
-    void refreshAiAnalysis();
+    void refreshAiAnalysis('auto');
   }, delay);
 }
 
-async function refreshAiAnalysis(): Promise<void> {
+async function refreshAiAnalysis(retrievalMode: RetrievalMode = 'force'): Promise<void> {
   if (aiAnalysisRequest) {
     return aiAnalysisRequest;
   }
@@ -2106,6 +2316,7 @@ async function refreshAiAnalysis(): Promise<void> {
         history: historyPoints.value,
         disease: diseaseResult.value,
         cameraAnalysis: cameraAnalysisResult.value,
+        retrievalMode,
       });
     } finally {
       aiAnalysisCompletedAt.value = Date.now();
@@ -2131,9 +2342,10 @@ async function loadDashboard(isBackground = false): Promise<void> {
   try {
     const nextLatest = mergePersistedDeviceStatus(await getLatestTelemetry());
     latest.value = nextLatest;
-    const [historyResult, alarmsResult, weatherResult] = await Promise.allSettled([
+    const [historyResult, alarmsResult, healthResult, weatherResult] = await Promise.allSettled([
       getDeviceHistory(),
       getAlarmRecords(),
+      getDeviceHealth(),
       loadWeather(weatherCity.value),
     ]);
     if (historyResult.status === 'fulfilled') {
@@ -2146,10 +2358,18 @@ async function loadDashboard(isBackground = false): Promise<void> {
     } else {
       console.warn('Alarm records failed to load.', alarmsResult.reason);
     }
+    if (healthResult.status === 'fulfilled') {
+      deviceHealth.value = healthResult.value;
+    } else {
+      console.warn('Device health failed to load.', healthResult.reason);
+    }
     if (weatherResult.status === 'rejected') {
       console.warn('Weather data failed to load.', weatherResult.reason);
     }
     syncSmartControlValues();
+    if (alarmSettingsSyncPending.value) {
+      void syncDeviceAlarmSettings(true);
+    }
   } finally {
     loading.value = false;
     refreshing.value = false;
@@ -3300,6 +3520,7 @@ async function sendChat(): Promise<void> {
       knowledge_bases: knowledgeBases.value,
       knowledge_items: knowledgeItems.value,
       command_results: commandResults.value,
+      retrieval_mode: 'auto',
     });
     const shouldFollowResponse = assistantAtBottom.value;
     await revealAssistantMessage(response.message, thinkingMessage.id, shouldFollowResponse);
@@ -3628,8 +3849,11 @@ async function initializeDashboard(): Promise<void> {
     syncSmartControlValues();
   }
   await loadDashboard();
+  await stateLoad;
+  await syncDeviceAlarmSettings();
   syncAiAnalysisSchedule();
   void refreshKnowledge(selectedKbId.value);
+  void refreshAgriSources();
   persistentStateReady = true;
   void stateLoad.then(() => {
     if (latest.value) {
@@ -3703,8 +3927,8 @@ onBeforeUnmount(() => {
           <Cpu :size="25" />
         </div>
         <div>
-          <strong>ESP32-C5</strong>
-          <span>智慧农业 Web</span>
+          <strong>智慧农业终端</strong>
+          <span>大棚管理平台</span>
         </div>
       </div>
 
@@ -3736,7 +3960,8 @@ onBeforeUnmount(() => {
           <h1>智慧大棚远程监控与 AI 管理平台</h1>
         </div>
         <div class="topbar__actions">
-          <StatusPill v-if="latest" :label="latest.device_id" state="neutral" />
+          <StatusPill :label="deviceDisplayName" state="neutral" />
+          <StatusPill :label="deviceOnlineLabel" :state="deviceOnlineState" />
           <StatusPill :label="`${activeAlarms} 条未处理报警`" :state="activeAlarms > 0 ? 'watch' : 'good'" />
           <button class="icon-button" type="button" title="刷新数据" @click="refreshDashboardAndCapture">
             <RefreshCw :class="{ spinning: refreshing }" :size="19" />
@@ -3746,16 +3971,16 @@ onBeforeUnmount(() => {
 
       <section v-if="loading" class="loading-panel">
         <Activity :size="34" />
-        <span>正在读取设备遥测数据...</span>
+        <span>正在读取大棚环境数据...</span>
       </section>
 
       <template v-else-if="latest">
         <section v-show="activeView === 'overview'" class="view-stack">
           <div class="hero-panel" :class="{ 'hero-panel--weather-open': weatherPanelOpen }">
             <div v-if="!weatherPanelOpen" class="hero-panel__copy">
-              <p class="eyebrow">端云协同状态</p>
-              <h2>设备正在上报温湿度、光照、CO2、土壤湿度和 EC 数据</h2>
-              <p>最近采样 {{ formatDateTime(latest.timestamp) }}，系统持续跟踪环境变化、作物健康和设备运行状态。</p>
+              <p class="eyebrow">大棚运行状态</p>
+              <h2>设备正在监测温湿度、光照、二氧化碳、土壤湿度和土壤肥力</h2>
+              <p>{{ lastDataUpdateText(deviceHealth?.last_telemetry_at ?? latest.timestamp) }}，系统持续跟踪环境变化、作物健康和设备运行状态。</p>
               <div class="hero-status-list">
                 <StatusPill v-for="item in statusSummary" :key="item.label" :label="item.label" :state="item.state" />
               </div>
@@ -3784,20 +4009,25 @@ onBeforeUnmount(() => {
                     placeholder="输入城市，如 无锡 / 北京 / 上海"
                     @focus="openWeatherCityDropdown"
                     @input="scheduleWeatherCitySearch"
-                    @keydown.enter.prevent="weatherSearchOptions[0] ? selectWeatherCity(weatherSearchOptions[0]) : applyWeatherCity()"
+                    @keydown.enter.prevent="confirmWeatherCitySearch"
                   />
-                  <button class="text-button" type="button" @click="openWeatherCityDropdown">切换城市</button>
+                  <button class="text-button" type="button" @click="openWeatherProvinceDropdown">切换城市</button>
                   <div v-if="weatherCityDropdownOpen" class="weather-city-dropdown">
+                    <div v-if="weatherPickerMode === 'cities'" class="weather-city-dropdown__header">
+                      <button type="button" @mousedown.prevent="returnToWeatherProvinces">返回省份</button>
+                      <strong>{{ weatherSelectedProvince }}</strong>
+                    </div>
                     <button
                       v-for="city in weatherSearchOptions"
                       :key="city.id || weatherCityLabel(city)"
                       type="button"
                       @mousedown.prevent="selectWeatherCity(city)"
                     >
-                      <strong>{{ weatherCityLabel(city).split(' · ')[0] }}</strong>
-                      <span>{{ weatherCityLabel(city).split(' · ').slice(1).join(' · ') || '常用城市' }}</span>
+                      <strong>{{ city.name }}</strong>
+                      <span v-if="city.level === 'province'">{{ city.direct ? '直接选择' : '查看市级地区' }}</span>
+                      <span v-else>{{ city.province || weatherCityLabel(city).split(' · ').slice(1).join(' · ') }}</span>
                     </button>
-                    <p v-if="weatherCityDraft.trim() && !weatherSearchOptions.length">没有找到相关城市</p>
+                    <p v-if="weatherPickerMode === 'search' && weatherCityDraft.trim() && !weatherSearchOptions.length">没有找到相关省市</p>
                   </div>
                 </div>
               </div>
@@ -3922,7 +4152,12 @@ onBeforeUnmount(() => {
                     :label="analysisStatusLabel(aiAnalysis)"
                     :state="analysisStatusState(aiAnalysis)"
                   />
-                  <button class="icon-button" type="button" title="立即重新生成 AI 摘要" :disabled="aiAnalysisLoading" @click="refreshAiAnalysis">
+                  <StatusPill
+                    v-if="aiAnalysis"
+                    :label="retrievalStatusLabel(aiAnalysis.retrievalStatus)"
+                    :state="retrievalStatusState(aiAnalysis.retrievalStatus)"
+                  />
+                  <button class="icon-button" type="button" title="立即重新生成 AI 摘要并联网查询" :disabled="aiAnalysisLoading" @click="refreshAiAnalysis('force')">
                     <RefreshCw :class="{ spinning: aiAnalysisLoading }" :size="18" />
                   </button>
                 </div>
@@ -3932,6 +4167,16 @@ onBeforeUnmount(() => {
               <ul class="suggestion-list">
                 <li v-for="suggestion in aiAnalysis?.suggestions" :key="suggestion">{{ suggestion }}</li>
               </ul>
+              <div v-if="aiAnalysis?.references?.length" class="reference-list reference-list--panel">
+                <strong>在线资料来源</strong>
+                <a
+                  v-for="refItem in aiAnalysis.references"
+                  :key="referenceKey(refItem)"
+                  :href="refItem.url || undefined"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >{{ refItem.sourceName || refItem.title }}：{{ refItem.title }}</a>
+              </div>
             </section>
           </div>
         </section>
@@ -4106,9 +4351,9 @@ onBeforeUnmount(() => {
                 <span>温度</span>
                 <span>湿度</span>
                 <span>光照</span>
-                <span>CO2</span>
+                <span>二氧化碳</span>
                 <span>土壤湿度</span>
-                <span>EC</span>
+                <span>土壤肥力</span>
               </div>
               <div v-for="point in historyPoints.slice(-8).reverse()" :key="point.timestamp" class="data-table__row">
                 <span>{{ formatDateTime(point.timestamp) }}</span>
@@ -4192,6 +4437,11 @@ onBeforeUnmount(() => {
             </div>
             <p v-if="diseaseLoading" class="summary-text">正在分析图片...</p>
             <template v-else-if="diseaseResult">
+              <StatusPill
+                v-if="diseaseResult.retrievalStatus"
+                :label="retrievalStatusLabel(diseaseResult.retrievalStatus)"
+                :state="retrievalStatusState(diseaseResult.retrievalStatus)"
+              />
               <p class="summary-text">{{ diseaseResult.summary }}</p>
               <div class="result-grid">
                 <article v-for="det in diseaseResult.detections" :key="det.id">
@@ -4203,6 +4453,16 @@ onBeforeUnmount(() => {
               <ul class="suggestion-list">
                 <li v-for="suggestion in diseaseResult.suggestions" :key="suggestion">{{ suggestion }}</li>
               </ul>
+              <div v-if="diseaseResult.references?.length" class="reference-list reference-list--panel">
+                <strong>识别结果参考资料</strong>
+                <a
+                  v-for="refItem in diseaseResult.references"
+                  :key="referenceKey(refItem)"
+                  :href="refItem.url || undefined"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >{{ refItem.sourceName || 'EPPO Global Database' }}｜{{ refItem.title }}</a>
+              </div>
             </template>
             <p v-else class="empty-text">暂无识别结果，上传图片后会显示健康问题、判断依据和处理建议。</p>
           </section>
@@ -4311,7 +4571,12 @@ onBeforeUnmount(() => {
                   :label="analysisStatusLabel(aiAnalysis)"
                   :state="analysisStatusState(aiAnalysis)"
                 />
-                <button class="icon-button" type="button" title="立即重新生成农事建议" :disabled="aiAnalysisLoading" @click="refreshAiAnalysis">
+                <StatusPill
+                  v-if="aiAnalysis"
+                  :label="retrievalStatusLabel(aiAnalysis.retrievalStatus)"
+                  :state="retrievalStatusState(aiAnalysis.retrievalStatus)"
+                />
+                <button class="icon-button" type="button" title="立即重新生成农事建议并联网查询" :disabled="aiAnalysisLoading" @click="refreshAiAnalysis('force')">
                   <RefreshCw :class="{ spinning: aiAnalysisLoading }" :size="18" />
                 </button>
               </div>
@@ -4334,6 +4599,16 @@ onBeforeUnmount(() => {
             <ul class="suggestion-list">
               <li v-for="basis in aiAnalysis?.basis" :key="basis">{{ basis }}</li>
             </ul>
+            <div v-if="aiAnalysis?.references?.length" class="reference-list reference-list--panel">
+              <strong>官方资料引用</strong>
+              <a
+                v-for="refItem in aiAnalysis.references"
+                :key="referenceKey(refItem)"
+                :href="refItem.url || undefined"
+                target="_blank"
+                rel="noopener noreferrer"
+              >{{ refItem.sourceName || '在线农业知识源' }}｜{{ refItem.title }}</a>
+            </div>
             <ul class="suggestion-list">
               <li v-for="command in aiAnalysis?.commands ?? []" :key="`${command.command}-${command.value}`">{{ aiCommandText(command) }}</li>
               <li v-if="(aiAnalysis?.commands ?? []).length === 0">暂无需要立即执行的设备操作。</li>
@@ -4475,6 +4750,56 @@ onBeforeUnmount(() => {
 
         <section v-show="activeView === 'knowledge'" class="view-stack">
           <p v-if="knowledgeError" class="form-error">{{ knowledgeError }}</p>
+          <section class="panel agri-sources-panel">
+            <div class="section-heading">
+              <div>
+                <h2>在线农业知识源</h2>
+                <span>仅接入固定官方来源，资料按需查询并临时缓存，不保存外部全文</span>
+              </div>
+              <button class="icon-button" type="button" title="刷新来源状态" :disabled="agriSourcesLoading" @click="refreshAgriSources">
+                <RefreshCw :class="{ spinning: agriSourcesLoading }" :size="18" />
+              </button>
+            </div>
+            <p v-if="agriSourceError" class="form-error">{{ agriSourceError }}</p>
+            <div class="agri-source-grid">
+              <article v-for="source in agriSources" :key="source.sourceId" class="agri-source-card">
+                <div class="agri-source-card__heading">
+                  <div>
+                    <strong>{{ source.name }}</strong>
+                    <span>{{ source.sourceType === 'api' ? '官方 API' : '官方公开网页' }}</span>
+                  </div>
+                  <StatusPill :label="sourceStatusLabel(source)" :state="sourceStatusState(source)" />
+                </div>
+                <p>{{ source.description }}</p>
+                <small>
+                  {{ source.lastCheckedAt ? `最近检查 ${formatDateTime(Date.parse(source.lastCheckedAt))}` : '尚未进行连接检查' }}
+                  <template v-if="source.lastError"> · {{ source.lastError }}</template>
+                </small>
+                <div class="agri-source-card__actions">
+                  <button
+                    class="toggle-switch"
+                    :class="{ 'toggle-switch--on': source.enabled }"
+                    type="button"
+                    :disabled="agriSourceBusyId !== null || !source.configured"
+                    :aria-label="`${source.enabled ? '停用' : '启用'} ${source.name}`"
+                    @click="toggleAgriSource(source)"
+                  >
+                    <span>停用</span><span>启用</span><i></i>
+                  </button>
+                  <button
+                    class="text-button"
+                    type="button"
+                    :disabled="agriSourceBusyId !== null || !source.configured"
+                    @click="testOnlineAgriSource(source)"
+                  >
+                    {{ agriSourceBusyId === source.sourceId ? '测试中...' : '测试连接' }}
+                  </button>
+                </div>
+                <em v-if="!source.configured">部署者配置 EPPO_API_KEY 后即可启用</em>
+              </article>
+              <p v-if="!agriSourcesLoading && agriSources.length === 0" class="empty-text">在线农业知识源状态暂时无法获取。</p>
+            </div>
+          </section>
           <div class="knowledge-layout">
             <section class="panel knowledge-parent-panel">
               <div class="section-heading">
@@ -4630,14 +4955,27 @@ onBeforeUnmount(() => {
               <h2>报警记录</h2>
               <span>来自环境监测、设备连接、作物健康和智能分析</span>
             </div>
+            <p v-if="alarmActionMessage" class="alarm-action-message">{{ alarmActionMessage }}</p>
             <div class="alarm-list">
+              <p v-if="alarms.length === 0" class="alarm-empty">当前没有需要处理的提醒，大棚运行状态正常。</p>
               <article v-for="alarm in alarms" :key="alarm.id" :class="`alarm-card alarm-card--${alarm.level}`">
                 <div>
                   <strong>{{ alarm.title }}</strong>
                   <span>{{ alarm.source }} · {{ formatDateTime(alarm.timestamp) }}</span>
                 </div>
                 <p>{{ alarm.detail }}</p>
-                <StatusPill :label="alarm.handled ? '已处理' : '待处理'" :state="alarm.handled ? 'good' : 'watch'" />
+                <div class="alarm-card__actions">
+                  <StatusPill :label="alarmStateLabel(alarm)" :state="alarmStateLevel(alarm)" />
+                  <button
+                    v-if="alarm.state === 'open'"
+                    class="text-button"
+                    type="button"
+                    :disabled="acknowledgingAlarmId === alarm.id"
+                    @click="confirmAlarmHandled(alarm)"
+                  >
+                    {{ acknowledgingAlarmId === alarm.id ? '正在确认' : '确认已处理' }}
+                  </button>
+                </div>
               </article>
             </div>
           </section>
@@ -4702,11 +5040,19 @@ onBeforeUnmount(() => {
             >
               <img v-if="message.image_url" :src="message.image_url" alt="问答附图" />
               <p>{{ message.content }}</p>
+              <StatusPill
+                v-if="message.role === 'assistant' && message.retrievalStatus && message.retrievalStatus !== 'not_used'"
+                :label="retrievalStatusLabel(message.retrievalStatus)"
+                :state="retrievalStatusState(message.retrievalStatus)"
+              />
               <div v-if="message.references?.length" class="reference-list">
-                <strong>引用知识</strong>
-                <span v-for="refItem in message.references" :key="`${message.id}-${refItem.itemId}-${refItem.chunkId}`">
-                  {{ refItem.title }}：{{ refItem.content }}
-                </span>
+                <strong>资料引用</strong>
+                <template v-for="refItem in message.references" :key="`${message.id}-${referenceKey(refItem)}`">
+                  <a v-if="refItem.url" :href="refItem.url" target="_blank" rel="noopener noreferrer">
+                    {{ refItem.sourceName || '在线农业知识源' }}｜{{ refItem.title }}：{{ refItem.content }}
+                  </a>
+                  <span v-else>{{ refItem.title }}：{{ refItem.content }}</span>
+                </template>
               </div>
               <div v-if="message.suggested_actions?.length" class="assistant-actions">
                 <strong>待确认操作</strong>

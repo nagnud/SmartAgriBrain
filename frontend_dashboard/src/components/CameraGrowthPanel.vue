@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Camera, Expand, Minimize2, Power, RefreshCw, ShieldAlert, Sparkles, X } from '@lucide/vue';
+import StatusPill from './StatusPill.vue';
 import { analyzeGrowthFrame } from '../services/api';
-import type { DiseaseDetectionResult } from '../types';
+import type { DiseaseDetectionResult, RetrievalStatus } from '../types';
 import { confidenceText, formatDateTime, userErrorText } from '../utils/format';
 
 type CameraMode = 'live' | 'analysis';
@@ -102,6 +103,19 @@ const autoAnalysisHint = computed(() => (
 
 function detectionSeverityClass(severity: GrowthSeverity): string {
   return `analysis-detect-box--${severity}`;
+}
+
+function retrievalStatusLabel(status?: RetrievalStatus): string {
+  if (status === 'success') return '已查询 EPPO';
+  if (status === 'partial') return 'EPPO 部分可用';
+  if (status === 'unavailable') return 'EPPO 资料暂不可用';
+  return '未使用在线资料';
+}
+
+function retrievalStatusState(status?: RetrievalStatus): 'good' | 'watch' | 'neutral' {
+  if (status === 'success') return 'good';
+  if (status === 'partial') return 'watch';
+  return 'neutral';
 }
 
 function readStoredAutoAnalysisEnabled(): boolean {
@@ -465,11 +479,26 @@ onBeforeUnmount(() => {
       </div>
       <p v-if="analysisError" class="form-error">{{ analysisError }}</p>
       <template v-if="growthAnalysis">
+        <StatusPill
+          v-if="growthAnalysis.retrievalStatus"
+          :label="retrievalStatusLabel(growthAnalysis.retrievalStatus)"
+          :state="retrievalStatusState(growthAnalysis.retrievalStatus)"
+        />
         <strong>{{ growthAnalysis.summary }}</strong>
         <p>{{ growthAnalysis.explanation }}</p>
         <ul>
           <li v-for="suggestion in growthAnalysis.suggestions" :key="suggestion">{{ suggestion }}</li>
         </ul>
+        <div v-if="growthAnalysis.references?.length" class="reference-list">
+          <strong>EPPO 参考资料</strong>
+          <a
+            v-for="reference in growthAnalysis.references"
+            :key="reference.referenceId || reference.title"
+            :href="reference.url || undefined"
+            target="_blank"
+            rel="noopener noreferrer"
+          >{{ reference.title }}</a>
+        </div>
       </template>
       <p v-else-if="!analysisError" class="summary-text">{{ autoAnalysisHint }}</p>
     </div>

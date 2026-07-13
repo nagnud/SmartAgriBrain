@@ -59,40 +59,55 @@ def strip_code_fence(content: str) -> str:
     return text
 
 
-def extract_chat_content(result: Dict[str, Any]) -> str:
+def extract_chat_message(result: Dict[str, Any]) -> Dict[str, Any]:
     choices = result.get("choices")
     if isinstance(choices, list) and choices:
         first = choices[0]
         if isinstance(first, dict):
             message = first.get("message")
-            if isinstance(message, dict) and message.get("content") is not None:
-                return str(message["content"])
+            if isinstance(message, dict):
+                return message
             if first.get("text") is not None:
-                return str(first["text"])
+                return {"role": "assistant", "content": str(first["text"])}
 
     output = result.get("output")
     if isinstance(output, dict):
         if output.get("text") is not None:
-            return str(output["text"])
+            return {"role": "assistant", "content": str(output["text"])}
         output_choices = output.get("choices")
         if isinstance(output_choices, list) and output_choices:
             first = output_choices[0]
             if isinstance(first, dict):
                 message = first.get("message")
-                if isinstance(message, dict) and message.get("content") is not None:
-                    return str(message["content"])
+                if isinstance(message, dict):
+                    return message
 
-    raise ValueError("DeepSeek response missing message content")
+    raise ValueError("DeepSeek response missing assistant message")
 
 
-def call_deepseek_chat(
-    messages: List[Dict[str, str]],
+def extract_chat_content(result: Dict[str, Any]) -> str:
+    message = extract_chat_message(result)
+    content = message.get("content")
+    if content is None:
+        raise ValueError("DeepSeek response missing message content")
+    return str(content)
+
+
+def call_deepseek_chat_message(
+    messages: List[Dict[str, Any]],
     *,
     max_tokens: int,
     timeout_seconds: Optional[float] = None,
     temperature: float = 0.3,
     response_format: Optional[Dict[str, str]] = None,
-) -> str:
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Call DeepSeek and return the complete assistant message.
+
+    Returning the complete message is required for Tool Calls because the next
+    request must echo both tool_calls and reasoning_content when present.
+    """
     api_key = deepseek_api_key()
     if not api_key:
         raise RuntimeError("DEEPSEEK_API_KEY is not configured")
@@ -105,6 +120,10 @@ def call_deepseek_chat(
     }
     if response_format is not None:
         body["response_format"] = response_format
+    if tools:
+        body["tools"] = tools
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
 
     thinking_mode = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
     if thinking_mode in {"enabled", "disabled", "auto"}:
@@ -125,4 +144,25 @@ def call_deepseek_chat(
             retry_body.pop("thinking", None)
             response = client.post(deepseek_chat_completion_url(), headers=headers, json=retry_body)
             response.raise_for_status()
-        return extract_chat_content(response.json())
+        return extract_chat_message(response.json())
+
+
+def call_deepseek_chat(
+    messages: List[Dict[str, Any]],
+    *,
+    max_tokens: int,
+    timeout_seconds: Optional[float] = None,
+    temperature: float = 0.3,
+    response_format: Optional[Dict[str, str]] = None,
+) -> str:
+    message = call_deepseek_chat_message(
+        messages,
+        max_tokens=max_tokens,
+        timeout_seconds=timeout_seconds,
+        temperature=temperature,
+        response_format=response_format,
+    )
+    content = message.get("content")
+    if content is None:
+        raise ValueError("DeepSeek response missing message content")
+    return str(content)

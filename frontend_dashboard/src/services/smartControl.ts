@@ -257,7 +257,7 @@ export function smartControlParamLabel(key: SmartControlParamKey): string {
   if (key === 'vent') {
     return '通风';
   }
-  return 'CO2';
+  return '二氧化碳';
 }
 
 export function smartControlParamColor(key: SmartControlParamKey): string {

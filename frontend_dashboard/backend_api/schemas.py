@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -30,6 +32,7 @@ class FarmAdviceRequest(BaseModel):
     history: List[Dict[str, Any]] = Field(default_factory=list)
     disease: Optional[Dict[str, Any]] = None
     camera_analysis: Optional[Dict[str, Any]] = None
+    retrieval_mode: Literal["auto", "force", "off"] = "auto"
 
 
 class FarmAdviceResponse(BaseModel):
@@ -44,15 +47,23 @@ class FarmAdviceResponse(BaseModel):
     suggestions: List[str] = Field(default_factory=list)
     commands: List[AiCommand] = Field(default_factory=list)
     basis: List[str] = Field(default_factory=list)
+    references: List["KnowledgeReference"] = Field(default_factory=list)
+    retrievalStatus: Literal["not_used", "success", "partial", "unavailable"] = "not_used"
     updated_at: int
 
 
 class KnowledgeReference(BaseModel):
-    itemId: int
-    chunkId: int
+    itemId: int = 0
+    chunkId: int = 0
     title: str
     content: str
     score: float = 0
+    referenceId: str = ""
+    sourceType: Literal["local", "online"] = "local"
+    sourceName: str = "本地知识库"
+    url: Optional[str] = None
+    publishedAt: Optional[str] = None
+    retrievedAt: Optional[str] = None
 
 
 AssistantActionType = Literal[
@@ -91,6 +102,7 @@ class AssistantChatRequest(BaseModel):
     knowledge_bases: List[Dict[str, Any]] = Field(default_factory=list)
     knowledge_items: List[Dict[str, Any]] = Field(default_factory=list)
     command_results: List[Dict[str, Any]] = Field(default_factory=list)
+    retrieval_mode: Literal["auto", "force", "off"] = "auto"
 
 
 class AssistantChatMessage(BaseModel):
@@ -106,6 +118,32 @@ class AssistantChatResponse(BaseModel):
     message: AssistantChatMessage
     references: List[KnowledgeReference] = Field(default_factory=list)
     actions: List[AssistantAction] = Field(default_factory=list)
+    retrievalStatus: Literal["not_used", "success", "partial", "unavailable"] = "not_used"
+
+
+class AgriSourceInfo(BaseModel):
+    sourceId: Literal["agrovoc", "eppo", "natesc"]
+    name: str
+    description: str
+    sourceType: Literal["api", "website"]
+    enabled: bool
+    configured: bool
+    status: Literal["unknown", "available", "unavailable", "needs_configuration", "disabled"]
+    lastCheckedAt: Optional[str] = None
+    lastError: str = ""
+
+
+class AgriSourceListResponse(BaseModel):
+    items: List[AgriSourceInfo] = Field(default_factory=list)
+
+
+class AgriSourceUpdateRequest(BaseModel):
+    enabled: bool
+
+
+class AgriSourceTestResponse(BaseModel):
+    source: AgriSourceInfo
+    sampleCount: int = 0
 
 
 class DiseasePhotoInfo(BaseModel):
