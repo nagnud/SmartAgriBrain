@@ -32,9 +32,26 @@ DATABASE_URL=sqlite:///./smartagribrain.db
 
 以后部署多人线上版时，可以在 `backend_api/.env` 中把 `DATABASE_URL` 改为 PostgreSQL 地址。
 
-设备默认继续使用 HTTP 通信。只有在 `backend_api/.env` 中同时设置 `MQTT_ENABLED=true`、MQTT 服务器地址和 `DEVICE_COMMAND_TRANSPORT=mqtt` 时，后端才会启用 MQTT；未配置时不会发起连接，也不会影响现有功能。
+站点级设备链路固定为 Web REST/SSE → FastAPI → Mosquitto → C5/S3。运行
+`scripts/setup/setup-local-mqtt.ps1` 会生成三个最小权限账号和被忽略的本地配置；
+`scripts/setup/test-mqtt-acl.ps1` 用于验证 C5/S3 不能读取对方主题。原有
+`/api/device/*` 仍保留为兼容层。
 
 AI 助手语音输入现在由浏览器 Web Speech API 实时写入输入框，不需要后端语音识别 API Key。
+
+## dev
+
+统一开发、构建和烧录脚本：
+
+- `scripts/dev/check-environment.ps1`：检查 Node 22、Python、PlatformIO、ESP-IDF、Mosquitto 和本地密钥文件。
+- `scripts/dev/start-full-stack.ps1`：后台启动 FastAPI 与 Vite，日志写入 `%LOCALAPPDATA%/SmartAgriBrain/logs`。
+- `scripts/dev/build-all.ps1`：依次运行后端测试、前端生产构建、S3 构建和 C5 构建。
+- `scripts/dev/build-c5.ps1`、`build-s3.ps1`：单独编译对应边缘端。
+- `scripts/dev/flash-c5.ps1`、`monitor-c5.ps1`：默认使用 COM5。
+- `scripts/dev/flash-s3.ps1`、`monitor-s3.ps1`：自动检测非 C5 的 USB 串口；有歧义时要求显式传入 `-Port COMx`。
+
+相同命令也已配置到 `.vscode/tasks.json`。PowerShell 脚本请用
+`-ExecutionPolicy Bypass` 运行。
 
 ## git
 

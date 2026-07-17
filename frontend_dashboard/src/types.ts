@@ -30,15 +30,82 @@ export interface TelemetryPayload {
   status: DeviceRuntimeStatus;
 }
 
+export type SiteActuatorTarget = 'pump' | 'heater' | 'grow_light';
+
+export interface SiteActuatorState {
+  supported: boolean;
+  desired: number | null;
+  actual: number | null;
+  unit: 'percent';
+  master_enabled?: boolean | null;
+}
+
+export interface EdgeDeviceState {
+  device_id: string;
+  role: 'sensor_actuator' | 'voice_display';
+  online: boolean;
+  last_seen_at: number;
+  status: Record<string, unknown>;
+}
+
+export interface SiteState {
+  schema_version: string;
+  site_id: string;
+  updated_at: number;
+  sensors: Record<string, number | null>;
+  quality: Record<string, string>;
+  actuators: Record<string, SiteActuatorState>;
+  devices: Record<string, EdgeDeviceState>;
+}
+
+export interface SiteCommandResult {
+  command_id: string;
+  site_id: string;
+  device_id: string;
+  target: SiteActuatorTarget;
+  value: number;
+  state: 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'expired';
+  created_at: number;
+  expires_at: number;
+  actual_value: number | null;
+  error: { code?: string; message?: string } | null;
+}
+
+export interface SharedAssistantAction {
+  id: string;
+  type: string;
+  risk: string;
+  state: string;
+  payload: Record<string, unknown>;
+  expires_at: number;
+}
+
+export interface SharedAssistantMessage {
+  id: string;
+  session_id: string;
+  site_id: string;
+  role: 'user' | 'assistant';
+  channel: string;
+  content: string;
+  created_at: number;
+  actions: SharedAssistantAction[];
+}
+
+export interface SharedAssistantConversation {
+  session_id: string;
+  messages: SharedAssistantMessage[];
+}
+
 export interface HistoryPoint {
   timestamp: number;
-  temperature: number;
-  humidity: number;
-  gas_resistance: number;
-  light: number;
-  co2: number;
-  soil_moisture: number;
-  soil_ec: number;
+  temperature: number | null;
+  light: number | null;
+  co2: number | null;
+  soil_moisture: number | null;
+  // Reserved for sensors that are not currently rendered in the Web UI.
+  humidity: number | null;
+  gas_resistance: number | null;
+  soil_ec: number | null;
 }
 
 export interface WeatherPayload {
@@ -155,6 +222,7 @@ export interface PersistedDashboardState {
   version: number;
   activeView?: string;
   selectedHistoryMetricKeys?: string[];
+  historyWindowDurationMs?: number;
   metricTargetRanges?: Record<string, MetricTargetRange>;
   deviceStatus?: DeviceRuntimeStatus;
   commandResults?: CommandResult[];
@@ -358,6 +426,7 @@ export interface ChatMessage {
   created_at: number;
   typing?: boolean;
   references?: KnowledgeReference[];
+  referencesVerified?: boolean;
   retrievalStatus?: RetrievalStatus;
   suggested_commands?: AiCommand[];
   suggested_actions?: AssistantAction[];

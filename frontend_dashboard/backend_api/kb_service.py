@@ -408,7 +408,7 @@ def search_knowledge_references(
         scored.append((raw_score, chunk, item))
 
     positive = [entry for entry in scored if entry[0] > 0]
-    selected = sorted(positive or scored[:limit], key=lambda entry: (entry[0], entry[1].id), reverse=True)[:limit]
+    selected = sorted(positive, key=lambda entry: (entry[0], entry[1].id), reverse=True)[:limit]
     references: List[KnowledgeReference] = []
     for index, (raw_score, chunk, item) in enumerate(selected):
         score = min(0.99, max(0.35, 0.55 + raw_score / 10 if raw_score > 0 else 0.35 - index * 0.03))

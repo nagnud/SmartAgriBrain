@@ -42,12 +42,20 @@ import type {
   WeatherPayload,
   HistoryMetricKey,
   RetrievalMode,
+  SharedAssistantAction,
+  SharedAssistantConversation,
+  SharedAssistantMessage,
+  SiteActuatorTarget,
+  SiteCommandResult,
+  SiteState,
 } from '../types';
 import { UserFacingError } from '../utils/format';
 import chinaWeatherRegions from '../../shared_data/china_weather_regions.json';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-const useMock = import.meta.env.VITE_USE_MOCK !== 'false';
+// Live telemetry is the default. Mock mode must be opted into explicitly so a
+// page reload never silently regenerates a synthetic history curve.
+const useMock = import.meta.env.VITE_USE_MOCK === 'true';
 const useMockAssistant = import.meta.env.VITE_USE_MOCK_ASSISTANT === undefined
   ? useMock
   : import.meta.env.VITE_USE_MOCK_ASSISTANT !== 'false';
@@ -61,6 +69,7 @@ const useMockWeather = import.meta.env.VITE_USE_MOCK_WEATHER === undefined
   ? useMock
   : import.meta.env.VITE_USE_MOCK_WEATHER !== 'false';
 const dashboardStateStorageKey = 'smartagribrain-dashboard-state';
+export const defaultSiteId = import.meta.env.VITE_SITE_ID || 'greenhouse_001';
 
 type RequestJsonInit = RequestInit & {
   timeoutMs?: number;
@@ -213,7 +222,113 @@ export async function getLatestTelemetry(): Promise<TelemetryPayload> {
   if (useMock) {
     return buildMockLatest();
   }
-  return requestJson<TelemetryPayload>('/api/device/latest');
+  return siteStateToTelemetry(await getSiteState());
+}
+
+export async function getSiteState(siteId = defaultSiteId): Promise<SiteState> {
+  return requestJson<SiteState>(`/api/v1/sites/${encodeURIComponent(siteId)}/state`);
+}
+
+export function siteStateToTelemetry(state: SiteState): TelemetryPayload {
+  const sensor = (key: string): number => {
+    const value = state.sensors[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : Number.NaN;
+  };
+  const actual = (key: string): number => state.actuators[key]?.actual ?? 0;
+  const devices = Object.values(state.devices);
+  const edgeOnline = devices.some((device) => device.online);
+  return {
+    device_id: Object.values(state.devices).find((device) => device.role === 'sensor_actuator')?.device_id
+      ?? 'greenhouse_001_s3',
+    timestamp: state.updated_at,
+    sensors: {
+      temperature: sensor('temperature_c'),
+      humidity: sensor('humidity_pct'),
+      pressure: sensor('pressure_kpa'),
+      gas_resistance: sensor('gas_resistance_ohm'),
+      light: sensor('illuminance_lux'),
+      co2: sensor('co2_ppm'),
+      soil_moisture: sensor('soil_moisture_pct'),
+      soil_ec: sensor('soil_ec_ms_cm'),
+    },
+    status: {
+      wifi: edgeOnline ? 'connected' : 'disconnected',
+      mqtt: edgeOnline ? 'connected' : 'disconnected',
+      fan: 0,
+      pump: actual('pump'),
+      light: actual('grow_light'),
+      alarm: 0,
+      curtain: 0,
+    },
+  };
+}
+
+export function subscribeSiteEvents(
+  onEvent: (eventType: string, data: unknown) => void,
+  onDisconnected: () => void,
+  onConnected: () => void,
+  siteId = defaultSiteId,
+): () => void {
+  const source = new EventSource(`${apiBaseUrl}/api/v1/sites/${encodeURIComponent(siteId)}/events`);
+  const eventNames = ['telemetry', 'device_status', 'capabilities', 'command_update', 'assistant_message', 'assistant_action'];
+  for (const eventName of eventNames) {
+    source.addEventListener(eventName, (event) => {
+      try {
+        onEvent(eventName, JSON.parse((event as MessageEvent<string>).data));
+      } catch (error) {
+        console.warn('Invalid site event payload.', { eventName, error });
+      }
+    });
+  }
+  source.onopen = onConnected;
+  source.onerror = onDisconnected;
+  return () => source.close();
+}
+
+export async function sendSiteCommand(
+  target: SiteActuatorTarget,
+  value: number,
+  reason: string,
+  source: 'web_manual' | 'edge_voice' | 'smart_control' = 'web_manual',
+  siteId = defaultSiteId,
+): Promise<SiteCommandResult> {
+  return requestJson<SiteCommandResult>(`/api/v1/sites/${encodeURIComponent(siteId)}/commands`, {
+    method: 'POST',
+    body: JSON.stringify({ target, value: Math.round(value), reason, source }),
+  });
+}
+
+export async function getSharedAssistantConversation(
+  sessionId?: string,
+  siteId = defaultSiteId,
+): Promise<SharedAssistantConversation> {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+  return requestJson<SharedAssistantConversation>(
+    `/api/v1/sites/${encodeURIComponent(siteId)}/assistant/conversation${query}`,
+  );
+}
+
+export async function sendSharedAssistantMessage(
+  text: string,
+  sessionId?: string,
+  siteId = defaultSiteId,
+): Promise<SharedAssistantMessage> {
+  return requestJson<SharedAssistantMessage>(`/api/v1/sites/${encodeURIComponent(siteId)}/assistant/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ text, session_id: sessionId || null, channel: 'web' }),
+    timeoutMs: 120000,
+  });
+}
+
+export async function decideSharedAssistantAction(
+  actionId: string,
+  decision: 'confirm' | 'cancel',
+  siteId = defaultSiteId,
+): Promise<SharedAssistantAction> {
+  return requestJson<SharedAssistantAction>(
+    `/api/v1/sites/${encodeURIComponent(siteId)}/assistant/actions/${encodeURIComponent(actionId)}/decision`,
+    { method: 'POST', body: JSON.stringify({ decision }) },
+  );
 }
 
 export async function getDeviceHistory(): Promise<HistoryPoint[]> {
@@ -221,6 +336,15 @@ export async function getDeviceHistory(): Promise<HistoryPoint[]> {
     return buildMockHistory();
   }
   return requestJson<HistoryPoint[]>('/api/device/history');
+}
+
+export async function getSiteHistory(hours = 6, siteId = defaultSiteId): Promise<HistoryPoint[]> {
+  if (useMock) {
+    return buildMockHistory();
+  }
+  return requestJson<HistoryPoint[]>(
+    `/api/v1/sites/${encodeURIComponent(siteId)}/history?hours=${Math.min(Math.max(Math.round(hours), 1), 24)}`,
+  );
 }
 
 export async function getDeviceStatus(): Promise<TelemetryPayload['status']> {

@@ -19,6 +19,7 @@ backend_api/uploads/
 node_modules/
 dist/
 tsconfig.tsbuildinfo
+.npm-cache/
 
 # Local push cache
 .push-cache/
@@ -28,14 +29,16 @@ scripts/git/push*.md
 
 # Local secrets and credentials
 .env
+.env*.local
 *.pem
 *.key
 id_rsa*
 id_ed25519*
 
 # VS Code
-.vscode/
+.vscode/*
 !.vscode/settings.example.json
+!.vscode/tasks.json
 
 # System
 .DS_Store

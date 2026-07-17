@@ -42,6 +42,7 @@ import {
 } from '@lucide/vue';
 import CameraGrowthPanel from './components/CameraGrowthPanel.vue';
 import EChartPanel from './components/EChartPanel.vue';
+import MarkdownContent from './components/MarkdownContent.vue';
 import StatusPill from './components/StatusPill.vue';
 import {
   addKnowledgeItem,
@@ -50,6 +51,7 @@ import {
   analyzeFarm,
   analyzeKnowledge,
   createKnowledgeBase,
+  decideSharedAssistantAction,
   deleteDiseasePhoto,
   deleteKnowledgeBase,
   deleteKnowledgeItem,
@@ -57,7 +59,6 @@ import {
   getAlarmSettings,
   getAgriSources,
   getDiseasePhotos,
-  getDeviceHistory,
   getDeviceHealth,
   getCurrentWeather,
   getWeatherBundle,
@@ -68,11 +69,18 @@ import {
   getKnowledgeItems,
   getLatestTelemetry,
   getPersistedDashboardState,
+  getSharedAssistantConversation,
+  getSiteHistory,
+  getSiteState,
   savePersistedDashboardState,
   saveAlarmSettings,
   saveDiseasePhotoAnalysis,
   sendDeviceCommand,
   sendExpertChatMessage,
+  sendSharedAssistantMessage,
+  sendSiteCommand,
+  siteStateToTelemetry,
+  subscribeSiteEvents,
   testAgriSource,
   updateAgriSource,
   updateKnowledgeBase,
@@ -104,6 +112,12 @@ import type {
   SmartControlDemands,
   SmartControlParamKey,
   SmartControlParamState,
+  SharedAssistantAction,
+  SharedAssistantConversation,
+  SiteActuatorState,
+  SiteActuatorTarget,
+  SiteCommandResult,
+  SiteState,
   StatusLevel,
   RetrievalMode,
   RetrievalStatus,
@@ -197,7 +211,7 @@ interface HistoryMetricDefinition {
   name: string;
   unit: string;
   color: string;
-  value: (point: HistoryPoint) => number;
+  value: (point: HistoryPoint) => number | null;
 }
 
 interface SmartControlParamVm {
@@ -230,13 +244,16 @@ interface MetricEditorSourceRect extends MetricEditorRect {
 
 const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'temperature', name: '温度', unit: '摄氏度', color: '#D68C1F', value: (point) => point.temperature },
-  { key: 'humidity', name: '湿度', unit: '%RH', color: '#2C7DA0', value: (point) => point.humidity },
   { key: 'light', name: '光照', unit: 'lux', color: '#E6B325', value: (point) => point.light },
   { key: 'co2', name: '二氧化碳', unit: 'ppm', color: '#7A5CFA', value: (point) => point.co2 },
   { key: 'soil_moisture', name: '土壤湿度', unit: '%', color: '#2F8F4E', value: (point) => point.soil_moisture },
-  { key: 'soil_ec', name: '土壤肥力', unit: 'mS/cm', color: '#8A6A47', value: (point) => point.soil_ec },
-  { key: 'gas_resistance', name: '空气质量', unit: 'Ω', color: '#53645A', value: (point) => point.gas_resistance },
 ];
+
+const historySampleIntervalMs = 10_000;
+const historyWindowMinDurationMs = 5 * 60 * 1000;
+const historyWindowMaxDurationMs = 12 * 60 * 60 * 1000;
+const historyWindowDefaultDurationMs = 6 * 60 * 60 * 1000;
+const historyChartPointCount = 30;
 
 const navItems: NavItem[] = [
   { key: 'overview', label: '首页总览', icon: Home },
@@ -271,6 +288,9 @@ const weatherPanelOpen = ref(false);
 const weatherLoading = ref(false);
 const weatherError = ref('');
 const historyPoints = ref<HistoryPoint[]>([]);
+const historyWindowEnd = ref(Math.floor(Date.now() / historySampleIntervalMs) * historySampleIntervalMs);
+const historyWindowDurationMs = ref(historyWindowDefaultDurationMs);
+const historyWindowSliderValue = ref(historySliderValueForDuration(historyWindowDefaultDurationMs));
 const aiAnalysis = ref<AiAnalysisResponse | null>(null);
 const aiAnalysisLoading = ref(false);
 const aiAnalysisCompletedAt = ref<number | null>(null);
@@ -281,6 +301,13 @@ const alarmActionMessage = ref('');
 const acknowledgingAlarmId = ref('');
 const alarmSettingsSyncPending = ref(false);
 const commandResults = ref<CommandResult[]>([]);
+const siteState = ref<SiteState | null>(null);
+const siteCommandResults = ref<SiteCommandResult[]>([]);
+const siteEventsConnected = ref(false);
+const sharedAssistantConversation = ref<SharedAssistantConversation>({ session_id: '', messages: [] });
+const sharedAssistantInput = ref('');
+const sharedAssistantBusy = ref(false);
+const sharedAssistantActionBusy = ref('');
 const diseaseResult = ref<DiseaseDetectionResult | null>(null);
 const diseaseImageUrl = ref('');
 const diseaseImageLoadError = ref(false);
@@ -385,6 +412,8 @@ const metricEditorStyle = ref<Record<string, string>>({
 const loading = ref(true);
 const refreshing = ref(false);
 let refreshTimer: number | undefined;
+let historyCalibrationTimer: number | undefined;
+let closeSiteEvents: (() => void) | undefined;
 let aiAnalysisTimer: number | undefined;
 let aiAnalysisRequest: Promise<void> | null = null;
 let metricEditorTimer: number | undefined;
@@ -491,6 +520,46 @@ const weatherImpactTips = computed(() => buildWeatherImpactTips());
 const deviceDisplayName = computed(() => deviceHealth.value?.device_name || '一号大棚设备');
 const deviceOnlineLabel = computed(() => deviceHealth.value?.online === false ? '设备离线' : '设备在线');
 const deviceOnlineState = computed<StatusLevel>(() => deviceHealth.value?.online === false ? 'danger' : 'good');
+const s3State = computed(() => Object.values(siteState.value?.devices ?? {}).find((item) => item.role === 'sensor_actuator'));
+const c5State = computed(() => Object.values(siteState.value?.devices ?? {}).find((item) => item.role === 'voice_display'));
+const siteActuatorDefinitions: Array<{ target: SiteActuatorTarget; label: string; icon: Component }> = [
+  { target: 'pump', label: '水泵', icon: Droplets },
+  { target: 'heater', label: '加热器', icon: Thermometer },
+  { target: 'grow_light', label: '补光灯', icon: Lightbulb },
+];
+const siteActuatorCards = computed(() => siteActuatorDefinitions.map((definition) => ({
+  ...definition,
+  state: siteState.value?.actuators[definition.target] ?? {
+    supported: false,
+    desired: null,
+    actual: null,
+    unit: 'percent' as const,
+  },
+})));
+
+function actuatorValueText(value: number | null): string {
+  return value === null ? '-- / 不可用' : `${Math.round(value)}%`;
+}
+
+function actuatorMasterEnabled(state: SiteActuatorState): boolean {
+  return typeof state.master_enabled === 'boolean'
+    ? state.master_enabled
+    : (state.actual ?? 0) > 0;
+}
+
+function siteCommandValueText(result: SiteCommandResult): string {
+  return result.value > 0 ? '总开关开启' : '总开关关闭';
+}
+
+function siteCommandStateText(state: SiteCommandResult['state']): string {
+  return {
+    queued: '等待发送',
+    dispatched: '已发送，等待设备回执',
+    succeeded: 'S3 已确认执行',
+    failed: '执行失败',
+    expired: '指令已过期',
+  }[state];
+}
 
 function lastDataUpdateText(timestamp?: number): string {
   if (!timestamp) {
@@ -553,7 +622,7 @@ const metricCards = computed<MetricCardVm[]>(() => {
       title: metricDisplayTitle(definition.key),
       value: metricValueText(definition.key, currentValue),
       unit: definition.unit,
-      hint: metricHint(status.kind, definition.key),
+      hint: Number.isFinite(currentValue) ? metricHint(status.kind, definition.key) : '传感器未接入或当前数据异常',
       state: status.state,
       icon: metricIcon(definition.key),
       color: definition.color,
@@ -561,7 +630,7 @@ const metricCards = computed<MetricCardVm[]>(() => {
       statusLabel: status.label,
       targetText: `目标 ${range.min}-${range.max} ${definition.unit}`,
       trendText: metricTrendText(definition),
-      aiInsight: metricAiInsight(status.kind, definition.key),
+      aiInsight: Number.isFinite(currentValue) ? metricAiInsight(status.kind, definition.key) : '当前没有可靠数据，不参与智能判断。',
     };
   });
 });
@@ -820,13 +889,15 @@ function metricChartOptionFor(metric: HistoryMetricDefinition | null): EChartsOp
   if (!metric) {
     return {};
   }
-  const labels = historyPoints.value.map((point) => formatTime(point.timestamp));
   const values = historyPoints.value.map(metric.value);
   const range = historyAxisRange(values);
   return {
     tooltip: { trigger: 'axis' },
     grid: { left: 58, right: 24, top: 34, bottom: 30 },
-    xAxis: { type: 'category', boundaryGap: false, data: labels },
+    xAxis: {
+      type: 'time',
+      axisLabel: { formatter: (value: number) => formatTime(value) },
+    },
     yAxis: {
       type: 'value',
       name: `${metric.name}(${metric.unit})`,
@@ -845,7 +916,8 @@ function metricChartOptionFor(metric: HistoryMetricDefinition | null): EChartsOp
       showSymbol: true,
       symbol: 'circle',
       symbolSize: 7,
-      data: values,
+      data: historyPoints.value.map((point) => [point.timestamp, metric.value(point)]),
+      connectNulls: false,
       color: metric.color,
       lineStyle: { width: 3, color: metric.color },
       itemStyle: { color: '#ffffff', borderColor: metric.color, borderWidth: 2 },
@@ -856,6 +928,11 @@ function metricChartOptionFor(metric: HistoryMetricDefinition | null): EChartsOp
 
 const overviewChartOption = computed<EChartsOption>(() => buildMultiMetricChartOption(false));
 const historyChartOption = computed<EChartsOption>(() => buildMultiMetricChartOption(true));
+const historyWindowStart = computed(() => historyWindowEnd.value - historyWindowDurationMs.value);
+const historyChartPoints = computed<HistoryPoint[]>(() => (
+  buildHistoryChartPoints(historyPoints.value, historyWindowStart.value, historyWindowEnd.value)
+));
+const historyWindowDurationLabel = computed(() => historyWindowDurationText(historyWindowDurationMs.value));
 const multiMetricChartMinWidth = computed(() => {
   const selectedCount = selectedHistoryMetricKeys.value.length;
   const layout = multiMetricAxisLayout(selectedCount);
@@ -876,7 +953,6 @@ function multiMetricAxisLayout(selectedCount: number): { left: number; right: nu
 }
 
 function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
-  const labels = historyPoints.value.map((point) => formatTime(point.timestamp));
   const selectedDefinitions = historyMetricDefinitions.filter((item) => selectedHistoryMetricKeys.value.includes(item.key));
   const selectedCount = selectedDefinitions.length;
   const axisLayout = multiMetricAxisLayout(selectedCount);
@@ -893,9 +969,15 @@ function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
       top: axisLayout.top,
       bottom: 34,
     },
-    xAxis: { type: 'category', boundaryGap: false, data: labels },
+    xAxis: {
+      type: 'time',
+      min: historyWindowStart.value,
+      max: historyWindowEnd.value,
+      axisLabel: { formatter: (value: number) => formatTime(value) },
+      splitLine: { show: false },
+    },
     yAxis: selectedDefinitions.map((definition, index) => {
-      const values = historyPoints.value.map(definition.value);
+      const values = historyChartPoints.value.map(definition.value);
       const range = historyAxisRange(values);
       return {
         type: 'value',
@@ -926,7 +1008,8 @@ function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
       symbol: 'circle',
       symbolSize: showSymbols ? 6 : 8,
       yAxisIndex: index,
-      data: historyPoints.value.map(definition.value),
+      data: historyChartPoints.value.map((point) => [point.timestamp, definition.value(point)]),
+      connectNulls: false,
       color: definition.color,
       lineStyle: { width: 3, color: definition.color },
       itemStyle: { color: '#ffffff', borderColor: definition.color, borderWidth: 2, opacity: showSymbols ? 1 : 0 },
@@ -939,12 +1022,107 @@ function buildMultiMetricChartOption(showSymbols: boolean): EChartsOption {
   };
 }
 
-function historyAxisRange(values: number[]): { min: number; max: number } {
-  if (values.length === 0) {
+function historyMinute(timestamp: number): number {
+  return Math.floor(timestamp / historySampleIntervalMs) * historySampleIntervalMs;
+}
+
+function clampHistorySliderValue(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+function normalizeHistoryWindowDuration(value: number): number {
+  const rounded = Math.round(value / historySampleIntervalMs) * historySampleIntervalMs;
+  return Math.min(historyWindowMaxDurationMs, Math.max(historyWindowMinDurationMs, rounded));
+}
+
+function historyWindowDurationForSlider(sliderValue: number): number {
+  const fraction = clampHistorySliderValue(sliderValue) / 100;
+  const rawDuration = historyWindowMinDurationMs * Math.pow(
+    historyWindowMaxDurationMs / historyWindowMinDurationMs,
+    fraction,
+  );
+  return normalizeHistoryWindowDuration(rawDuration);
+}
+
+function historySliderValueForDuration(durationMs: number): number {
+  const normalizedDuration = normalizeHistoryWindowDuration(durationMs);
+  const fraction = Math.log(normalizedDuration / historyWindowMinDurationMs)
+    / Math.log(historyWindowMaxDurationMs / historyWindowMinDurationMs);
+  return Math.round(clampHistorySliderValue(fraction * 100));
+}
+
+function historyWindowDurationText(durationMs: number): string {
+  const minutes = Math.round(durationMs / 60_000);
+  if (minutes < 60) {
+    return `${minutes} 分钟`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder === 0 ? `${hours} 小时` : `${hours} 小时 ${remainder} 分钟`;
+}
+
+function updateHistoryWindowSlider(event: Event): void {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  historyWindowSliderValue.value = clampHistorySliderValue(Number(target.value));
+  historyWindowDurationMs.value = historyWindowDurationForSlider(historyWindowSliderValue.value);
+  schedulePersistentDashboardStateSave();
+}
+
+function buildHistoryChartPoints(
+  rawPoints: HistoryPoint[],
+  windowStart: number,
+  windowEnd: number,
+): HistoryPoint[] {
+  const pointIntervalMs = (windowEnd - windowStart) / historyChartPointCount;
+  const latestPointBySlot = new Map<number, HistoryPoint>();
+  rawPoints.forEach((point) => {
+    if (
+      !Number.isFinite(point.timestamp)
+      || point.timestamp < windowStart
+      || point.timestamp >= windowEnd + historySampleIntervalMs
+    ) {
+      return;
+    }
+    const slot = Math.min(
+      historyChartPointCount - 1,
+      Math.floor((point.timestamp - windowStart) / pointIntervalMs),
+    );
+    const existing = latestPointBySlot.get(slot);
+    if (!existing || point.timestamp >= existing.timestamp) {
+      latestPointBySlot.set(slot, point);
+    }
+  });
+
+  const points: HistoryPoint[] = [];
+  for (let slot = 0; slot < historyChartPointCount; slot += 1) {
+    const slotTimestamp = windowStart + slot * pointIntervalMs;
+    const point = latestPointBySlot.get(slot);
+    points.push({
+      timestamp: point ? Math.min(point.timestamp, windowEnd) : slotTimestamp,
+      temperature: point?.temperature ?? null,
+      light: point?.light ?? null,
+      co2: point?.co2 ?? null,
+      soil_moisture: point?.soil_moisture ?? null,
+      humidity: point?.humidity ?? null,
+      gas_resistance: point?.gas_resistance ?? null,
+      soil_ec: point?.soil_ec ?? null,
+    });
+  }
+  return points;
+}
+
+function historyAxisRange(values: Array<number | null>): { min: number; max: number } {
+  const finiteValues = values.filter((value): value is number => (
+    typeof value === 'number' && Number.isFinite(value)
+  ));
+  if (finiteValues.length === 0) {
     return { min: 0, max: 1 };
   }
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
+  const minValue = Math.min(...finiteValues);
+  const maxValue = Math.max(...finiteValues);
   const rawRange = maxValue - minValue;
   const padding = rawRange > 0 ? rawRange * 0.16 : Math.max(Math.abs(maxValue) * 0.08, 1);
   const min = minValue - padding;
@@ -1151,6 +1329,7 @@ function persistedChatMessages(value: unknown): ChatMessage[] {
   )).map((item) => ({
     ...item,
     typing: false,
+    references: item.referencesVerified === true ? item.references : [],
     image_url: item.image_url?.startsWith('blob:') ? undefined : item.image_url,
   })).slice(-30);
 }
@@ -1207,6 +1386,7 @@ function serializeDashboardState(): PersistedDashboardState {
     version: 1,
     activeView: activeView.value,
     selectedHistoryMetricKeys: [...selectedHistoryMetricKeys.value],
+    historyWindowDurationMs: historyWindowDurationMs.value,
     metricTargetRanges: metricTargetRanges.value,
     deviceStatus: latest.value?.status ?? persistedDeviceStatus ?? undefined,
     commandResults: commandResults.value.slice(0, 10),
@@ -1276,6 +1456,10 @@ async function loadPersistentDashboardState(): Promise<void> {
       if (historyKeys.length > 0) {
         selectedHistoryMetricKeys.value = historyKeys;
       }
+    }
+    if (typeof state.historyWindowDurationMs === 'number' && Number.isFinite(state.historyWindowDurationMs)) {
+      historyWindowDurationMs.value = normalizeHistoryWindowDuration(state.historyWindowDurationMs);
+      historyWindowSliderValue.value = historySliderValueForDuration(historyWindowDurationMs.value);
     }
     metricTargetRanges.value = persistedMetricTargetRanges(state.metricTargetRanges);
     if (isDeviceRuntimeStatus(state.deviceStatus)) {
@@ -1359,7 +1543,7 @@ function toggleHistoryMetric(key: HistoryMetricKey): void {
 function currentMetricValue(key: HistoryMetricKey): number {
   const sensors = latest.value?.sensors;
   if (!sensors) {
-    return 0;
+    return Number.NaN;
   }
   if (key === 'temperature') {
     return sensors.temperature;
@@ -1427,6 +1611,9 @@ function metricIcon(key: HistoryMetricKey): Component {
 }
 
 function metricValueText(key: HistoryMetricKey, value: number): string {
+  if (!Number.isFinite(value)) {
+    return '--';
+  }
   if (key === 'soil_ec') {
     return numberText(value, 2);
   }
@@ -1437,6 +1624,9 @@ function metricValueText(key: HistoryMetricKey, value: number): string {
 }
 
 function metricTargetStatus(value: number, range: MetricTargetRange): { kind: 'high' | 'low' | 'normal'; label: string; state: 'danger' | 'low' | 'good' } {
+  if (!Number.isFinite(value)) {
+    return { kind: 'normal', label: '不可用', state: 'low' };
+  }
   if (value > range.max) {
     return { kind: 'high', label: '过高', state: 'danger' };
   }
@@ -1469,11 +1659,14 @@ function metricHint(kind: 'high' | 'low' | 'normal', key: HistoryMetricKey): str
 }
 
 function metricTrendText(definition: HistoryMetricDefinition): string {
-  if (historyPoints.value.length < 2) {
+  const values = historyPoints.value
+    .map(definition.value)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (values.length < 2) {
     return '等待更多采样';
   }
-  const current = definition.value(historyPoints.value[historyPoints.value.length - 1]);
-  const previous = definition.value(historyPoints.value[historyPoints.value.length - 2]);
+  const current = values[values.length - 1];
+  const previous = values[values.length - 2];
   const diff = current - previous;
   if (Math.abs(diff) < 0.01) {
     return '最近趋势平稳';
@@ -2333,6 +2526,73 @@ function handleDocumentVisibilityChange(): void {
   pageVisible.value = document.visibilityState === 'visible';
 }
 
+function numberSensor(sensors: Record<string, number | null>, key: string): number | null {
+  const value = sensors[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function mergeRealHistoryPoints(...sources: HistoryPoint[][]): HistoryPoint[] {
+  const cutoff = historyMinute(Date.now()) - historyWindowMaxDurationMs;
+  const latestPointByMinute = new Map<number, HistoryPoint>();
+  sources.forEach((points) => {
+    points.forEach((point) => {
+      if (!Number.isFinite(point.timestamp) || point.timestamp < cutoff) {
+        return;
+      }
+      const bucket = historyMinute(point.timestamp);
+      const existing = latestPointByMinute.get(bucket);
+      if (!existing || point.timestamp >= existing.timestamp) {
+        latestPointByMinute.set(bucket, point);
+      }
+    });
+  });
+  return [...latestPointByMinute.values()].sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function refreshHistoryWindowEnd(): void {
+  const latestTimestamp = historyPoints.value.reduce<number | null>((latest, point) => (
+    latest === null || point.timestamp > latest ? point.timestamp : latest
+  ), null);
+  historyWindowEnd.value = historyMinute(latestTimestamp ?? Date.now());
+}
+
+function mergeLiveHistoryPoint(state: SiteState): void {
+  const temperature = numberSensor(state.sensors, 'temperature_c');
+  const light = numberSensor(state.sensors, 'illuminance_lux');
+  const co2 = numberSensor(state.sensors, 'co2_ppm');
+  const soilMoisture = numberSensor(state.sensors, 'soil_moisture_pct');
+  if (temperature === null && light === null && co2 === null && soilMoisture === null) {
+    return;
+  }
+  const timestamp = state.updated_at || Date.now();
+  const point: HistoryPoint = {
+    timestamp,
+    temperature,
+    light,
+    co2,
+    soil_moisture: soilMoisture,
+    humidity: numberSensor(state.sensors, 'humidity_pct'),
+    gas_resistance: numberSensor(state.sensors, 'gas_resistance_ohm'),
+    soil_ec: numberSensor(state.sensors, 'soil_ec_ms_cm'),
+  };
+  historyPoints.value = mergeRealHistoryPoints(historyPoints.value, [point]);
+  refreshHistoryWindowEnd();
+}
+
+function historyValueText(value: number | null, unit: string): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${numberText(value)} ${unit}` : '--';
+}
+
+async function calibrateHistory(): Promise<void> {
+  try {
+    historyPoints.value = mergeRealHistoryPoints(historyPoints.value, await getSiteHistory(12));
+  } catch (error) {
+    console.warn('History calibration failed.', error);
+  } finally {
+    refreshHistoryWindowEnd();
+  }
+}
+
 async function loadDashboard(isBackground = false): Promise<void> {
   if (isBackground) {
     refreshing.value = true;
@@ -2340,18 +2600,28 @@ async function loadDashboard(isBackground = false): Promise<void> {
     loading.value = true;
   }
   try {
-    const nextLatest = mergePersistedDeviceStatus(await getLatestTelemetry());
+    const nextLatest = await getLatestTelemetry();
     latest.value = nextLatest;
-    const [historyResult, alarmsResult, healthResult, weatherResult] = await Promise.allSettled([
-      getDeviceHistory(),
+    const initialHistoryRequest = isBackground ? null : getSiteHistory(12);
+    const [siteResult, alarmsResult, healthResult, weatherResult] = await Promise.allSettled([
+      getSiteState(),
       getAlarmRecords(),
       getDeviceHealth(),
       loadWeather(weatherCity.value),
     ]);
-    if (historyResult.status === 'fulfilled') {
-      historyPoints.value = historyResult.value;
+    if (siteResult.status === 'fulfilled') {
+      siteState.value = siteResult.value;
+      latest.value = siteStateToTelemetry(siteResult.value);
     } else {
-      console.warn('History data failed to load.', historyResult.reason);
+      console.warn('Site state failed to load.', siteResult.reason);
+    }
+    if (initialHistoryRequest) {
+      try {
+        historyPoints.value = mergeRealHistoryPoints(historyPoints.value, await initialHistoryRequest);
+        refreshHistoryWindowEnd();
+      } catch (error) {
+        console.warn('History data failed to load.', error);
+      }
     }
     if (alarmsResult.status === 'fulfilled') {
       alarms.value = alarmsResult.value;
@@ -2390,6 +2660,19 @@ async function applyCommand(command: string, value: number, reason: string): Pro
   if (!latest.value) {
     return;
   }
+  const target = command.startsWith('pump_')
+    ? 'pump'
+    : command.startsWith('light_')
+      ? 'grow_light'
+      : command.startsWith('heater_')
+        ? 'heater'
+        : null;
+  if (target) {
+    const percentValue = value <= 1 ? Math.round(value * 100) : Math.round(value);
+    const queued = await sendSiteCommand(target, percentValue, reason);
+    siteCommandResults.value = [queued, ...siteCommandResults.value.filter((item) => item.command_id !== queued.command_id)].slice(0, 20);
+    return;
+  }
   const payload: DeviceCommand = {
     device_id: latest.value.device_id,
     command,
@@ -2407,6 +2690,13 @@ async function applyCommand(command: string, value: number, reason: string): Pro
     status: nextStatus,
   };
   void savePersistentDashboardStateNow();
+}
+
+async function setSiteActuatorMaster(target: SiteActuatorTarget, enabled: boolean): Promise<void> {
+  const value = enabled ? 100 : 0;
+  const label = siteActuatorDefinitions.find((item) => item.target === target)?.label ?? target;
+  const queued = await sendSiteCommand(target, value, `Web 手动${enabled ? '开启' : '关闭'}${label}总开关`);
+  siteCommandResults.value = [queued, ...siteCommandResults.value.filter((item) => item.command_id !== queued.command_id)].slice(0, 20);
 }
 
 function syncSmartControlValues(): void {
@@ -2636,10 +2926,12 @@ function commandActionText(command: DeviceCommand): string {
   const labels: Record<string, string> = {
     fan_on: '打开风机',
     fan_off: '关闭风机',
-    pump_on: '打开水泵',
-    pump_off: '关闭水泵',
-    light_on: '打开补光灯',
-    light_off: '关闭补光灯',
+    pump_on: '开启水泵总开关',
+    pump_off: '关闭水泵总开关',
+    light_on: '开启补光灯总开关',
+    light_off: '关闭补光灯总开关',
+    heater_on: '开启加热器总开关',
+    heater_off: '关闭加热器总开关',
     curtain_open: '打开卷帘',
     curtain_close: '关闭卷帘',
     alarm_on: '打开报警器',
@@ -3523,7 +3815,11 @@ async function sendChat(): Promise<void> {
       retrieval_mode: 'auto',
     });
     const shouldFollowResponse = assistantAtBottom.value;
-    await revealAssistantMessage(response.message, thinkingMessage.id, shouldFollowResponse);
+    await revealAssistantMessage(
+      { ...response.message, referencesVerified: true },
+      thinkingMessage.id,
+      shouldFollowResponse,
+    );
     clearChatImage();
   } catch (error) {
     const shouldFollowResponse = assistantAtBottom.value;
@@ -3844,10 +4140,7 @@ async function initializeDashboard(): Promise<void> {
     stateLoad,
     waitForAssistantTyping(220),
   ]);
-  if (latest.value) {
-    latest.value = mergePersistedDeviceStatus(latest.value);
-    syncSmartControlValues();
-  }
+  if (latest.value) syncSmartControlValues();
   await loadDashboard();
   await stateLoad;
   await syncDeviceAlarmSettings();
@@ -3856,12 +4149,108 @@ async function initializeDashboard(): Promise<void> {
   void refreshAgriSources();
   persistentStateReady = true;
   void stateLoad.then(() => {
-    if (latest.value) {
-      latest.value = mergePersistedDeviceStatus(latest.value);
-      syncSmartControlValues();
-    }
+    if (latest.value) syncSmartControlValues();
     void refreshKnowledge(selectedKbId.value);
   });
+}
+
+async function refreshSiteSnapshot(): Promise<void> {
+  try {
+    const state = await getSiteState();
+    siteState.value = state;
+    latest.value = siteStateToTelemetry(state);
+    mergeLiveHistoryPoint(state);
+    syncSmartControlValues();
+  } catch (error) {
+    console.warn('Site snapshot refresh failed.', error);
+  }
+}
+
+async function refreshSharedAssistantConversation(): Promise<void> {
+  try {
+    sharedAssistantConversation.value = await getSharedAssistantConversation(
+      sharedAssistantConversation.value.session_id || undefined,
+    );
+  } catch (error) {
+    console.warn('Shared assistant conversation refresh failed.', error);
+  }
+}
+
+function mergeSiteCommand(result: SiteCommandResult): void {
+  siteCommandResults.value = [
+    result,
+    ...siteCommandResults.value.filter((item) => item.command_id !== result.command_id),
+  ].slice(0, 20);
+}
+
+function startSiteEventStream(): void {
+  closeSiteEvents?.();
+  closeSiteEvents = subscribeSiteEvents(
+    (eventType, data) => {
+      siteEventsConnected.value = true;
+      if (eventType === 'telemetry' || eventType === 'device_status' || eventType === 'capabilities') {
+        const state = data as SiteState;
+        siteState.value = state;
+        latest.value = siteStateToTelemetry(state);
+        if (eventType === 'telemetry') {
+          mergeLiveHistoryPoint(state);
+        }
+        syncSmartControlValues();
+      } else if (eventType === 'command_update') {
+        mergeSiteCommand(data as SiteCommandResult);
+        void refreshSharedAssistantConversation();
+      } else if (eventType === 'assistant_message' || eventType === 'assistant_action') {
+        void refreshSharedAssistantConversation();
+      }
+    },
+    () => {
+      siteEventsConnected.value = false;
+    },
+    () => {
+      siteEventsConnected.value = true;
+      void refreshSiteSnapshot();
+      void refreshSharedAssistantConversation();
+    },
+  );
+}
+
+async function submitSharedAssistantMessage(): Promise<void> {
+  const text = sharedAssistantInput.value.trim();
+  if (!text || sharedAssistantBusy.value) return;
+  sharedAssistantBusy.value = true;
+  try {
+    const response = await sendSharedAssistantMessage(
+      text,
+      sharedAssistantConversation.value.session_id || undefined,
+    );
+    sharedAssistantInput.value = '';
+    sharedAssistantConversation.value = await getSharedAssistantConversation(response.session_id);
+  } finally {
+    sharedAssistantBusy.value = false;
+  }
+}
+
+async function decideSharedAction(action: SharedAssistantAction, decision: 'confirm' | 'cancel'): Promise<void> {
+  if (sharedAssistantActionBusy.value || action.state !== 'pending') return;
+  sharedAssistantActionBusy.value = action.id;
+  try {
+    await decideSharedAssistantAction(action.id, decision);
+    await refreshSharedAssistantConversation();
+  } finally {
+    sharedAssistantActionBusy.value = '';
+  }
+}
+
+function sharedActionLabel(action: SharedAssistantAction): string {
+  const command = String(action.payload.command ?? '设备操作');
+  return {
+    pump_on: '开启水泵总开关',
+    pump_off: '关闭水泵总开关',
+    light_on: '开启补光灯总开关',
+    light_off: '关闭补光灯总开关',
+    heater_on: '开启加热器总开关',
+    heater_off: '关闭加热器总开关',
+  }[command] ?? command;
 }
 
 function persistDashboardBeforeUnload(): void {
@@ -3871,15 +4260,22 @@ function persistDashboardBeforeUnload(): void {
 onMounted(() => {
   ensureAssistantThreadState();
   void initializeDashboard();
+  startSiteEventStream();
+  void refreshSharedAssistantConversation();
   document.addEventListener('visibilitychange', handleDocumentVisibilityChange);
   window.addEventListener('resize', handleAssistantViewportResize);
   window.addEventListener('beforeunload', persistDashboardBeforeUnload);
   refreshTimer = window.setInterval(() => {
     void loadDashboard(true);
   }, 5000);
+  historyCalibrationTimer = window.setInterval(() => {
+    void calibrateHistory();
+  }, 60_000);
 });
 
 onBeforeUnmount(() => {
+  closeSiteEvents?.();
+  closeSiteEvents = undefined;
   if (persistentStateSaveTimer) {
     window.clearTimeout(persistentStateSaveTimer);
     persistentStateSaveTimer = undefined;
@@ -3895,6 +4291,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', persistDashboardBeforeUnload);
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
+  }
+  if (historyCalibrationTimer) {
+    window.clearInterval(historyCalibrationTimer);
   }
   if (metricEditorTimer) {
     window.clearTimeout(metricEditorTimer);
@@ -4129,17 +4528,32 @@ onBeforeUnmount(() => {
           <div class="two-column">
             <EChartPanel title="近 6 小时环境趋势" :option="overviewChartOption" :active="activeView === 'overview'" :min-width="multiMetricChartMinWidth">
               <template #toolbar>
-                <div class="history-selector" aria-label="历史曲线变量选择">
-                  <button
-                    v-for="metric in historyMetricDefinitions"
-                    :key="metric.key"
-                    type="button"
-                    :class="{ selected: isHistoryMetricSelected(metric.key) }"
-                    @click="toggleHistoryMetric(metric.key)"
-                  >
-                    <i :style="{ background: metric.color }"></i>
-                    {{ metric.name }}
-                  </button>
+                <div class="history-chart-toolbar">
+                  <div class="history-selector" aria-label="历史曲线变量选择">
+                    <button
+                      v-for="metric in historyMetricDefinitions"
+                      :key="metric.key"
+                      type="button"
+                      :class="{ selected: isHistoryMetricSelected(metric.key) }"
+                      @click="toggleHistoryMetric(metric.key)"
+                    >
+                      <i :style="{ background: metric.color }"></i>
+                      {{ metric.name }}
+                    </button>
+                  </div>
+                  <label class="history-window-control">
+                    <span>时间拉伸</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      :value="historyWindowSliderValue"
+                      :aria-valuetext="historyWindowDurationLabel"
+                      @input="updateHistoryWindowSlider"
+                    />
+                    <output>{{ historyWindowDurationLabel }}</output>
+                  </label>
                 </div>
               </template>
             </EChartPanel>
@@ -4327,42 +4741,53 @@ onBeforeUnmount(() => {
         <section v-show="activeView === 'history'" class="view-stack">
           <EChartPanel title="历史曲线" :option="historyChartOption" :active="activeView === 'history'" :min-width="multiMetricChartMinWidth">
             <template #toolbar>
-              <div class="history-selector" aria-label="历史曲线变量选择">
-                <button
-                  v-for="metric in historyMetricDefinitions"
-                  :key="metric.key"
-                  type="button"
-                  :class="{ selected: isHistoryMetricSelected(metric.key) }"
-                  @click="toggleHistoryMetric(metric.key)"
-                >
-                  <i :style="{ background: metric.color }"></i>
-                  {{ metric.name }}
-                </button>
-              </div>
+                <div class="history-chart-toolbar">
+                  <div class="history-selector" aria-label="历史曲线变量选择">
+                    <button
+                      v-for="metric in historyMetricDefinitions"
+                      :key="metric.key"
+                      type="button"
+                      :class="{ selected: isHistoryMetricSelected(metric.key) }"
+                      @click="toggleHistoryMetric(metric.key)"
+                    >
+                      <i :style="{ background: metric.color }"></i>
+                      {{ metric.name }}
+                    </button>
+                  </div>
+                  <label class="history-window-control">
+                    <span>时间拉伸</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      :value="historyWindowSliderValue"
+                      :aria-valuetext="historyWindowDurationLabel"
+                      @input="updateHistoryWindowSlider"
+                    />
+                    <output>{{ historyWindowDurationLabel }}</output>
+                  </label>
+                </div>
             </template>
           </EChartPanel>
           <section class="panel">
             <div class="section-heading">
               <h2>历史采样列表</h2>
             </div>
-            <div class="data-table data-table--six">
+            <div class="data-table data-table--five">
               <div class="data-table__head">
                 <span>时间</span>
                 <span>温度</span>
-                <span>湿度</span>
                 <span>光照</span>
                 <span>二氧化碳</span>
                 <span>土壤湿度</span>
-                <span>土壤肥力</span>
               </div>
               <div v-for="point in historyPoints.slice(-8).reverse()" :key="point.timestamp" class="data-table__row">
                 <span>{{ formatDateTime(point.timestamp) }}</span>
-                <span>{{ point.temperature }} 摄氏度</span>
-                <span>{{ point.humidity }} %RH</span>
-                <span>{{ point.light }} lux</span>
-                <span>{{ point.co2 }} ppm</span>
-                <span>{{ point.soil_moisture }} %</span>
-                <span>{{ point.soil_ec }} mS/cm</span>
+                <span>{{ historyValueText(point.temperature, '摄氏度') }}</span>
+                <span>{{ historyValueText(point.light, 'lux') }}</span>
+                <span>{{ historyValueText(point.co2, 'ppm') }}</span>
+                <span>{{ historyValueText(point.soil_moisture, '%') }}</span>
               </div>
             </div>
           </section>
@@ -4687,50 +5112,59 @@ onBeforeUnmount(() => {
           <section class="panel">
             <div class="section-heading">
               <h2>远程设备控制</h2>
-              <span>查看并切换现场设备运行状态</span>
+              <span>总开关优先级最高；关闭后边缘端强制停机，只有设备 ACK 后才算成功</span>
+            </div>
+            <div class="site-link-status">
+              <StatusPill :label="`SSE ${siteEventsConnected ? '已连接' : '重连中'}`" :state="siteEventsConnected ? 'good' : 'watch'" />
+              <StatusPill :label="`S3 ${s3State?.online ? '在线' : '离线'}`" :state="s3State?.online ? 'good' : 'danger'" />
+              <StatusPill :label="`C5 ${c5State?.online ? '在线' : '离线'}`" :state="c5State?.online ? 'good' : 'danger'" />
             </div>
             <div class="control-grid">
-              <article class="control-card">
-                <Fan :size="28" />
-                <strong>风机</strong>
-                <span>{{ latest.status.fan ? '运行中' : '待机' }}</span>
-                <button type="button" class="toggle-switch" :class="{ 'toggle-switch--on': latest.status.fan === 1 }" @click="toggleDevice(latest.status.fan === 1, 'fan_on', 'fan_off', '棚内湿度偏高，建议开启通风', '湿度恢复正常，关闭风机')">
+              <article v-for="actuator in siteActuatorCards" :key="actuator.target" class="control-card site-actuator-card">
+                <component :is="actuator.icon" :size="28" />
+                <strong>{{ actuator.label }}</strong>
+                <span>总开关 {{ actuatorMasterEnabled(actuator.state) ? '开启' : '关闭' }}</span>
+                <small>需求 {{ actuatorValueText(actuator.state.desired) }} · 实际 {{ actuatorValueText(actuator.state.actual) }}</small>
+                <button
+                  class="toggle-switch"
+                  :class="{ 'toggle-switch--on': actuatorMasterEnabled(actuator.state) }"
+                  type="button"
+                  :disabled="!actuator.state.supported"
+                  :aria-label="`${actuatorMasterEnabled(actuator.state) ? '关闭' : '开启'}${actuator.label}总开关`"
+                  @click="setSiteActuatorMaster(actuator.target, !actuatorMasterEnabled(actuator.state))"
+                >
                   <span>关闭</span><span>开启</span><i></i>
                 </button>
-              </article>
-              <article class="control-card">
-                <Droplets :size="28" />
-                <strong>水泵</strong>
-                <span>{{ latest.status.pump ? '运行中' : '待机' }}</span>
-                <button type="button" class="toggle-switch" :class="{ 'toggle-switch--on': latest.status.pump === 1 }" @click="toggleDevice(latest.status.pump === 1, 'pump_on', 'pump_off', '土壤湿度偏低，启动短时补水', '补水完成，关闭水泵')">
-                  <span>关闭</span><span>开启</span><i></i>
-                </button>
-              </article>
-              <article class="control-card">
-                <Lightbulb :size="28" />
-                <strong>补光灯</strong>
-                <span>{{ latest.status.light ? '已开启' : '已关闭' }}</span>
-                <button type="button" class="toggle-switch" :class="{ 'toggle-switch--on': latest.status.light === 1 }" @click="toggleDevice(latest.status.light === 1, 'light_on', 'light_off', '光照不足，开启补光灯', '自然光恢复，关闭补光')">
-                  <span>关闭</span><span>开启</span><i></i>
-                </button>
-              </article>
-              <article class="control-card">
-                <Sun :size="28" />
-                <strong>卷帘</strong>
-                <span>{{ latest.status.curtain ? '已打开' : '已关闭' }}</span>
-                <button type="button" class="toggle-switch" :class="{ 'toggle-switch--on': latest.status.curtain === 1 }" @click="toggleDevice(latest.status.curtain === 1, 'curtain_open', 'curtain_close', '打开卷帘，提高自然光照', '关闭卷帘，降低强光或保温')">
-                  <span>关闭</span><span>打开</span><i></i>
-                </button>
-              </article>
-              <article class="control-card">
-                <AlertTriangle :size="28" />
-                <strong>报警器</strong>
-                <span>{{ latest.status.alarm ? '报警中' : '关闭' }}</span>
-                <button type="button" class="toggle-switch toggle-switch--danger" :class="{ 'toggle-switch--on': latest.status.alarm === 1 }" @click="toggleDevice(latest.status.alarm === 1, 'alarm_on', 'alarm_off', '触发现场声光报警', '报警解除，关闭报警器')">
-                  <span>关闭</span><span>开启</span><i></i>
-                </button>
+                <em v-if="!actuator.state.supported">设备未声明此能力</em>
               </article>
             </div>
+          </section>
+
+          <section class="panel shared-assistant-panel">
+            <div class="section-heading">
+              <div>
+                <h2>现场 AI 共享会话</h2>
+                <span>C5 语音请求与待确认操作会同步显示在这里</span>
+              </div>
+            </div>
+            <div class="shared-assistant-list">
+              <article v-for="message in sharedAssistantConversation.messages" :key="message.id" :class="`shared-message shared-message--${message.role}`">
+                <strong>{{ message.role === 'assistant' ? '现场 AI' : message.channel === 'edge_text' ? 'C5 用户' : 'Web 用户' }}</strong>
+                <p>{{ message.content }}</p>
+                <div v-for="action in message.actions" :key="action.id" class="shared-action">
+                  <span>{{ sharedActionLabel(action) }} · {{ action.state }}</span>
+                  <div v-if="action.state === 'pending'">
+                    <button type="button" :disabled="!!sharedAssistantActionBusy" @click="decideSharedAction(action, 'confirm')">确认</button>
+                    <button type="button" class="text-button" :disabled="!!sharedAssistantActionBusy" @click="decideSharedAction(action, 'cancel')">取消</button>
+                  </div>
+                </div>
+              </article>
+              <p v-if="sharedAssistantConversation.messages.length === 0" class="empty-text">C5 尚未发起现场会话。</p>
+            </div>
+            <form class="shared-assistant-composer" @submit.prevent="submitSharedAssistantMessage">
+              <input v-model="sharedAssistantInput" placeholder="可在这里测试：打开水泵、获取建议……" />
+              <button type="submit" :disabled="sharedAssistantBusy || !sharedAssistantInput.trim()">{{ sharedAssistantBusy ? '处理中' : '发送' }}</button>
+            </form>
           </section>
 
           <section class="panel">
@@ -4738,12 +5172,17 @@ onBeforeUnmount(() => {
               <h2>执行回执</h2>
             </div>
             <div class="command-list">
+              <article v-for="result in siteCommandResults" :key="result.command_id">
+                <strong>{{ siteActuatorDefinitions.find((item) => item.target === result.target)?.label ?? result.target }} → {{ siteCommandValueText(result) }}</strong>
+                <span>{{ siteCommandStateText(result.state) }}</span>
+                <time>{{ formatDateTime(result.created_at) }}</time>
+              </article>
               <article v-for="result in commandResults" :key="result.executed_at">
                 <strong>{{ commandActionText(result.command) }}</strong>
                 <span>{{ commandResultText(result) }}</span>
                 <time>{{ formatDateTime(result.executed_at) }}</time>
               </article>
-              <p v-if="commandResults.length === 0" class="empty-text">暂无控制记录，点击上方按钮后会显示执行结果。</p>
+              <p v-if="siteCommandResults.length === 0 && commandResults.length === 0" class="empty-text">暂无控制记录，点击上方按钮后会显示执行结果。</p>
             </div>
           </section>
         </section>
@@ -5039,13 +5478,17 @@ onBeforeUnmount(() => {
               :class="[`chat-bubble--${message.role}`, { 'chat-bubble--typing': message.typing }]"
             >
               <img v-if="message.image_url" :src="message.image_url" alt="问答附图" />
-              <p>{{ message.content }}</p>
+              <MarkdownContent
+                v-if="message.role === 'assistant'"
+                :content="message.content"
+              />
+              <p v-else>{{ message.content }}</p>
               <StatusPill
                 v-if="message.role === 'assistant' && message.retrievalStatus && message.retrievalStatus !== 'not_used'"
                 :label="retrievalStatusLabel(message.retrievalStatus)"
                 :state="retrievalStatusState(message.retrievalStatus)"
               />
-              <div v-if="message.references?.length" class="reference-list">
+              <div v-if="message.referencesVerified === true && message.references?.length" class="reference-list">
                 <strong>资料引用</strong>
                 <template v-for="refItem in message.references" :key="`${message.id}-${referenceKey(refItem)}`">
                   <a v-if="refItem.url" :href="refItem.url" target="_blank" rel="noopener noreferrer">
@@ -5095,7 +5538,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="chatImageUrl" class="chat-attachment">
           <img :src="chatImageUrl" alt="待发送图片" />
-          <span>{{ chatImageFileName }}</span>
+          <span :title="chatImageFileName">{{ chatImageFileName }}</span>
           <button class="icon-button" type="button" title="移除图片" @click="clearChatImage">
             <X :size="16" />
           </button>

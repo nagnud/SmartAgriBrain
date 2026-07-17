@@ -36,6 +36,10 @@ let nextKnowledgeBaseId = 4;
 let nextKnowledgeItemId = 9;
 let lastDiseaseResult: DiseaseDetectionResult | null = null;
 
+const mockHistoryPointCount = 360;
+const mockHistoryStepMs = 60 * 1000;
+const mockHistoryCompletedCount = mockHistoryPointCount - 1;
+
 type MockAlarmDirection = 'low' | 'high';
 
 type MockAlarmRuleState = {
@@ -104,6 +108,41 @@ const nowText = () => new Intl.DateTimeFormat('zh-CN', {
 function rounded(value: number, digits = 1): number {
   const base = 10 ** digits;
   return Math.round(value * base) / base;
+}
+
+function mockHistoryPoint(timestamp: number): HistoryPoint {
+  const elapsedMinutes = timestamp / 60_000;
+  const phase = elapsedMinutes * 0.55;
+  const slowPhase = elapsedMinutes * 0.17;
+  return {
+    timestamp,
+    temperature: rounded(27.2 + Math.sin(phase) * 1.7 + Math.sin(slowPhase) * 0.45),
+    humidity: rounded(63.5 + Math.cos(phase * 0.82) * 5.4 + Math.sin(slowPhase * 0.7) * 1.2),
+    gas_resistance: Math.round(16_400 + Math.cos(phase * 0.58) * 2_200 + Math.sin(slowPhase) * 650),
+    light: Math.round(17_200 + Math.sin(phase * 0.64) * 4_800 + Math.sin(slowPhase * 1.3) * 900),
+    co2: Math.round(640 + Math.cos(phase * 0.72) * 105 + Math.sin(slowPhase * 0.9) * 28),
+    soil_moisture: rounded(58.5 + Math.sin(phase * 0.42) * 5.8 + Math.cos(slowPhase * 0.8) * 1.1),
+    soil_ec: rounded(1.82 + Math.cos(phase * 0.31) * 0.24 + Math.sin(slowPhase * 0.6) * 0.06, 2),
+  };
+}
+
+let mockHistoryCompletedThrough = Math.floor(Date.now() / mockHistoryStepMs) * mockHistoryStepMs - mockHistoryStepMs;
+const mockHistoryCompletedPoints: HistoryPoint[] = Array.from(
+  { length: mockHistoryCompletedCount },
+  (_, index) => mockHistoryPoint(
+    mockHistoryCompletedThrough - (mockHistoryCompletedCount - 1 - index) * mockHistoryStepMs,
+  ),
+);
+
+function advanceMockHistory(now: number): void {
+  const latestCompletedTimestamp = Math.floor(now / mockHistoryStepMs) * mockHistoryStepMs - mockHistoryStepMs;
+  while (mockHistoryCompletedThrough < latestCompletedTimestamp) {
+    mockHistoryCompletedThrough += mockHistoryStepMs;
+    mockHistoryCompletedPoints.push(mockHistoryPoint(mockHistoryCompletedThrough));
+  }
+  if (mockHistoryCompletedPoints.length > mockHistoryCompletedCount) {
+    mockHistoryCompletedPoints.splice(0, mockHistoryCompletedPoints.length - mockHistoryCompletedCount);
+  }
 }
 
 function mockAlarmDirection(value: number, range: MetricTargetRange): MockAlarmDirection | null {
@@ -231,19 +270,20 @@ export function updateMockAlarmRanges(ranges: Record<HistoryMetricKey, MetricTar
 
 export function buildMockLatest(): TelemetryPayload {
   tick += 1;
-  const phase = tick / 4;
+  const timestamp = Date.now();
+  const current = mockHistoryPoint(timestamp);
   const telemetry: TelemetryPayload = {
     device_id: deviceId,
-    timestamp: Date.now(),
+    timestamp,
     sensors: {
-      temperature: rounded(27.4 + Math.sin(phase) * 1.9),
-      humidity: rounded(63.5 + Math.cos(phase / 1.3) * 5.2),
-      pressure: rounded(101.1 + Math.sin(phase / 2) * 0.5),
-      gas_resistance: Math.round(16600 + Math.cos(phase / 1.6) * 2200),
-      light: Math.round(16800 + Math.sin(phase / 1.8) * 4200),
-      co2: Math.round(610 + Math.cos(phase / 1.7) * 95),
-      soil_moisture: rounded(58.6 + Math.sin(phase / 1.5) * 6.4),
-      soil_ec: rounded(1.82 + Math.cos(phase / 2.1) * 0.28, 2),
+      temperature: current.temperature ?? Number.NaN,
+      humidity: current.humidity ?? Number.NaN,
+      pressure: rounded(101.1 + Math.sin(timestamp / 180_000) * 0.5),
+      gas_resistance: current.gas_resistance ?? Number.NaN,
+      light: current.light ?? Number.NaN,
+      co2: current.co2 ?? Number.NaN,
+      soil_moisture: current.soil_moisture ?? Number.NaN,
+      soil_ec: current.soil_ec ?? Number.NaN,
     },
     status: { ...runtimeStatus },
   };
@@ -254,20 +294,11 @@ export function buildMockLatest(): TelemetryPayload {
 
 export function buildMockHistory(): HistoryPoint[] {
   const now = Date.now();
-  return Array.from({ length: 36 }, (_, index) => {
-    const step = 35 - index;
-    const phase = index / 4;
-    return {
-      timestamp: now - step * 10 * 60 * 1000,
-      temperature: rounded(25.8 + Math.sin(phase) * 2.4),
-      humidity: rounded(62 + Math.cos(phase / 1.2) * 5.8),
-      gas_resistance: Math.round(15800 + Math.cos(phase / 1.5) * 2600),
-      light: Math.round(14500 + Math.sin(phase / 1.6) * 5200),
-      co2: Math.round(620 + Math.cos(phase / 1.8) * 130),
-      soil_moisture: rounded(59 + Math.sin(phase / 1.7) * 7.1),
-      soil_ec: rounded(1.75 + Math.cos(phase / 2) * 0.35, 2),
-    };
-  });
+  advanceMockHistory(now);
+  return [
+    ...mockHistoryCompletedPoints.map((point) => ({ ...point })),
+    mockHistoryPoint(now),
+  ];
 }
 
 export function buildMockWeather(): WeatherPayload {
@@ -481,14 +512,43 @@ export const mockKnowledgeItems: KnowledgeItemInfo[] = [
   },
 ];
 
-function selectedReferences(kbId?: number): KnowledgeReference[] {
-  const items = mockKnowledgeItems.filter((item) => !kbId || item.kbId === kbId).slice(0, 3);
-  return items.map((item, index) => ({
+function selectedReferences(question: string, kbId?: number): KnowledgeReference[] {
+  const normalizedQuestion = question.toLowerCase().trim();
+  const terms = new Set<string>();
+  for (const word of normalizedQuestion.match(/[a-z0-9_]{2,}/g) ?? []) {
+    terms.add(word);
+  }
+  for (const sequence of normalizedQuestion.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    terms.add(sequence);
+    for (let index = 0; index < sequence.length - 1; index += 1) {
+      terms.add(sequence.slice(index, index + 2));
+    }
+  }
+  const items = mockKnowledgeItems
+    .filter((item) => !kbId || item.kbId === kbId)
+    .map((item) => {
+      const title = item.title.toLowerCase();
+      const content = item.content.toLowerCase();
+      let score = 0;
+      for (const term of terms) {
+        if (title.includes(term)) score += 2.5;
+        if (content.includes(term)) score += 1;
+      }
+      return { item, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3);
+
+  return items.map(({ item, score }, index) => ({
     itemId: item.itemId,
     chunkId: index + 1,
     title: item.title,
     content: item.content,
-    score: rounded(0.92 - index * 0.08, 2),
+    score: rounded(Math.min(0.99, 0.55 + score / 10), 2),
+    referenceId: `mock-local:${item.itemId}:1`,
+    sourceType: 'local',
+    sourceName: '本地知识库',
   }));
 }
 
@@ -496,6 +556,10 @@ export function buildMockExpertChat(request: ExpertChatRequest): ExpertChatRespo
   const sensors = request.latest.sensors;
   const diseaseText = request.disease?.summary ?? lastDiseaseResult?.summary ?? '当前没有新的病害图片检测结果。';
   const suggestFan = sensors.humidity > 68;
+  const references = selectedReferences(request.question, request.knowledge_base_id);
+  const referenceText = references.length > 0
+    ? `\n\n**本地资料依据**\n${references.map((reference) => `- ${reference.title}：${reference.content}`).join('\n')}`
+    : '';
   return {
     message: {
       id: `assistant-${Date.now()}`,
@@ -507,8 +571,8 @@ export function buildMockExpertChat(request: ExpertChatRequest): ExpertChatRespo
         sensors.humidity > 68
           ? '建议先开启风机通风降湿，再观察叶片病斑是否扩散。'
           : '建议保持当前策略，继续每 30 分钟观察环境趋势。',
-      ].join('\n'),
-      references: selectedReferences(request.knowledge_base_id),
+      ].join('\n') + referenceText,
+      references,
       suggested_commands: suggestFan ? [{ command: 'fan_on', value: 1 }] : [],
       suggested_actions: suggestFan ? [
         {
@@ -579,9 +643,12 @@ export function deleteMockKnowledgeItem(kbId: number, itemId: number): void {
 }
 
 export function analyzeMockKnowledge(kbId: number, question: string): KnowledgeAnalyzeResult {
-  const references = selectedReferences(kbId);
+  const references = selectedReferences(question, kbId);
+  const referenceAdvice = references.length > 0
+    ? `建议参考匹配到的知识条目：${references.map((reference) => reference.title).join('、')}。`
+    : '当前知识库没有找到与问题直接匹配的资料，建议补充关键词或新增知识条目后重试。';
   return {
-    answer: `问题：${question}\n建议优先参考当前知识库中的高湿管理和设备联动规则，先稳定环境，再复查作物叶片状态。`,
+    answer: `问题：${question}\n${referenceAdvice}`,
     references,
     updatedAt: nowText(),
   };

@@ -4,7 +4,10 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -28,9 +31,33 @@ from monitoring_models import (  # noqa: E402
 from monitoring_service import check_offline_devices  # noqa: E402
 from monitoring_service import DEFAULT_ALARM_RANGES, direction_for  # noqa: E402
 from mqtt_service import canonical_telemetry  # noqa: E402
+from mqtt_service import MqttRuntime  # noqa: E402
 from kb_models import KnowledgeBase, KnowledgeItem  # noqa: E402
 from kb_service import REFERENCE_TOMATO_BASE, seed_reference_tomato_knowledge  # noqa: E402
 from region_service import search_region_options  # noqa: E402
+from site_events import site_event_bus  # noqa: E402
+from site_models import (  # noqa: E402
+    EdgeAssistantAction,
+    EdgeAssistantMessage,
+    EdgeAssistantSession,
+    EdgeDeviceRecord,
+    SiteCommandRecord,
+    SiteHistorySample,
+    SiteSnapshotRecord,
+)
+from site_schemas import SiteCommandRequest  # noqa: E402
+from site_service import (  # noqa: E402
+    acknowledge_site_command,
+    claim_next_site_command,
+    command_wire_payload,
+    create_edge_assistant_reply,
+    decide_edge_assistant_action,
+    expire_site_commands,
+    normalize_site_telemetry,
+    queue_site_command,
+    save_site_telemetry,
+    now_ms,
+)
 
 
 def telemetry(device_id: str, timestamp: int, temperature: float = 26.5) -> dict:
@@ -62,6 +89,9 @@ def telemetry(device_id: str, timestamp: int, temperature: float = 26.5) -> dict
 class DeviceApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # Unit tests must never attach to the developer's real broker.
+        os.environ["MQTT_ENABLED"] = "false"
+        os.environ["DEVICE_COMMAND_TRANSPORT"] = "http"
         cls.client_context = TestClient(app)
         cls.client = cls.client_context.__enter__()
 
@@ -73,6 +103,13 @@ class DeviceApiTests(unittest.TestCase):
 
     def setUp(self) -> None:
         with SessionLocal() as db:
+            db.query(EdgeAssistantAction).delete()
+            db.query(EdgeAssistantMessage).delete()
+            db.query(EdgeAssistantSession).delete()
+            db.query(SiteCommandRecord).delete()
+            db.query(SiteHistorySample).delete()
+            db.query(SiteSnapshotRecord).delete()
+            db.query(EdgeDeviceRecord).delete()
             db.query(AlarmRuleState).delete()
             db.query(AlarmRecord).delete()
             db.query(DeviceAlarmSetting).delete()
@@ -81,6 +118,28 @@ class DeviceApiTests(unittest.TestCase):
             db.query(DeviceCommandRecord).delete()
             db.query(TelemetryRecord).delete()
             db.commit()
+
+    @staticmethod
+    def site_telemetry(message_id: str | None = None) -> dict:
+        return {
+            "schema_version": "1.0",
+            "site_id": "greenhouse_001",
+            "device_id": "greenhouse_001_s3",
+            "message_id": message_id or str(uuid.uuid4()),
+            "sampled_at": 1_910_000_000_000,
+            "sensors": {
+                "temperature_c": 25.5,
+                "illuminance_lux": None,
+                "soil_moisture_pct": 61.0,
+                "co2_ppm": 680,
+            },
+            "quality": {"illuminance_lux": "sensor_error"},
+            "actuators": {
+                "pump": {"supported": True, "desired": 70, "actual": 65, "unit": "percent"},
+                "heater": {"supported": True, "desired": 0, "actual": 0, "unit": "percent"},
+                "grow_light": {"supported": True, "desired": 30, "actual": 30, "unit": "percent"},
+            },
+        }
 
     def test_missing_device_and_validation(self) -> None:
         self.assertEqual(self.client.get("/api/device/latest").status_code, 404)
@@ -263,6 +322,238 @@ class DeviceApiTests(unittest.TestCase):
             bases = db.query(KnowledgeBase).filter(KnowledgeBase.name == REFERENCE_TOMATO_BASE["name"]).all()
             self.assertEqual(len(bases), 1)
             self.assertEqual(db.query(KnowledgeItem).filter(KnowledgeItem.kb_id == bases[0].id).count(), 3)
+
+    def test_site_state_uses_null_for_unavailable_sensors(self) -> None:
+        empty = self.client.get("/api/v1/sites/greenhouse_001/state")
+        self.assertEqual(empty.status_code, 200)
+        self.assertIsNone(empty.json()["sensors"]["temperature_c"])
+        self.assertEqual(empty.json()["quality"]["temperature_c"], "unavailable")
+
+        payload = self.site_telemetry()
+        payload["actuators"]["pump"]["master_enabled"] = False
+        runtime = MqttRuntime()
+        published: list[dict] = []
+        with patch.object(runtime, "_publish_view_state", side_effect=lambda state: published.append(state.model_dump())):
+            runtime._on_message(
+                None,
+                None,
+                SimpleNamespace(
+                    topic="smartagribrain/v1/devices/greenhouse_001_s3/telemetry",
+                    payload=__import__("json").dumps(payload).encode("utf-8"),
+                ),
+            )
+
+        state = self.client.get("/api/v1/sites/greenhouse_001/state").json()
+        self.assertEqual(state["sensors"]["temperature_c"], 25.5)
+        self.assertIsNone(state["sensors"]["illuminance_lux"])
+        self.assertEqual(state["quality"]["illuminance_lux"], "sensor_error")
+        self.assertEqual(state["actuators"]["pump"]["actual"], 65)
+        self.assertFalse(state["actuators"]["pump"]["master_enabled"])
+        self.assertEqual(len(published), 1)
+        self.assertEqual(published[0]["site_id"], "greenhouse_001")
+
+    def test_site_telemetry_validates_topic_and_deduplicates_uuid(self) -> None:
+        message_id = str(uuid.uuid4())
+        payload = self.site_telemetry(message_id)
+        normalized = normalize_site_telemetry(payload, "greenhouse_001_s3")
+        self.assertEqual(normalized["message_id"], message_id)
+        self.assertEqual(normalized["actuators"]["pump"]["unit"], "percent")
+
+        invalid = {**payload, "device_id": "wrong-device"}
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            normalize_site_telemetry(invalid, "greenhouse_001_s3")
+        with self.assertRaisesRegex(ValueError, "UUID"):
+            normalize_site_telemetry({**payload, "message_id": "not-a-uuid"}, "greenhouse_001_s3")
+
+        runtime = MqttRuntime()
+        message = SimpleNamespace(
+            topic="smartagribrain/v1/devices/greenhouse_001_s3/telemetry",
+            payload=__import__("json").dumps(payload).encode("utf-8"),
+        )
+        runtime._on_message(None, None, message)
+        runtime._on_message(None, None, message)
+        with SessionLocal() as db:
+            self.assertEqual(db.query(SiteSnapshotRecord).filter_by(message_id=message_id).count(), 1)
+
+    def test_site_history_returns_every_stored_real_reading_and_keeps_sample_cache(self) -> None:
+        base = now_ms() // 60_000 * 60_000
+
+        def sample(sampled_at: int, temperature: float) -> dict:
+            payload = self.site_telemetry(str(uuid.uuid4()))
+            payload["sampled_at"] = sampled_at
+            payload["sensors"].update({
+                "temperature_c": temperature,
+                "illuminance_lux": 18_000,
+                "soil_moisture_pct": 58.5,
+                "co2_ppm": 680,
+                # Reserved fields remain accepted and stored with the raw sample.
+                "humidity_pct": 62.0,
+                "gas_resistance_ohm": 15_000,
+                "soil_ec_ms_cm": 1.8,
+            })
+            return payload
+
+        with SessionLocal() as db:
+            save_site_telemetry(db, sample(base - 3 * 60_000, 24.0), "greenhouse_001_s3")
+            save_site_telemetry(db, sample(base - 3 * 60_000 + 5_000, 25.0), "greenhouse_001_s3")
+            save_site_telemetry(db, sample(base - 60_000, 26.0), "greenhouse_001_s3")
+            save_site_telemetry(db, sample(base - 25 * 60 * 60_000, 20.0), "greenhouse_001_s3")
+
+            self.assertEqual(db.query(SiteHistorySample).count(), 2)
+            self.assertEqual(db.query(SiteSnapshotRecord).count(), 4)
+            newest_first_minute = db.query(SiteHistorySample).order_by(SiteHistorySample.sampled_at).first()
+            self.assertEqual(newest_first_minute.payload["sensors"]["humidity_pct"], 62.0)
+
+        response = self.client.get("/api/v1/sites/greenhouse_001/history?hours=6")
+        self.assertEqual(response.status_code, 200)
+        points = response.json()
+        self.assertEqual([point["temperature"] for point in points], [24.0, 25.0, 26.0])
+        self.assertEqual([point["timestamp"] for point in points], sorted(point["timestamp"] for point in points))
+        self.assertEqual(points[0]["humidity"], 62.0)
+
+    def test_site_history_accepts_partial_visible_sensor_samples(self) -> None:
+        base = now_ms() // 60_000 * 60_000
+        payload = self.site_telemetry(str(uuid.uuid4()))
+        payload["sampled_at"] = base - 60_000
+        payload["sensors"].update({
+            "temperature_c": 23.5,
+            "illuminance_lux": None,
+            "soil_moisture_pct": None,
+            "co2_ppm": None,
+        })
+
+        with SessionLocal() as db:
+            save_site_telemetry(db, payload, "greenhouse_001_s3")
+            self.assertEqual(db.query(SiteHistorySample).count(), 1)
+
+        response = self.client.get("/api/v1/sites/greenhouse_001/history?hours=6")
+        self.assertEqual(response.status_code, 200)
+        points = response.json()
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["temperature"], 23.5)
+        self.assertIsNone(points[0]["light"])
+        self.assertIsNone(points[0]["co2"])
+        self.assertIsNone(points[0]["soil_moisture"])
+
+    def test_site_history_backfills_existing_snapshots_after_upgrade(self) -> None:
+        base = now_ms() // 60_000 * 60_000
+
+        def sample(sampled_at: int, temperature: float) -> dict:
+            payload = self.site_telemetry(str(uuid.uuid4()))
+            payload["sampled_at"] = sampled_at
+            payload["sensors"].update({
+                "temperature_c": temperature,
+                "illuminance_lux": 17_500,
+                "soil_moisture_pct": 57.0,
+                "co2_ppm": 660,
+            })
+            return normalize_site_telemetry(payload, "greenhouse_001_s3")
+
+        with SessionLocal() as db:
+            for offset, temperature in ((-2 * 60_000, 23.5), (-60_000, 24.5)):
+                payload = sample(base + offset, temperature)
+                db.add(
+                    SiteSnapshotRecord(
+                        site_id=payload["site_id"],
+                        device_id=payload["device_id"],
+                        message_id=payload["message_id"],
+                        sampled_at=payload["sampled_at"],
+                        received_at=payload["sampled_at"] + 100,
+                        payload=payload,
+                    )
+                )
+            db.commit()
+            self.assertEqual(db.query(SiteHistorySample).count(), 0)
+
+        response = self.client.get("/api/v1/sites/greenhouse_001/history?hours=6")
+        self.assertEqual(response.status_code, 200)
+        points = response.json()
+        self.assertEqual([point["temperature"] for point in points], [23.5, 24.5])
+        self.assertEqual([point["timestamp"] for point in points], sorted(point["timestamp"] for point in points))
+        with SessionLocal() as db:
+            self.assertEqual(db.query(SiteHistorySample).count(), 2)
+
+    def test_site_command_is_uuid_and_succeeds_only_after_device_ack(self) -> None:
+        with SessionLocal() as db:
+            queued = queue_site_command(
+                db,
+                "greenhouse_001",
+                SiteCommandRequest(target="pump", value=72, source="web_manual", reason="test"),
+            )
+            uuid.UUID(queued.command_id)
+            self.assertEqual(queued.state, "queued")
+
+            claimed = claim_next_site_command(db)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.state, "dispatched")
+            wire = command_wire_payload(claimed)
+            self.assertEqual(wire["command"], {"operation": "set", "target": "pump", "value": 72})
+
+            ack = acknowledge_site_command(
+                db,
+                {
+                    "command_id": claimed.command_id,
+                    "state": "executed",
+                    "actual_value": 70,
+                    "acknowledged_at": 1_910_000_000_100,
+                },
+            )
+            self.assertEqual(ack.state, "succeeded")
+            self.assertEqual(ack.actual_value, 70)
+            repeated = acknowledge_site_command(db, {"command_id": claimed.command_id, "state": "failed"})
+            self.assertEqual(repeated.state, "succeeded")
+
+    def test_expired_site_command_is_never_dispatched(self) -> None:
+        with SessionLocal() as db:
+            queued = queue_site_command(
+                db,
+                "greenhouse_001",
+                SiteCommandRequest(target="heater", value=50, source="web_manual"),
+            )
+            record = db.query(SiteCommandRecord).filter_by(command_id=queued.command_id).one()
+            record.expires_at = 1
+            db.commit()
+            self.assertEqual(expire_site_commands(db), 1)
+            self.assertIsNone(claim_next_site_command(db))
+            db.refresh(record)
+            self.assertEqual(record.state, "expired")
+
+    def test_edge_pump_action_requires_confirmation_and_cancel_is_safe(self) -> None:
+        with SessionLocal() as db:
+            reply = create_edge_assistant_reply(db, "greenhouse_001", "打开水泵", None, "edge_text")
+            self.assertLessEqual(len(reply.content), 120)
+            self.assertEqual(len(reply.actions), 1)
+            self.assertEqual(db.query(SiteCommandRecord).count(), 0)
+
+            confirmed = decide_edge_assistant_action(db, "greenhouse_001", reply.actions[0].id, "confirm")
+            self.assertEqual(confirmed.state, "confirmed")
+            command = db.query(SiteCommandRecord).one()
+            self.assertEqual((command.target, command.value, command.source), ("pump", 100, "edge_voice"))
+
+        self.setUp()
+        with SessionLocal() as db:
+            reply = create_edge_assistant_reply(db, "greenhouse_001", "打开水泵", None, "edge_text")
+            canceled = decide_edge_assistant_action(db, "greenhouse_001", reply.actions[0].id, "cancel")
+            self.assertEqual(canceled.state, "canceled")
+            self.assertEqual(db.query(SiteCommandRecord).count(), 0)
+
+    def test_sse_event_format_contains_retry_event_and_json_data(self) -> None:
+        stream = site_event_bus.stream("greenhouse_001")
+        self.assertEqual(next(stream), "retry: 2000\n\n")
+        site_event_bus.publish("greenhouse_001", "telemetry", {"temperature_c": 26.0})
+        event = next(stream)
+        self.assertIn("event: telemetry", event)
+        self.assertIn('data: {"temperature_c":26.0}', event)
+        stream.close()
+
+    def test_mqtt_topics_are_device_scoped(self) -> None:
+        runtime = MqttRuntime()
+        self.assertEqual(
+            runtime._parse_topic("smartagribrain/v1/devices/greenhouse_001_s3/command_ack"),
+            ("greenhouse_001_s3", "command_ack"),
+        )
+        with self.assertRaisesRegex(ValueError, "outside"):
+            runtime._parse_topic("other/v1/devices/greenhouse_001_s3/telemetry")
 
 
 if __name__ == "__main__":

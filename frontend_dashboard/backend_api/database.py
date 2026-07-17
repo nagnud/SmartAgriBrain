@@ -13,6 +13,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 DEFAULT_SQLITE_PATH = BACKEND_DIR / "smartagribrain.db"
 
 load_dotenv(BACKEND_DIR / ".env")
+load_dotenv(BACKEND_DIR / ".env.mqtt.local", override=True)
 
 
 def normalize_database_url(raw_url: str) -> str:
@@ -56,6 +57,7 @@ def init_database() -> None:
     import kb_models  # noqa: F401
     import monitoring_models  # noqa: F401
     import photo_models  # noqa: F401
+    import site_models  # noqa: F401
     from agri_source_service import seed_agri_source_settings
     from kb_service import seed_initial_knowledge, seed_reference_tomato_knowledge
 

@@ -201,6 +201,26 @@ def _client(timeout: float) -> httpx.Client:
     )
 
 
+RETRYABLE_SOURCE_ERRORS = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+)
+
+
+def _get_with_retry(client: httpx.Client, url: str, **kwargs: Any) -> httpx.Response:
+    """Retry one transient transport failure without hiding persistent errors."""
+    for attempt in range(2):
+        try:
+            return client.get(url, **kwargs)
+        except RETRYABLE_SOURCE_ERRORS:
+            if attempt == 1:
+                raise
+            time.sleep(0.2)
+    raise RuntimeError("unreachable")
+
+
 def _clean_external_html(raw: str, limit: int = 1200) -> str:
     decoded = html.unescape(html.unescape(raw or ""))
     soup = BeautifulSoup(decoded, "html.parser")
@@ -233,7 +253,7 @@ def search_agrovoc(query: str, crop: str = "", growth_stage: str = "", region: s
     with _client(timeout) as client:
         for language in ("zh", "en"):
             url = f"https://{AGROVOC_HOST}/browse/rest/v1/search/"
-            response = client.get(url, params={"query": f"{keyword}*", "lang": language})
+            response = _get_with_retry(client, url, params={"query": f"{keyword}*", "lang": language})
             _validate_response(response, AGROVOC_HOST)
             payload = response.json()
             candidates = payload.get("results") if isinstance(payload, dict) else None
@@ -296,7 +316,8 @@ def search_eppo(query: str, crop: str = "", growth_stage: str = "", region: str 
     payload: Any = []
     with _client(timeout) as client:
         for keyword in search_terms[:3]:
-            response = client.get(
+            response = _get_with_retry(
+                client,
                 url,
                 params={"keyword": keyword, "onlyPreferred": "false", "searchMode": 3},
                 headers={"X-Api-Key": api_key},

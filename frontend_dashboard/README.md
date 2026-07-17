@@ -1,6 +1,8 @@
 ﻿# ESP32-C5 智慧农业 Web 前端
 
-这是智慧农业电脑端 Web 管理平台，面向大棚环境监测、作物健康识别、知识库管理、AI 专家问答和远程设备控制等日常使用场景。
+这是由 Web、FastAPI、本机 Mosquitto、ESP32-C5 和 ESP32-S3 组成的智慧农业系统。S3 负责传感器与执行器，C5 负责屏幕、精简 AI 对话和后续语音；两块板不直接通信，所有数据均由后端中继。
+
+固定链路为：`Web ⇄ FastAPI ⇄ Mosquitto ⇄ C5/S3`。Web 控制使用 REST，实时状态、命令回执和共享现场会话使用 SSE；板端使用 QoS 1 MQTT。
 
 ## 功能
 
@@ -17,7 +19,7 @@
 
 ## 运行
 
-建议使用 Node.js 20.19 或更高版本。
+建议使用已验证的 Node.js 22 LTS。
 
 如果本机 Node 版本过低，可以直接双击：
 
@@ -46,11 +48,19 @@ http://localhost:5173
 npm run build
 ```
 
-如果系统 Node 版本过低，请使用 `scripts/web/start-web.bat` 运行，或安装 Node.js 20.19+。
+如果系统 Node 版本过低，请使用 `scripts/web/start-web.bat` 运行，或安装 Node.js 22 LTS。
+
+完整环境可执行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/check-environment.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/start-full-stack.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/build-all.ps1
+```
 
 ## 接口切换
 
-默认使用本地示例数据。后端完成后复制 `.env.example` 为 `.env`，把 `VITE_USE_MOCK` 改为 `false`，并设置后端地址：
+默认连接本地后端并显示已持久化的真实遥测数据。复制 `.env.example` 为 `.env` 后，设置后端地址：
 
 ```text
 VITE_API_BASE_URL=http://localhost:8000
@@ -59,7 +69,7 @@ VITE_USE_MOCK_ASSISTANT=false
 VITE_USE_MOCK_KNOWLEDGE=false
 ```
 
-如果只想让 AI 助手和 AI 农事建议真实接入、其他遥测/设备/视觉功能继续使用 Mock，可以保持：
+如需演示模式，可显式把 `VITE_USE_MOCK` 设为 `true`。此模式会生成模拟遥测，不应用于验证真实历史数据：
 
 ```env
 VITE_API_BASE_URL=http://localhost:8000
@@ -108,6 +118,13 @@ DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname
 前端的 AI 农事建议接口为 `POST /api/ai/analyze`；后端也兼容 `POST /api/v1/farm/ai/analyze`。
 
 前端预留接口集中在 `src/services/api.ts`：
+
+- `GET /api/v1/sites/{site_id}/state`
+- `GET /api/v1/sites/{site_id}/events`
+- `POST /api/v1/sites/{site_id}/commands`
+- `POST /api/v1/sites/{site_id}/assistant/messages`
+- `GET /api/v1/sites/{site_id}/assistant/conversation`
+- `POST /api/v1/sites/{site_id}/assistant/actions/{action_id}/decision`
 
 - `POST /api/device/telemetry`
 - `GET /api/device/latest`

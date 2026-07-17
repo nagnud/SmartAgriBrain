@@ -132,11 +132,14 @@ export function computeSmartControlDecision(
   const co2Target = targets.co2;
   const soilTarget = targets.soil_moisture;
 
-  const tempSlope = recentSlope(history.map((point) => point.temperature));
-  const humiditySlope = recentSlope(history.map((point) => point.humidity));
-  const lightSlope = recentSlope(history.map((point) => point.light));
-  const co2Slope = recentSlope(history.map((point) => point.co2));
-  const soilSlope = recentSlope(history.map((point) => point.soil_moisture));
+  const finiteHistory = (values: Array<number | null | undefined>): number[] => values.filter(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value),
+  );
+  const tempSlope = recentSlope(finiteHistory(history.map((point) => point.temperature)));
+  const humiditySlope = recentSlope(finiteHistory(history.map((point) => point.humidity)));
+  const lightSlope = recentSlope(finiteHistory(history.map((point) => point.light)));
+  const co2Slope = recentSlope(finiteHistory(history.map((point) => point.co2)));
+  const soilSlope = recentSlope(finiteHistory(history.map((point) => point.soil_moisture)));
 
   const outsideHot = weather ? excess(weather.temperature, tempTarget.max, 1, 12) : 0;
   const outsideCold = weather ? deficit(weather.temperature, tempTarget.min, 1, 12) : 0;
