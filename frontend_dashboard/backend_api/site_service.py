@@ -9,9 +9,12 @@ from typing import Any
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from assistant_service import assistant_chat
-from schemas import AssistantChatRequest
+from device_schemas import DeviceCommandRequest
+from device_service import queue_command
+from position_service import take_position_result
+from schemas import AssistantTurnRequest
 from site_events import site_event_bus
+from water_gun_service import WaterGunPreviewRequest, WaterGunStaticRequest, water_gun_runtime
 from site_models import (
     EdgeAssistantAction,
     EdgeAssistantMessage,
@@ -657,46 +660,53 @@ def _message_response(message: EdgeAssistantMessage, actions: list[EdgeAssistant
 
 
 def create_edge_assistant_reply(db: Session, site_id: str, text: str, session_id: str | None, channel: str) -> EdgeAssistantMessageResponse:
-    session = _ensure_session(db, site_id, session_id, channel)
-    _store_message(db, session, "user", channel, text)
-    deterministic = _deterministic_device_action(text)
-    raw_actions: list[dict[str, Any]] = []
-    references: list[dict[str, Any]] = []
-    if deterministic is not None:
-        reply_text, action_payload = deterministic
-        raw_actions = [{"type": "device_command", "risk": "high", "payload": action_payload}]
-    else:
-        response = assistant_chat(AssistantChatRequest(question=text, latest=_latest_for_assistant(db, site_id)))
-        reply_text = _brief_text(response.message.content)
-        raw_actions = [action.model_dump(mode="json") for action in response.actions]
-        references = [reference.model_dump(mode="json") for reference in response.references]
+    # The edge display and web UI now share the same context-aware orchestrator,
+    # while retaining separate session ids and channel-specific answer lengths.
+    from assistant_orchestrator import run_assistant_turn
 
-    assistant_message = _store_message(
-        db,
-        session,
-        "assistant",
-        "edge_text" if channel == "edge_text" else "web",
-        _brief_text(reply_text) if channel == "edge_text" else reply_text,
-        metadata={"references": references},
-    )
-    actions: list[EdgeAssistantAction] = []
-    for raw_action in raw_actions[:3]:
-        payload = raw_action.get("payload") if isinstance(raw_action.get("payload"), dict) else {}
-        action = EdgeAssistantAction(
-            id=f"action-{uuid.uuid4()}",
-            session_id=session.id,
+    resolved_session_id = session_id or f"edge-{uuid.uuid4()}"
+    orchestrated = run_assistant_turn(
+        AssistantTurnRequest(
+            session_id=resolved_session_id,
             site_id=site_id,
-            message_id=assistant_message.id,
-            action_type=str(raw_action.get("type") or "unknown"),
-            risk=str(raw_action.get("risk") or "normal"),
-            state="pending",
-            payload=payload,
-            created_at=now_ms(),
-            expires_at=now_ms() + ACTION_TTL_MS,
+            channel="edge_text" if channel == "edge_text" else "web",
+            message_id=f"msg-{uuid.uuid4()}",
+            text=text,
         )
-        db.add(action)
-        actions.append(action)
-    db.commit()
+    )
+    db.expire_all()
+    assistant_message = db.get(EdgeAssistantMessage, orchestrated.message.id)
+    if assistant_message is None:
+        raise RuntimeError("assistant response was not persisted")
+    actions = list(
+        db.scalars(
+            select(EdgeAssistantAction)
+            .where(EdgeAssistantAction.message_id == assistant_message.id)
+            .order_by(EdgeAssistantAction.created_at.asc())
+        ).all()
+    )
+    # Safety fallback for an explicit actuator imperative if the model omitted
+    # the mandatory confirmation action. It never executes the device directly.
+    if not actions:
+        fallback = _deterministic_device_action(text)
+        if fallback is not None:
+            reply_text, action_payload = fallback
+            assistant_message.content = _brief_text(reply_text) if channel == "edge_text" else reply_text
+            action = EdgeAssistantAction(
+                id=f"action-{uuid.uuid4()}",
+                session_id=resolved_session_id,
+                site_id=site_id,
+                message_id=assistant_message.id,
+                action_type="device_command",
+                risk="high",
+                state="pending",
+                payload=action_payload,
+                created_at=now_ms(),
+                expires_at=now_ms() + ACTION_TTL_MS,
+            )
+            db.add(action)
+            db.commit()
+            actions = [action]
     response = _message_response(assistant_message, actions)
     site_event_bus.publish(site_id, "assistant_message", response.model_dump(mode="json"))
     return response
@@ -713,11 +723,35 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
         action.state = "expired"
         action.resolved_at = current
     elif decision == "cancel":
+        if action.action_type == "water_gun_target":
+            result_id = str(action.payload.get("result_id") or "")
+            stored_result = take_position_result(result_id)
+            if stored_result is not None:
+                candidate, _captured_at = stored_result
+                preview = water_gun_runtime.set_preview(
+                    site_id,
+                    WaterGunPreviewRequest(
+                        ground_range_mm=candidate.ground_range_mm,
+                        bearing_deg=candidate.bearing_deg,
+                        device_id=s3_device_id(),
+                        source="vision",
+                        target_label=candidate.label,
+                        spray_enabled=False,
+                    ),
+                )
+                action.payload = {**action.payload, "water_gun": preview.model_dump(mode="json")}
         action.state = "canceled"
         action.resolved_at = current
     elif action.action_type == "device_command":
         command = str(action.payload.get("command") or "")
-        target_map = {"pump": "pump", "light": "grow_light", "heater": "heater"}
+        target_map = {
+            "pump": "pump",
+            "light": "grow_light",
+            "heater": "heater",
+            "fan": "fan",
+            "curtain": "curtain",
+            "alarm": "alarm",
+        }
         target = target_map.get(command.rsplit("_", 1)[0])
         if target is None:
             action.state = "failed"
@@ -738,6 +772,60 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
             action.state = "confirmed"
             action.resolved_at = current
             action.payload = {**action.payload, "command_id": queued.command_id}
+    elif action.action_type == "send_position":
+        result_id = str(action.payload.get("result_id") or "")
+        stored_result = take_position_result(result_id)
+        if stored_result is None:
+            action.state = "failed"
+            action.resolved_at = current
+            action.payload = {**action.payload, "error": "定位结果已过期，请重新查看摄像头。"}
+        else:
+            candidate, _captured_at = stored_result
+            device_id = str(action.payload.get("device_id") or s3_device_id())
+            queued = queue_command(
+                db,
+                DeviceCommandRequest(
+                    device_id=device_id,
+                    command="target_position",
+                    value=1,
+                    reason="发送目标地面极坐标",
+                    position={
+                        "ground_range_mm": candidate.ground_range_mm,
+                        "bearing_deg": candidate.bearing_deg,
+                    },
+                ),
+            )
+            action.state = "confirmed"
+            action.resolved_at = current
+            action.payload = {**action.payload, "command_id": int(queued.command.get("id", 0) or 0)}
+    elif action.action_type == "water_gun_target":
+        result_id = str(action.payload.get("result_id") or "")
+        stored_result = take_position_result(result_id)
+        if stored_result is None:
+            action.state = "failed"
+            action.resolved_at = current
+            action.payload = {**action.payload, "error": "定位结果已过期，请重新查看摄像头。"}
+        else:
+            candidate, _captured_at = stored_result
+            state = water_gun_runtime.set_static(
+                db,
+                site_id,
+                WaterGunStaticRequest(
+                    ground_range_mm=candidate.ground_range_mm,
+                    bearing_deg=candidate.bearing_deg,
+                    device_id=s3_device_id(),
+                    source="vision",
+                    target_label=candidate.label,
+                    spray_enabled=True,
+                ),
+            )
+            action.state = "confirmed"
+            action.resolved_at = current
+            action.payload = {
+                **action.payload,
+                "command_id": state.last_command_id,
+                "water_gun": state.model_dump(mode="json"),
+            }
     else:
         action.state = "failed"
         action.resolved_at = current

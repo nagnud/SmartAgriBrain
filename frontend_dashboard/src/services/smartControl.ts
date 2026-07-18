@@ -11,6 +11,10 @@ import type {
 
 export const smartControlParamKeys: SmartControlParamKey[] = ['water', 'light', 'heat', 'cool', 'vent', 'co2'];
 
+// The pump is currently dedicated to the water-gun feature.  Keep this
+// switch explicit so it can be removed cleanly when pump automation returns.
+export const waterPumpSmartControlPaused = true;
+
 export const zeroSmartControlDemands: SmartControlDemands = {
   water: 0,
   light: 0,
@@ -104,12 +108,18 @@ export function applySmartControlOverrides(
       next[key] = clampControlValue(state.value);
     }
   });
+  // Defense in depth: persisted legacy settings or a caller-provided auto
+  // state must never let smart control issue a pump demand while the water gun
+  // owns the pump.
+  if (waterPumpSmartControlPaused) {
+    next.water = 0;
+  }
   return next;
 }
 
 export function defaultSmartControlParamStates(): Record<SmartControlParamKey, SmartControlParamState> {
   return {
-    water: { key: 'water', mode: 'auto', value: 0, lastManualValue: 0 },
+    water: { key: 'water', mode: 'manual', value: 0, lastManualValue: 0 },
     light: { key: 'light', mode: 'auto', value: 0, lastManualValue: 0 },
     heat: { key: 'heat', mode: 'auto', value: 0, lastManualValue: 0 },
     cool: { key: 'cool', mode: 'auto', value: 0, lastManualValue: 0 },

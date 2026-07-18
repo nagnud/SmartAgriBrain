@@ -18,6 +18,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{(Path(TEMP_DIR.name) / 'device-test.db
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app_state_models import AppState  # noqa: E402
+from app_state_service import save_app_state_value  # noqa: E402
 from database import SessionLocal, engine  # noqa: E402
 from device_models import DeviceCommandRecord, TelemetryRecord  # noqa: E402
 from main import app  # noqa: E402
@@ -58,6 +60,10 @@ from site_service import (  # noqa: E402
     save_site_telemetry,
     now_ms,
 )
+from assistant_orchestrator import _execute_tool, _is_camera_configuration_request, run_assistant_turn  # noqa: E402
+from schemas import AssistantTurnRequest, PositionCandidate  # noqa: E402
+from position_service import _remember  # noqa: E402
+from water_gun_service import water_gun_runtime  # noqa: E402
 
 
 def telemetry(device_id: str, timestamp: int, temperature: float = 26.5) -> dict:
@@ -102,7 +108,10 @@ class DeviceApiTests(unittest.TestCase):
         TEMP_DIR.cleanup()
 
     def setUp(self) -> None:
+        with water_gun_runtime._lock:
+            water_gun_runtime._states.clear()
         with SessionLocal() as db:
+            db.query(AppState).delete()
             db.query(EdgeAssistantAction).delete()
             db.query(EdgeAssistantMessage).delete()
             db.query(EdgeAssistantSession).delete()
@@ -227,6 +236,200 @@ class DeviceApiTests(unittest.TestCase):
             json={"success": False, "message": "冲突回执"},
         )
         self.assertEqual(conflicting.status_code, 409)
+
+    def test_position_locator_and_confirmed_dispatch(self) -> None:
+        calibration = {
+            "image_width": 1280,
+            "image_height": 720,
+            "fx": 1000,
+            "fy": 1000,
+            "cx": 640,
+            "cy": 360,
+            "camera_height_mm": 60,
+            "pitch_down_deg": 30,
+            "yaw_deg": 0,
+            "roll_deg": 0,
+        }
+        with patch("position_service.call_object_locator", return_value={"detections": [
+            {"label": "苹果", "confidence": 0.9, "bbox": {"x": 45, "y": 45, "width": 10, "height": 10}},
+        ]}):
+            located = self.client.post(
+                "/api/vision/locate",
+                data={"question": "苹果距离摄像头多远", "calibration": __import__("json").dumps(calibration)},
+                files={"image": ("frame.jpg", b"fake-jpeg", "image/jpeg")},
+            )
+        self.assertEqual(located.status_code, 200)
+        result = located.json()
+        self.assertEqual(result["status"], "located")
+        self.assertGreater(result["selected"]["ground_range_mm"], 0)
+
+        dispatched = self.client.post(
+            "/api/vision/position/send",
+            json={"result_id": result["result_id"], "device_id": "greenhouse_001_s3"},
+        )
+        self.assertEqual(dispatched.status_code, 200)
+        with SessionLocal() as db:
+            command = db.query(DeviceCommandRecord).filter_by(id=dispatched.json()["command_id"]).one()
+            self.assertEqual(command.command, "target_position")
+            self.assertEqual(command.device_id, "greenhouse_001_s3")
+            self.assertEqual(
+                set(command.payload["position"]),
+                {"ground_range_mm", "bearing_deg"},
+            )
+            self.assertNotIn("camera_range_mm", command.payload["position"])
+
+    def test_water_gun_static_dynamic_and_stop_protocol(self) -> None:
+        with SessionLocal() as db:
+            command_count = db.query(DeviceCommandRecord).count()
+        preview = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/preview",
+            json={
+                "ground_range_mm": 850,
+                "bearing_deg": 90,
+                "source": "manual",
+                "spray_enabled": True,
+            },
+        )
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["pump_control_percent"], 50.0)
+        self.assertTrue(preview.json()["simulation_only"])
+        with SessionLocal() as db:
+            self.assertEqual(db.query(DeviceCommandRecord).count(), command_count)
+        stopped_preview = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/preview",
+            json={"ground_range_mm": 850, "bearing_deg": 90, "source": "manual", "spray_enabled": False},
+        )
+        self.assertEqual(stopped_preview.json()["pump_control_percent"], 0.0)
+
+        manual_outside = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={"ground_range_mm": 1701, "bearing_deg": 0, "source": "manual"},
+        )
+        self.assertEqual(manual_outside.status_code, 422)
+
+        full_scale = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/preview",
+            json={"ground_range_mm": 1700, "bearing_deg": 0, "source": "vision", "spray_enabled": True},
+        )
+        self.assertEqual(full_scale.status_code, 200)
+        self.assertEqual(full_scale.json()["pump_control_percent"], 100.0)
+
+        rejected_start = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/start",
+            json={
+                "ground_range_mm": 500,
+                "bearing_deg": 0,
+                "device_id": "unknown_water_gun_device",
+                "source": "manual",
+            },
+        )
+        self.assertEqual(rejected_start.status_code, 409)
+        unchanged = self.client.get("/api/v1/sites/greenhouse_001/water-gun").json()
+        self.assertEqual(unchanged["mode"], "static")
+        self.assertTrue(unchanged["spray_enabled"])
+
+        visual_outside = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={
+                "ground_range_mm": 1500,
+                "bearing_deg": -18,
+                "source": "vision",
+                "target_label": "苹果",
+            },
+        )
+        self.assertEqual(visual_outside.status_code, 200)
+        self.assertEqual(visual_outside.json()["bearing_deg"], -18)
+
+        started = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/start",
+            json={"ground_range_mm": 600, "bearing_deg": 12, "source": "manual"},
+        )
+        self.assertEqual(started.status_code, 200)
+        session_id = started.json()["session_id"]
+        self.assertTrue(started.json()["spray_enabled"])
+
+        updated = self.client.put(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/target",
+            json={"session_id": session_id, "sequence": 2, "ground_range_mm": 700, "bearing_deg": -10},
+        )
+        self.assertEqual(updated.status_code, 200)
+        repeated = self.client.put(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/target",
+            json={"session_id": session_id, "sequence": 2, "ground_range_mm": 710, "bearing_deg": -9},
+        )
+        self.assertEqual(repeated.status_code, 422)
+
+        stopped = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/stop",
+            json={"session_id": session_id, "keep_spraying": False},
+        )
+        self.assertEqual(stopped.status_code, 200)
+        self.assertEqual(stopped.json()["mode"], "static")
+        self.assertFalse(stopped.json()["spray_enabled"])
+        self.assertEqual(stopped.json()["ground_range_mm"], 700)
+        with SessionLocal() as db:
+            latest_command = db.query(DeviceCommandRecord).order_by(DeviceCommandRecord.id.desc()).first()
+            self.assertIsNotNone(latest_command)
+            self.assertEqual(latest_command.payload["position"], {"ground_range_mm": 700.0, "bearing_deg": -10.0})
+            self.assertEqual(latest_command.payload["water_gun"]["mode"], "static")
+            self.assertFalse(latest_command.payload["water_gun"]["spray_enabled"])
+
+    def test_water_gun_assistant_cancel_previews_and_confirm_dispatches(self) -> None:
+        candidate = PositionCandidate(
+            id="target-1",
+            label="U盘",
+            confidence=0.95,
+            bbox={"x": 100, "y": 100, "width": 80, "height": 40},
+            camera_range_mm=820,
+            ground_range_mm=750,
+            bearing_deg=-12,
+            anchor={"x": 140, "y": 120},
+        )
+
+        def add_action(db, result_id: str) -> EdgeAssistantAction:
+            current = now_ms()
+            session_id = f"edge-{uuid.uuid4()}"
+            message_id = f"message-{uuid.uuid4()}"
+            action = EdgeAssistantAction(
+                id=f"action-{uuid.uuid4()}",
+                session_id=session_id,
+                site_id="greenhouse_001",
+                message_id=message_id,
+                action_type="water_gun_target",
+                risk="high",
+                state="pending",
+                payload={"result_id": result_id},
+                created_at=current,
+                expires_at=current + 30_000,
+            )
+            db.add(EdgeAssistantSession(id=session_id, site_id="greenhouse_001", channel="edge_text", created_at=current, updated_at=current))
+            db.add(EdgeAssistantMessage(
+                id=message_id,
+                session_id=session_id,
+                site_id="greenhouse_001",
+                role="assistant",
+                channel="edge_text",
+                content="请确认是否喷水。",
+                created_at=current,
+                message_metadata={},
+            ))
+            db.add(action)
+            db.commit()
+            return action
+
+        with SessionLocal() as db:
+            canceled_action = add_action(db, _remember(candidate))
+            canceled = decide_edge_assistant_action(db, "greenhouse_001", canceled_action.id, "cancel")
+            self.assertEqual(canceled.state, "canceled")
+            self.assertFalse(canceled.payload["water_gun"]["spray_enabled"])
+            self.assertEqual(db.query(DeviceCommandRecord).count(), 0)
+
+            confirmed_action = add_action(db, _remember(candidate))
+            confirmed = decide_edge_assistant_action(db, "greenhouse_001", confirmed_action.id, "confirm")
+            self.assertEqual(confirmed.state, "confirmed")
+            self.assertTrue(confirmed.payload["water_gun"]["spray_enabled"])
+            command = db.query(DeviceCommandRecord).one()
+            self.assertEqual(command.payload["position"], {"ground_range_mm": 750.0, "bearing_deg": -12.0})
 
     def test_message_id_deduplicates_telemetry(self) -> None:
         payload = telemetry("sensairshuttle_001", 1_710_000_000)
@@ -503,6 +706,14 @@ class DeviceApiTests(unittest.TestCase):
             repeated = acknowledge_site_command(db, {"command_id": claimed.command_id, "state": "failed"})
             self.assertEqual(repeated.state, "succeeded")
 
+    def test_smart_control_cannot_issue_a_pump_command_while_water_gun_owns_it(self) -> None:
+        response = self.client.post(
+            "/api/v1/sites/greenhouse_001/commands",
+            json={"target": "pump", "value": 70, "source": "smart_control", "reason": "legacy automation"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("水枪控制", response.json()["detail"][0]["msg"])
+
     def test_expired_site_command_is_never_dispatched(self) -> None:
         with SessionLocal() as db:
             queued = queue_site_command(
@@ -536,6 +747,193 @@ class DeviceApiTests(unittest.TestCase):
             canceled = decide_edge_assistant_action(db, "greenhouse_001", reply.actions[0].id, "cancel")
             self.assertEqual(canceled.state, "canceled")
             self.assertEqual(db.query(SiteCommandRecord).count(), 0)
+
+    def test_v2_assistant_keeps_history_and_hidden_tool_context(self) -> None:
+        captured_messages: list[list[dict]] = []
+        calls = 0
+
+        def fake_deepseek(messages: list[dict], **_kwargs: object) -> dict:
+            nonlocal calls
+            calls += 1
+            captured_messages.append(messages)
+            if calls == 1:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "tool-state-1",
+                        "type": "function",
+                        "function": {"name": "read_site_state", "arguments": "{}"},
+                    }],
+                }
+            return {
+                "role": "assistant",
+                "content": '{"answer":"已结合上下文回答。","actions":[],"referenceIds":[]}',
+            }
+
+        session_id = f"web-{uuid.uuid4()}"
+        with patch("assistant_orchestrator.deepseek_api_key", return_value="test-key"), patch(
+            "assistant_orchestrator.call_deepseek_chat_message", side_effect=fake_deepseek
+        ):
+            first = run_assistant_turn(AssistantTurnRequest(
+                session_id=session_id,
+                site_id="greenhouse_001",
+                channel="web",
+                message_id=f"user-{uuid.uuid4()}",
+                text="温度怎么样",
+            ))
+            second = run_assistant_turn(AssistantTurnRequest(
+                session_id=session_id,
+                site_id="greenhouse_001",
+                channel="web",
+                message_id=f"user-{uuid.uuid4()}",
+                text="那湿度呢",
+            ))
+
+        self.assertEqual(first.message.content, "已结合上下文回答。")
+        self.assertEqual(second.message.content, "已结合上下文回答。")
+        second_turn_messages = captured_messages[-1]
+        self.assertTrue(any(item.get("content") == "温度怎么样" for item in second_turn_messages))
+        self.assertTrue(any(item.get("content") == "那湿度呢" for item in second_turn_messages))
+        self.assertIn("site_state", "\n".join(str(item.get("content", "")) for item in second_turn_messages))
+
+    def test_camera_configuration_question_prefetches_saved_height(self) -> None:
+        captured_messages: list[dict] = []
+        captured_tool_names: list[str] = []
+        model_calls = 0
+
+        def fake_deepseek(messages: list[dict], **kwargs: object) -> dict:
+            nonlocal model_calls
+            model_calls += 1
+            captured_messages.extend(messages)
+            tools = kwargs.get("tools")
+            if isinstance(tools, list):
+                captured_tool_names.extend(
+                    str(tool.get("function", {}).get("name"))
+                    for tool in tools
+                    if isinstance(tool, dict)
+                )
+            if model_calls == 1:
+                # Even if a model hallucinates an unavailable visual tool call,
+                # a configuration question must never capture or locate a frame.
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "tool-invalid-locate",
+                        "type": "function",
+                        "function": {"name": "locate_camera_target", "arguments": '{"query":"摄像头高度"}'},
+                    }],
+                }
+            return {
+                "role": "assistant",
+                "content": '{"answer":"镜头到定位平面的高度是 110 mm。","actions":[],"referenceIds":[]}',
+            }
+
+        with SessionLocal() as db:
+            save_app_state_value(db, "camera-position", {
+                "image_width": 1280,
+                "image_height": 720,
+                "fx": 1394,
+                "fy": 1394,
+                "cx": 640,
+                "cy": 349,
+                "distortion": [0, 0, 0, 0, 0],
+                "camera_height_mm": 110,
+                "pitch_down_deg": 1,
+                "yaw_deg": -1.1,
+                "roll_deg": -0.13,
+            })
+            save_app_state_value(db, "backend-camera", {
+                "device_index": 1,
+                "width": 1280,
+                "height": 720,
+                "fps": 15,
+            })
+
+        self.assertTrue(_is_camera_configuration_request("现在我的相机架有多高？"))
+        with patch("assistant_orchestrator.deepseek_api_key", return_value="test-key"), patch(
+            "assistant_orchestrator.call_deepseek_chat_message", side_effect=fake_deepseek
+        ), patch("assistant_orchestrator.camera_service.fresh_snapshot") as fresh_snapshot:
+            response = run_assistant_turn(AssistantTurnRequest(
+                session_id=f"web-{uuid.uuid4()}",
+                site_id="greenhouse_001",
+                channel="web",
+                message_id=f"user-{uuid.uuid4()}",
+                text="现在我的相机架有多高？",
+            ))
+
+        prompt_text = "\n".join(str(item.get("content", "")) for item in captured_messages)
+        self.assertIn('"camera_height_mm": 110.0', prompt_text)
+        self.assertEqual(response.message.content, "已保存的镜头安装高度为 110 mm（11 cm），指镜头到定位平面的垂直高度。")
+        self.assertNotIn("locate_camera_target", captured_tool_names)
+        self.assertNotIn("inspect_camera", captured_tool_names)
+        fresh_snapshot.assert_not_called()
+
+    def test_dashboard_context_reads_business_sections_and_excludes_ui_drafts(self) -> None:
+        with SessionLocal() as db:
+            save_app_state_value(db, "dashboard", {
+                "smartControlEnabled": True,
+                "smartControlLastPublishAt": 1_910_000_000_000,
+                "chatInput": "不应发送的输入草稿",
+                "assistantWidth": 520,
+            })
+            execution = _execute_tool(
+                db,
+                "greenhouse_001",
+                "读取控制状态",
+                "read_dashboard_context",
+                {"sections": ["overview", "control", "water_gun"]},
+                lambda _text: None,
+            )
+
+        self.assertIn("overview", execution.content)
+        self.assertIn("water_gun", execution.content)
+        self.assertTrue(execution.content["control"]["smartControlEnabled"])
+        self.assertNotIn("chatInput", execution.content["control"])
+        self.assertNotIn("assistantWidth", execution.content["control"])
+
+    def test_camera_configuration_reports_missing_saved_values_and_offline_runtime(self) -> None:
+        with SessionLocal() as db, patch("assistant_orchestrator.camera_service.status", return_value={
+            "connected": False,
+            "width": 0,
+            "height": 0,
+            "captured_at": 0,
+            "error": "camera unavailable",
+        }):
+            execution = _execute_tool(
+                db,
+                "greenhouse_001",
+                "读取相机配置",
+                "read_camera_configuration",
+                {},
+                lambda _text: None,
+            )
+
+        self.assertFalse(execution.content["position_config_saved"])
+        self.assertFalse(execution.content["runtime"]["connected"])
+        self.assertEqual(execution.content["runtime"]["error"], "camera unavailable")
+
+    def test_dashboard_context_handles_empty_saved_business_data(self) -> None:
+        with SessionLocal() as db, patch("weather_service.weather_bundle", return_value={
+            "city": "无锡",
+            "current": {"available": False, "reason": "not configured"},
+            "registered_capabilities": [{"key": "grid"}],
+        }):
+            execution = _execute_tool(
+                db,
+                "greenhouse_001",
+                "读取页面业务信息",
+                "read_dashboard_context",
+                {"sections": ["history", "weather", "alarms", "disease", "knowledge"]},
+                lambda _text: None,
+            )
+
+        self.assertEqual(execution.content["history"]["points"], [])
+        self.assertEqual(execution.content["alarms"]["recent"], [])
+        self.assertEqual(execution.content["disease"]["recent_photos"], [])
+        self.assertIn("bases", execution.content["knowledge"])
+        self.assertNotIn("registered_capabilities", execution.content["weather"])
 
     def test_sse_event_format_contains_retry_event_and_json_data(self) -> None:
         stream = site_event_bus.stream("greenhouse_001")

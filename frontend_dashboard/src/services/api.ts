@@ -27,6 +27,8 @@ import type {
   DeviceHealth,
   DiseasePhotoInfo,
   DiseaseDetectionResult,
+  CameraPositionConfig,
+  BackendCameraConfig,
   ExpertChatRequest,
   ExpertChatResponse,
   HistoryPoint,
@@ -48,11 +50,24 @@ import type {
   SiteActuatorTarget,
   SiteCommandResult,
   SiteState,
+  PositionLocateResult,
+  AssistantTurnAccepted,
+  AssistantTurnEvent,
+  AssistantTurnRequest,
+  AssistantPreferenceItem,
+  WaterGunState,
+  WaterGunTargetInput,
 } from '../types';
 import { UserFacingError } from '../utils/format';
 import chinaWeatherRegions from '../../shared_data/china_weather_regions.json';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+
+export function resolveApiAssetUrl(path: string | undefined): string {
+  if (!path) return '';
+  if (/^(?:https?:|blob:|data:)/i.test(path)) return path;
+  return `${apiBaseUrl.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+}
 // Live telemetry is the default. Mock mode must be opted into explicitly so a
 // page reload never silently regenerates a synthetic history curve.
 const useMock = import.meta.env.VITE_USE_MOCK === 'true';
@@ -95,8 +110,13 @@ function serviceErrorMessage(status: number): string {
 
 async function throwServiceError(response: Response, operation: string): Promise<never> {
   let detail = '';
+  let userDetail = '';
   try {
     detail = (await response.text()).slice(0, 800);
+    const parsed = JSON.parse(detail) as { detail?: unknown };
+    if (typeof parsed.detail === 'string' && parsed.detail.trim().length > 0) {
+      userDetail = parsed.detail.trim().slice(0, 300);
+    }
   } catch {
     // Keep the user-facing response independent from diagnostic parsing.
   }
@@ -105,7 +125,7 @@ async function throwServiceError(response: Response, operation: string): Promise
     statusText: response.statusText,
     detail,
   });
-  throw new UserFacingError(serviceErrorMessage(response.status));
+  throw new UserFacingError(userDetail || serviceErrorMessage(response.status));
 }
 
 export interface FarmAnalysisContext {
@@ -155,6 +175,41 @@ function resolveApiUrl(url: string): string {
     return url;
   }
   return `${apiBaseUrl}${url.startsWith('/') ? url : `/${url}`}`;
+}
+
+export function backendCameraStreamUrl(): string {
+  return `${apiBaseUrl}/api/v1/camera/stream.mjpg`;
+}
+
+export async function getBackendCameraStatus(): Promise<{ ready: boolean; error?: string; captured_at?: number }> {
+  return requestJson<{ ready: boolean; error?: string; captured_at?: number }>('/api/v1/camera/status', {
+    timeoutMs: 5000,
+  });
+}
+
+export async function getBackendCameraConfig(): Promise<BackendCameraConfig> {
+  const status = await requestJson<{ config: BackendCameraConfig }>('/api/v1/camera/status', { timeoutMs: 5000 });
+  return status.config;
+}
+
+export async function saveBackendCameraConfig(config: BackendCameraConfig): Promise<BackendCameraConfig> {
+  const result = await requestJson<{ success: boolean; config: BackendCameraConfig }>('/api/v1/camera/config', {
+    method: 'PUT',
+    body: JSON.stringify(config),
+  });
+  return result.config;
+}
+
+export async function captureBackendCameraFrame(): Promise<File> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}/api/v1/camera/frame.jpg?ts=${Date.now()}`, { cache: 'no-store' });
+  } catch (error) {
+    throw new UserFacingError('无法连接电脑后端摄像头。', error);
+  }
+  if (!response.ok) await throwServiceError(response, 'Camera snapshot');
+  const blob = await response.blob();
+  return new File([blob], `camera-frame-${Date.now()}.jpg`, { type: 'image/jpeg' });
 }
 
 function normalizeDiseasePhoto(item: DiseasePhotoInfo): DiseasePhotoInfo {
@@ -270,7 +325,7 @@ export function subscribeSiteEvents(
   siteId = defaultSiteId,
 ): () => void {
   const source = new EventSource(`${apiBaseUrl}/api/v1/sites/${encodeURIComponent(siteId)}/events`);
-  const eventNames = ['telemetry', 'device_status', 'capabilities', 'command_update', 'assistant_message', 'assistant_action'];
+  const eventNames = ['telemetry', 'device_status', 'capabilities', 'command_update', 'assistant_message', 'assistant_action', 'water_gun'];
   for (const eventName of eventNames) {
     source.addEventListener(eventName, (event) => {
       try {
@@ -329,6 +384,86 @@ export async function decideSharedAssistantAction(
     `/api/v1/sites/${encodeURIComponent(siteId)}/assistant/actions/${encodeURIComponent(actionId)}/decision`,
     { method: 'POST', body: JSON.stringify({ decision }) },
   );
+}
+
+export async function createAssistantTurn(payload: AssistantTurnRequest): Promise<AssistantTurnAccepted> {
+  return requestJson<AssistantTurnAccepted>('/api/v1/assistant/turns', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    timeoutMs: 10000,
+  });
+}
+
+export async function streamAssistantTurn(
+  turnId: string,
+  onProgress?: (text: string) => void,
+): Promise<ExpertChatResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}/api/v1/assistant/turns/${encodeURIComponent(turnId)}/events`, {
+      headers: { Accept: 'text/event-stream' },
+    });
+  } catch (error) {
+    throw new UserFacingError('无法连接智能助手，请检查后端服务。', error);
+  }
+  if (!response.ok || !response.body) {
+    await throwServiceError(response, 'Assistant event stream');
+  }
+
+  const streamBody = response.body;
+  if (!streamBody) throw new UserFacingError('智能助手事件流没有可读取内容。');
+  const reader = streamBody.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalResponse: ExpertChatResponse | null = null;
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() ?? '';
+    for (const block of blocks) {
+      if (!block || block.startsWith(':')) continue;
+      let eventName = 'message';
+      const dataLines: string[] = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+        if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      if (!dataLines.length) continue;
+      const data = JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
+      const event = { event: eventName, data } as AssistantTurnEvent;
+      if (event.event === 'progress') onProgress?.(event.data.text);
+      if (event.event === 'completed') finalResponse = event.data.response;
+      if (event.event === 'failed') throw new UserFacingError(event.data.message || '智能助手暂时不可用。');
+    }
+    if (done) break;
+  }
+  if (!finalResponse) throw new UserFacingError('智能助手没有返回完整结果，请重试。');
+  const actions = finalResponse.actions ?? finalResponse.message.suggested_actions ?? [];
+  return {
+    ...finalResponse,
+    message: {
+      ...finalResponse.message,
+      content: sanitizeAssistantContent(finalResponse.message.content),
+      suggested_actions: actions.map((action) => ({ ...action, status: action.status ?? 'pending' })),
+    },
+    actions,
+  };
+}
+
+export async function getAssistantPreferences(siteId = defaultSiteId): Promise<AssistantPreferenceItem[]> {
+  const result = await requestJson<{ site_id: string; items: AssistantPreferenceItem[] }>(
+    `/api/v1/assistant/preferences?site_id=${encodeURIComponent(siteId)}`,
+  );
+  return result.items;
+}
+
+export async function deleteAssistantPreference(key: string, siteId = defaultSiteId): Promise<AssistantPreferenceItem[]> {
+  const result = await requestJson<{ site_id: string; items: AssistantPreferenceItem[] }>(
+    `/api/v1/assistant/preferences/${encodeURIComponent(key)}?site_id=${encodeURIComponent(siteId)}`,
+    { method: 'DELETE' },
+  );
+  return result.items;
 }
 
 export async function getDeviceHistory(): Promise<HistoryPoint[]> {
@@ -583,6 +718,110 @@ export async function analyzeGrowthFrame(file: File, imageUrl: string): Promise<
   return analyzeDiseaseImage(file, imageUrl, 'auto');
 }
 
+export async function getCameraPositionConfig(): Promise<CameraPositionConfig | null> {
+  try {
+    const result = await requestJson<{ value: CameraPositionConfig }>('/api/v1/state/camera-position', { timeoutMs: 1200 });
+    return result.value && typeof result.value === 'object' ? result.value : null;
+  } catch (error) {
+    console.warn('Camera position configuration unavailable.', error);
+    return null;
+  }
+}
+
+export async function saveCameraPositionConfig(value: CameraPositionConfig): Promise<void> {
+  await requestJson('/api/v1/state/camera-position', {
+    method: 'POST',
+    body: JSON.stringify({ value }),
+  });
+}
+
+export async function locateCameraObject(
+  file: File,
+  question: string,
+  calibration: CameraPositionConfig,
+): Promise<PositionLocateResult> {
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('question', question);
+  formData.append('calibration', JSON.stringify(calibration));
+  const response = await fetch(`${apiBaseUrl}/api/vision/locate`, { method: 'POST', body: formData });
+  if (!response.ok) {
+    await throwServiceError(response, 'Camera object location');
+  }
+  return response.json() as Promise<PositionLocateResult>;
+}
+
+export async function sendCameraPosition(resultId: string, deviceId: string): Promise<{ success: boolean; command_id: number; message: string }> {
+  return requestJson<{ success: boolean; command_id: number; message: string }>('/api/vision/position/send', {
+    method: 'POST',
+    body: JSON.stringify({ result_id: resultId, device_id: deviceId }),
+  });
+}
+
+export async function getWaterGunState(siteId = defaultSiteId): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun`);
+}
+
+export async function setWaterGunStaticTarget(
+  target: WaterGunTargetInput,
+  siteId = defaultSiteId,
+): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/static`, {
+    method: 'POST',
+    body: JSON.stringify(target),
+  });
+}
+
+export async function previewWaterGunTarget(
+  target: WaterGunTargetInput,
+  siteId = defaultSiteId,
+): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/preview`, {
+    method: 'POST',
+    body: JSON.stringify(target),
+  });
+}
+
+export async function startWaterGunDynamic(
+  target: WaterGunTargetInput,
+  siteId = defaultSiteId,
+): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/dynamic/start`, {
+    method: 'POST',
+    body: JSON.stringify(target),
+  });
+}
+
+export async function updateWaterGunDynamicTarget(
+  sessionId: string,
+  sequence: number,
+  target: Pick<WaterGunTargetInput, 'ground_range_mm' | 'bearing_deg'>,
+  siteId = defaultSiteId,
+): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/dynamic/target`, {
+    method: 'PUT',
+    body: JSON.stringify({ session_id: sessionId, sequence, ...target }),
+  });
+}
+
+export async function heartbeatWaterGunDynamic(sessionId: string, siteId = defaultSiteId): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/dynamic/heartbeat`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+export async function stopWaterGunDynamic(
+  sessionId: string,
+  keepSpraying: boolean,
+  siteId = defaultSiteId,
+): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/dynamic/stop`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, keep_spraying: keepSpraying }),
+  });
+}
+
 export async function uploadDiseasePhoto(file: File): Promise<DiseasePhotoInfo> {
   const formData = new FormData();
   formData.append('image', file);
@@ -638,12 +877,46 @@ export async function sendExpertChatMessage(payload: ExpertChatRequest): Promise
     ...response,
     message: {
       ...response.message,
+      content: sanitizeAssistantContent(response.message.content),
       references: response.message.references ?? response.references ?? [],
       retrievalStatus: response.retrievalStatus ?? 'not_used',
       suggested_actions: actions.map((action) => ({ ...action, status: action.status ?? 'pending' })),
     },
     actions,
   };
+}
+
+function sanitizeAssistantContent(content: string): string {
+  const text = String(content ?? '').trim();
+  if (!text) return '我已收到问题，但暂时没有生成可靠回答。';
+
+  const jsonCandidates: string[] = [text];
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    if (match[1]) jsonCandidates.push(match[1].trim());
+  }
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    jsonCandidates.push(text.slice(firstBrace, lastBrace + 1));
+  }
+  for (const candidate of jsonCandidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { answer?: unknown };
+      if (parsed && typeof parsed === 'object' && typeof parsed.answer === 'string' && parsed.answer.trim()) {
+        return parsed.answer.trim().slice(0, 1600);
+      }
+    } catch {
+      // Continue with the user-visible prose cleanup below.
+    }
+  }
+
+  let cleaned = text.replace(/```(?:json)?\s*[\s\S]*?```/gi, '').trim();
+  const internalJsonStart = cleaned.search(/\n\s*\{\s*["']?(?:answer|actions|referenceIds)["']?\s*:/i);
+  if (internalJsonStart >= 0) cleaned = cleaned.slice(0, internalJsonStart).trim();
+  if (!cleaned || /^[\[{]/.test(cleaned)) {
+    return '我已收到问题，但暂时没有生成可靠回答，请换一种说法后重试。';
+  }
+  return cleaned.slice(0, 1600);
 }
 
 const mockAgriSources: AgriSourceInfo[] = [

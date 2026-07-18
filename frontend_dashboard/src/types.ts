@@ -268,7 +268,9 @@ export type AssistantActionType =
   | 'knowledge_base'
   | 'knowledge_item'
   | 'run_knowledge_analysis'
-  | 'refresh_data';
+  | 'refresh_data'
+  | 'send_position'
+  | 'water_gun_target';
 
 export type AssistantActionRisk = 'normal' | 'medium' | 'high';
 export type AssistantActionStatus = 'pending' | 'executed' | 'canceled' | 'failed';
@@ -369,6 +371,88 @@ export interface DetectionBox {
   height: number;
 }
 
+export interface CameraPositionConfig {
+  image_width: number;
+  image_height: number;
+  fx: number;
+  fy: number;
+  cx: number;
+  cy: number;
+  distortion: number[];
+  camera_height_mm: number;
+  pitch_down_deg: number;
+  yaw_deg: number;
+  roll_deg: number;
+}
+
+export interface BackendCameraConfig {
+  device_index: number;
+  width: number;
+  height: number;
+  fps: number;
+}
+
+export interface PositionCandidate {
+  id: string;
+  label: string;
+  confidence: number;
+  bbox: DetectionBox;
+  camera_range_mm: number;
+  ground_range_mm: number;
+  bearing_deg: number;
+  description?: string;
+  attributes?: Record<string, string>;
+  anchor: { x: number; y: number };
+  anchor_type: 'visual_center' | 'surface_center' | 'footprint_center' | 'custom';
+  estimated_height_mm: number;
+  effective_height_mm: number;
+  height_confidence: number;
+  height_fallback: boolean;
+  anchor_reason: string;
+}
+
+export interface PositionLocateResult {
+  status: 'located' | 'multiple' | 'not_found' | 'calibration_missing' | 'invalid_geometry';
+  result_id?: string;
+  message: string;
+  captured_at: number;
+  candidates: PositionCandidate[];
+  selected?: PositionCandidate;
+  annotated_image_url?: string;
+  image_width: number;
+  image_height: number;
+}
+
+export type WaterGunMode = 'static' | 'dynamic';
+export type WaterGunTargetSource = 'manual' | 'vision';
+
+export interface WaterGunState {
+  site_id: string;
+  device_id: string;
+  mode: WaterGunMode;
+  ground_range_mm: number;
+  bearing_deg: number;
+  spray_enabled: boolean;
+  source: WaterGunTargetSource;
+  target_label: string;
+  session_id: string | null;
+  sequence: number;
+  updated_at: number;
+  last_command_id: number | null;
+  timed_out: boolean;
+  simulation_only: boolean;
+  pump_control_percent: number;
+}
+
+export interface WaterGunTargetInput {
+  ground_range_mm: number;
+  bearing_deg: number;
+  device_id?: string;
+  source?: WaterGunTargetSource;
+  target_label?: string;
+  spray_enabled?: boolean;
+}
+
 export interface DiseaseDetection {
   id: string;
   label: string;
@@ -430,7 +514,42 @@ export interface ChatMessage {
   retrievalStatus?: RetrievalStatus;
   suggested_commands?: AiCommand[];
   suggested_actions?: AssistantAction[];
+  position_result?: PositionLocateResult;
+  context?: Record<string, unknown>;
 }
+
+export interface AssistantSeedMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: number;
+}
+
+export interface AssistantTurnRequest {
+  session_id?: string;
+  site_id?: string;
+  channel: 'web' | 'edge_text';
+  message_id: string;
+  text: string;
+  seed_history?: AssistantSeedMessage[];
+}
+
+export interface AssistantTurnAccepted {
+  turn_id: string;
+  session_id: string;
+  state: 'queued';
+}
+
+export interface AssistantPreferenceItem {
+  key: string;
+  value: string;
+  updated_at: number;
+}
+
+export type AssistantTurnEvent =
+  | { event: 'progress'; data: { turn_id: string; text: string } }
+  | { event: 'completed'; data: { turn_id: string; session_id: string; response: ExpertChatResponse } }
+  | { event: 'failed'; data: { turn_id?: string; session_id?: string; message: string } };
 
 export interface AssistantThread {
   id: string;

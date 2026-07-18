@@ -75,6 +75,8 @@ AssistantActionType = Literal[
     "knowledge_item",
     "run_knowledge_analysis",
     "refresh_data",
+    "send_position",
+    "water_gun_target",
 ]
 AssistantActionRisk = Literal["normal", "medium", "high"]
 
@@ -103,6 +105,8 @@ class AssistantChatRequest(BaseModel):
     knowledge_items: List[Dict[str, Any]] = Field(default_factory=list)
     command_results: List[Dict[str, Any]] = Field(default_factory=list)
     retrieval_mode: Literal["auto", "force", "off"] = "auto"
+    session_id: Optional[str] = Field(default=None, max_length=64)
+    history: List[Dict[str, Any]] = Field(default_factory=list, max_length=30)
 
 
 class AssistantChatMessage(BaseModel):
@@ -112,6 +116,7 @@ class AssistantChatMessage(BaseModel):
     created_at: int
     references: List[KnowledgeReference] = Field(default_factory=list)
     suggested_actions: List[AssistantAction] = Field(default_factory=list)
+    context: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AssistantChatResponse(BaseModel):
@@ -119,6 +124,99 @@ class AssistantChatResponse(BaseModel):
     references: List[KnowledgeReference] = Field(default_factory=list)
     actions: List[AssistantAction] = Field(default_factory=list)
     retrievalStatus: Literal["not_used", "success", "partial", "unavailable"] = "not_used"
+
+
+class AssistantSeedMessage(BaseModel):
+    id: str = Field(..., min_length=1, max_length=80)
+    role: Literal["user", "assistant"]
+    content: str = Field(..., max_length=2000)
+    created_at: int = Field(..., gt=0)
+
+
+class AssistantTurnRequest(BaseModel):
+    session_id: Optional[str] = Field(default=None, max_length=64)
+    site_id: str = Field(default="greenhouse_001", min_length=1, max_length=80)
+    channel: Literal["web", "edge_text"] = "web"
+    message_id: str = Field(..., min_length=1, max_length=80)
+    text: str = Field(..., min_length=1, max_length=1200)
+    seed_history: List[AssistantSeedMessage] = Field(default_factory=list, max_length=30)
+
+
+class AssistantTurnAccepted(BaseModel):
+    turn_id: str
+    session_id: str
+    state: Literal["queued"] = "queued"
+
+
+class AssistantPreferenceItem(BaseModel):
+    key: str
+    value: str
+    updated_at: int
+
+
+class AssistantPreferenceList(BaseModel):
+    site_id: str
+    items: List[AssistantPreferenceItem] = Field(default_factory=list)
+
+
+class CameraPositionConfig(BaseModel):
+    image_width: int = Field(default=1280, ge=1, le=7680)
+    image_height: int = Field(default=720, ge=1, le=4320)
+    fx: float = Field(default=0, ge=0, allow_inf_nan=False)
+    fy: float = Field(default=0, ge=0, allow_inf_nan=False)
+    cx: float = Field(default=0, ge=0, allow_inf_nan=False)
+    cy: float = Field(default=0, ge=0, allow_inf_nan=False)
+    distortion: List[float] = Field(default_factory=list, max_length=8)
+    camera_height_mm: float = Field(default=60, gt=0, le=10_000, allow_inf_nan=False)
+    pitch_down_deg: float = Field(default=30, ge=-89, le=89, allow_inf_nan=False)
+    yaw_deg: float = Field(default=0, ge=-180, le=180, allow_inf_nan=False)
+    roll_deg: float = Field(default=0, ge=-180, le=180, allow_inf_nan=False)
+
+    @property
+    def calibrated(self) -> bool:
+        return self.fx > 0 and self.fy > 0
+
+
+class PositionCandidate(BaseModel):
+    id: str
+    label: str
+    confidence: float = Field(ge=0, le=1)
+    bbox: Dict[str, float]
+    camera_range_mm: float = Field(gt=0)
+    ground_range_mm: float = Field(ge=0)
+    bearing_deg: float = Field(ge=-180, le=180)
+    description: str = ""
+    attributes: Dict[str, str] = Field(default_factory=dict)
+    anchor: Dict[str, float] = Field(default_factory=dict)
+    anchor_type: Literal["visual_center", "surface_center", "footprint_center", "custom"] = "visual_center"
+    estimated_height_mm: float = Field(default=0, ge=0, le=10_000)
+    effective_height_mm: float = Field(default=0, ge=0, le=10_000)
+    height_confidence: float = Field(default=0, ge=0, le=1)
+    height_fallback: bool = True
+    anchor_reason: str = ""
+
+
+class PositionLocateResponse(BaseModel):
+    status: Literal["located", "multiple", "not_found", "calibration_missing", "invalid_geometry"]
+    result_id: Optional[str] = None
+    message: str
+    captured_at: int
+    candidates: List[PositionCandidate] = Field(default_factory=list)
+    selected: Optional[PositionCandidate] = None
+    annotated_image_url: Optional[str] = None
+    image_width: int = Field(default=0, ge=0)
+    image_height: int = Field(default=0, ge=0)
+
+
+class PositionDispatchRequest(BaseModel):
+    result_id: str = Field(..., min_length=8, max_length=120)
+    device_id: str = Field(..., min_length=1, max_length=80)
+
+
+class PositionDispatchResponse(BaseModel):
+    success: bool
+    command_id: int
+    message: str
 
 
 class AgriSourceInfo(BaseModel):

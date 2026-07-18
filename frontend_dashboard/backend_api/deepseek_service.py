@@ -102,6 +102,7 @@ def call_deepseek_chat_message(
     response_format: Optional[Dict[str, str]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
+    thinking_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call DeepSeek and return the complete assistant message.
 
@@ -125,9 +126,11 @@ def call_deepseek_chat_message(
     if tool_choice is not None:
         body["tool_choice"] = tool_choice
 
-    thinking_mode = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
-    if thinking_mode in {"enabled", "disabled", "auto"}:
-        body["thinking"] = {"type": thinking_mode}
+    selected_thinking_mode = (
+        thinking_mode if thinking_mode is not None else os.getenv("DEEPSEEK_THINKING", "disabled")
+    ).strip().lower()
+    if selected_thinking_mode in {"enabled", "disabled", "auto"}:
+        body["thinking"] = {"type": selected_thinking_mode}
 
     headers = {
         "Authorization": f"Bearer {api_key}",

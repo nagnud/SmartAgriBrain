@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Camera, Expand, Minimize2, Power, RefreshCw, ShieldAlert, Sparkles, X } from '@lucide/vue';
 import StatusPill from './StatusPill.vue';
-import { analyzeGrowthFrame } from '../services/api';
+import {
+  analyzeGrowthFrame,
+  backendCameraStreamUrl,
+  captureBackendCameraFrame,
+  getBackendCameraStatus,
+} from '../services/api';
 import type { DiseaseDetectionResult, RetrievalStatus } from '../types';
 import { confidenceText, formatDateTime, userErrorText } from '../utils/format';
 
@@ -22,9 +27,8 @@ const emit = defineEmits<{
 const captureIntervalMs = 120000;
 const autoAnalysisStorageKey = 'smartagribrain-camera-auto-analysis';
 
-const videoRef = ref<HTMLVideoElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
-const stream = ref<MediaStream | null>(null);
+const liveStreamUrl = ref('');
 const cameraReady = ref(false);
 const cameraError = ref('');
 const analyzing = ref(false);
@@ -184,8 +188,7 @@ function revokeLastCaptureUrl(): void {
 
 function stopCamera(): void {
   clearCaptureTimer();
-  stream.value?.getTracks().forEach((track) => track.stop());
-  stream.value = null;
+  liveStreamUrl.value = '';
   cameraReady.value = false;
 }
 
@@ -202,41 +205,16 @@ function cameraErrorText(error: unknown): string {
   return '摄像头暂时不可用。';
 }
 
-async function attachStream(nextStream: MediaStream): Promise<void> {
-  await nextTick();
-  const video = videoRef.value;
-  if (!video) {
-    return;
-  }
-  video.srcObject = nextStream;
-  await video.play();
-  cameraReady.value = true;
-}
-
 async function startCamera(): Promise<void> {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    cameraError.value = '当前浏览器不支持本地摄像头访问。';
-    return;
-  }
-
   stopCamera();
   cameraError.value = '';
   analysisError.value = '';
   try {
-    const nextStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        facingMode: 'environment',
-      },
-      audio: false,
-    });
-    if (!props.active) {
-      nextStream.getTracks().forEach((track) => track.stop());
-      return;
-    }
-    stream.value = nextStream;
-    await attachStream(nextStream);
+    const status = await getBackendCameraStatus();
+    if (!status.ready) throw new Error(status.error || '后端尚未取得摄像头画面。');
+    if (!props.active) return;
+    liveStreamUrl.value = `${backendCameraStreamUrl()}?ts=${Date.now()}`;
+    cameraReady.value = true;
     scheduleNextCapture();
   } catch (error) {
     stopCamera();
@@ -257,33 +235,13 @@ function buildCaptureFile(canvas: HTMLCanvasElement): Promise<File | null> {
 }
 
 async function captureAndAnalyze(): Promise<void> {
-  const video = videoRef.value;
-  const canvas = canvasRef.value;
-  if (!video || !canvas || !cameraReady.value || analyzing.value) {
+  if (!cameraReady.value || analyzing.value) {
     return;
   }
 
   clearCaptureTimer();
-
-  const width = video.videoWidth;
-  const height = video.videoHeight;
-  if (width <= 0 || height <= 0) {
-    return;
-  }
-
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    analysisError.value = '无法读取摄像头画面。';
-    return;
-  }
-  context.drawImage(video, 0, 0, width, height);
-  const file = await buildCaptureFile(canvas);
-  if (!file) {
-    analysisError.value = '截图生成失败，请稍后重试。';
-    return;
-  }
+  const file = await captureCurrentFrame();
+  if (!file) return;
 
   revokeLastCaptureUrl();
   const captureUrl = URL.createObjectURL(file);
@@ -319,8 +277,21 @@ async function captureAndAnalyzeFromRefresh(): Promise<void> {
   await captureAndAnalyze();
 }
 
+async function captureCurrentFrame(): Promise<File | null> {
+  if (!cameraReady.value) {
+    return null;
+  }
+  try {
+    return await captureBackendCameraFrame();
+  } catch (error) {
+    cameraError.value = cameraErrorText(error);
+    return null;
+  }
+}
+
 defineExpose({
   captureAndAnalyze: captureAndAnalyzeFromRefresh,
+  captureCurrentFrame,
 });
 
 function openFullscreen(): void {
@@ -430,7 +401,13 @@ onBeforeUnmount(() => {
       @keydown.enter.prevent="openFullscreen"
       @keydown.space.prevent="openFullscreen"
     >
-      <video v-show="cameraMode === 'live'" ref="videoRef" autoplay muted playsinline></video>
+      <img
+        v-if="cameraMode === 'live' && cameraReady"
+        class="camera-live-frame"
+        :src="liveStreamUrl"
+        alt="电脑后端摄像头实时画面"
+        @error="cameraError = '摄像头预览流已断开，请重新连接。'; cameraReady = false"
+      />
 
       <template v-if="cameraMode === 'live' && !cameraReady">
         <div class="camera-stage__placeholder">

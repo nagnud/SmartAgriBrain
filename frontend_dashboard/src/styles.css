@@ -668,6 +668,177 @@ body.is-resizing-assistant * {
   box-shadow: none;
 }
 
+.camera-position-config {
+  margin-top: 18px;
+}
+
+.camera-position-config summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: #24452e;
+}
+
+.camera-position-config > p {
+  margin: 12px 0;
+  color: #68756b;
+  font-size: 13px;
+}
+
+.camera-position-config__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.camera-position-config__grid label {
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+  color: #546258;
+}
+
+.camera-position-config__grid input {
+  min-width: 0;
+}
+
+.camera-position-config__actions,
+.position-result-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.camera-position-config__actions > span {
+  color: #68756b;
+  font-size: 13px;
+}
+
+.position-result-card {
+  padding: 10px;
+  border: 1px solid #cddfcf;
+  border-radius: 10px;
+  background: #f3faf4;
+}
+
+.position-result-card strong {
+  width: 100%;
+  color: #245435;
+}
+
+.position-result-card span {
+  font-size: 13px;
+  color: #47574b;
+}
+
+.position-result-details {
+  width: 100%;
+  color: #46584b;
+  font-size: 13px;
+  border-top: 1px solid #d7e6d9;
+  padding-top: 8px;
+}
+
+.position-result-details summary {
+  color: #2d6c40;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.position-result-details dl {
+  display: grid;
+  gap: 5px;
+  margin: 9px 0;
+}
+
+.position-result-details dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.position-result-details dt,
+.position-result-details dd {
+  margin: 0;
+}
+
+.position-result-details dt {
+  color: #68776c;
+}
+
+.position-result-details dd {
+  color: #263d2d;
+  font-weight: 700;
+}
+
+.position-result-details p {
+  margin: 8px 0 0;
+  color: #607066;
+  line-height: 1.55;
+}
+
+.position-result-card__capture {
+  display: grid;
+  width: 100%;
+  gap: 7px;
+  padding: 0;
+  overflow: hidden;
+  color: inherit;
+  text-align: left;
+  border: 1px solid #c4d9c8;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: zoom-in;
+}
+
+.position-result-card__capture img {
+  width: 100%;
+  max-height: 210px;
+  object-fit: contain;
+  background: #15231a;
+}
+
+.position-result-card__capture span {
+  padding: 0 9px 8px;
+  color: #3d6848;
+  font-size: 12px;
+}
+
+.position-result-card__capture-error {
+  width: 100%;
+  margin: 0;
+  padding: 10px;
+  color: #8a4f19;
+  font-size: 13px;
+  border: 1px solid #e6c89f;
+  border-radius: 8px;
+  background: #fff8ec;
+}
+
+.position-capture-modal {
+  z-index: 80;
+}
+
+.position-capture-modal__card {
+  width: min(1100px, 100%);
+}
+
+.position-capture-modal__card > img {
+  display: block;
+  width: 100%;
+  max-height: calc(100vh - 190px);
+  object-fit: contain;
+  border-radius: 8px;
+  background: #142219;
+}
+
+.position-capture-modal__card > p {
+  margin: 12px 0 0;
+  color: #59675d;
+  font-size: 13px;
+}
+
 .camera-growth-panel__header,
 .growth-analysis-box__status,
 .overview-metric-item__top,
@@ -814,6 +985,7 @@ body.is-resizing-assistant * {
 }
 
 .camera-stage video,
+.camera-live-frame,
 .camera-analysis-frame {
   width: 100%;
   height: 100%;
@@ -2563,6 +2735,30 @@ body.is-resizing-assistant .assistant-resizer::before {
   gap: 8px;
 }
 
+.assistant-preferences-panel {
+  margin: 0 1rem 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid #d7e5d9;
+  border-radius: 12px;
+  background: #f7fbf7;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.assistant-preferences-panel > div,
+.assistant-preferences-panel article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.assistant-preferences-panel p,
+.assistant-preferences-panel article {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
 .assistant-voice-status {
   min-width: 0;
   max-width: 100%;
@@ -3379,6 +3575,326 @@ body.is-resizing-assistant .assistant-resizer::before {
   border-left: 2px solid #b7d8bd;
   border-radius: 0 0 0 8px;
   background: transparent;
+}
+
+.water-gun-panel {
+  overflow: hidden;
+  padding: 18px;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(30, 182, 167, 0.1), transparent 34%),
+    #ffffff;
+}
+
+.water-gun-heading,
+.water-gun-heading__status,
+.water-gun-actions,
+.water-gun-leave-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.water-gun-heading__status {
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.water-gun-mode-switch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, auto);
+  padding: 3px;
+  border: 1px solid #bcd9c3;
+  border-radius: 10px;
+  background: #f0f7f2;
+}
+
+.water-gun-mode-switch button,
+.water-gun-state-button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #52645a;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.water-gun-mode-switch button.is-active {
+  color: #ffffff;
+  background: #258b4b;
+  box-shadow: 0 3px 8px rgba(37, 139, 75, 0.2);
+}
+
+.water-gun-state-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #d6e1d8;
+  background: #f7faf8;
+}
+
+.water-gun-state-button span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8a9790;
+}
+
+.water-gun-state-button.is-on {
+  color: #087d75;
+  border-color: #8fd3ca;
+  background: #e8f8f5;
+}
+
+.water-gun-state-button.is-on span {
+  background: #12a89d;
+  box-shadow: 0 0 0 4px rgba(18, 168, 157, 0.13);
+}
+
+.water-gun-state-button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.water-gun-simulation-badge {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  color: #76531b;
+  border: 1px solid #e8c983;
+  border-radius: 8px;
+  background: #fff8e5;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.water-gun-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(245px, 0.72fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.water-gun-field-wrap {
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid #cfe0d1;
+  border-radius: 12px;
+  background: rgba(248, 252, 248, 0.92);
+}
+
+.water-gun-field {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 1;
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+}
+
+.water-gun-grid-line {
+  fill: none;
+  stroke: #bdd7c2;
+  stroke-dasharray: 7 7;
+  stroke-width: 1.5;
+}
+
+.water-gun-grid-line--minor {
+  opacity: 0.55;
+  stroke-dasharray: 4 9;
+}
+
+.water-gun-field-label {
+  fill: #597063;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.water-gun-aim-line {
+  stroke: #0fa69d;
+  stroke-dasharray: 8 7;
+  stroke-linecap: round;
+  stroke-width: 2.5;
+}
+
+.water-gun-origin { pointer-events: none; filter: drop-shadow(0 4px 5px rgba(25, 89, 72, 0.25)); }
+.water-gun-base { fill: url(#water-gun-base); stroke: #ffffff; stroke-width: 4; }
+.water-gun-body rect:first-child { fill: url(#water-gun-body); stroke: #087d83; stroke-width: 2; }
+.water-gun-nozzle { fill: #1595d3; stroke: #0875ab; stroke-width: 2; }
+.water-gun-tip { fill: #ff8b35; stroke: #d86417; stroke-width: 2; }
+.water-gun-wing { fill: #62ddeb; stroke: #1595a5; stroke-width: 1.5; }
+.water-gun-tank { fill: #ffe372; stroke: #e7a91f; stroke-width: 2; }
+
+.water-gun-body {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  transition: transform 120ms ease-out;
+}
+
+.water-gun-target {
+  filter: drop-shadow(0 4px 5px rgba(52, 66, 57, 0.28));
+  pointer-events: none;
+}
+
+.water-gun-target path {
+  stroke: #ffffff;
+  stroke-width: 3;
+}
+
+.water-gun-target--outside path {
+  stroke: #c26a1b;
+}
+
+.water-gun-outside-badge {
+  fill: #fff2df;
+  stroke: #d88935;
+}
+
+.water-gun-outside-text {
+  fill: #9a5118;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.water-gun-readout {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d5e5d7;
+  border-radius: 12px;
+  background: #fbfdfb;
+}
+
+.water-gun-vision-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  color: #246f3c;
+  border: 1px solid #a9d3b1;
+  border-radius: 10px;
+  background: #edf8ef;
+}
+
+.water-gun-vision-notice div {
+  display: grid;
+  gap: 3px;
+}
+
+.water-gun-vision-notice span,
+.water-gun-readout small {
+  color: #66736a;
+  font-size: 12px;
+}
+
+.water-gun-compact-values {
+  display: grid;
+  gap: 6px;
+}
+
+.water-gun-compact-values article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 1px solid #d9e6da;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.water-gun-compact-values span {
+  color: #617066;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.water-gun-compact-values strong {
+  color: #147a4a;
+  font-size: 16px;
+}
+
+.water-gun-warning,
+.water-gun-risk-callout {
+  margin: 0;
+  padding: 9px 10px;
+  color: #8c4d19;
+  border: 1px solid #e7bd8d;
+  border-radius: 9px;
+  background: #fff8ed;
+  line-height: 1.4;
+}
+
+.water-gun-message {
+  min-height: 22px;
+  margin: 0;
+  color: #4c5b52;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.water-gun-actions button,
+.water-gun-leave-actions button {
+  justify-content: center;
+  flex: 1 1 150px;
+}
+
+.water-gun-dynamic-button,
+.danger-button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.water-gun-dynamic-button { background: #168f8a; }
+.danger-button { background: #bd553e; }
+.water-gun-dynamic-button:disabled,
+.danger-button:disabled { cursor: not-allowed; opacity: 0.55; }
+.water-gun-offline { color: #b24734 !important; font-weight: 700; }
+
+.water-gun-confirm-modal { width: min(460px, 100%); }
+.water-gun-confirm-modal > p { color: #536158; line-height: 1.65; }
+.water-gun-confirm-values { display: flex; gap: 12px; margin-bottom: 12px; }
+.water-gun-confirm-values strong {
+  flex: 1;
+  padding: 14px;
+  text-align: center;
+  color: #226d3b;
+  border-radius: 10px;
+  background: #eef7ef;
+  font-size: 22px;
+}
+.water-gun-risk-callout { display: flex; align-items: flex-start; gap: 10px; }
+.water-gun-risk-callout p { margin: 0; }
+.water-gun-confirm-modal .modal-card__actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.water-gun-confirm-modal .modal-card__actions button { width: 100%; min-height: 42px; justify-content: center; }
+.water-gun-modal-choice {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.water-gun-modal-choice.is-cancel { color: #496056; border-color: #bfd3c4; background: #f3f8f4; }
+.water-gun-modal-choice.is-confirm { color: #ffffff; border-color: #168f8a; background: #168f8a; }
+.water-gun-modal-choice:disabled { cursor: not-allowed; opacity: 0.55; }
+
+@media (max-width: 960px) {
+  .water-gun-layout { grid-template-columns: 1fr; }
+  .water-gun-field { max-height: none; }
+}
+
+@media (max-width: 560px) {
+  .water-gun-heading__status { justify-content: flex-start; }
+  .water-gun-confirm-modal .modal-card__actions { grid-template-columns: 1fr; }
 }
 
 .modal-backdrop {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ActuatorState(BaseModel):
@@ -49,6 +49,12 @@ class SiteCommandRequest(BaseModel):
     value: int = Field(..., ge=0, le=100)
     reason: str = Field(default="", max_length=500)
     source: Literal["web_manual", "edge_voice", "smart_control"] = "web_manual"
+
+    @model_validator(mode="after")
+    def reject_smart_pump_control(self) -> "SiteCommandRequest":
+        if self.target == "pump" and self.source == "smart_control":
+            raise ValueError("水泵自动调控已暂停，当前由水枪控制")
+        return self
 
 
 class SiteCommandResponse(BaseModel):

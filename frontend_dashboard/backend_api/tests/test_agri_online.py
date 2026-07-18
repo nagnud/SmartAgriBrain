@@ -345,6 +345,14 @@ class AssistantReplyTests(unittest.TestCase):
         self.assertEqual(actions, [])
         self.assertEqual(reference_ids, ["local:1:1"])
 
+    def test_internal_json_is_removed_from_plain_user_answer(self) -> None:
+        answer, actions, reference_ids = parse_model_content(
+            '没有找到相关农业信息。\n```json\n{"answer":"未完成", "actions": [}\n```'
+        )
+        self.assertEqual(answer, "没有找到相关农业信息。")
+        self.assertEqual(actions, [])
+        self.assertEqual(reference_ids, [])
+
     def test_only_declared_used_references_are_returned(self) -> None:
         local_reference = make_reference("local", "1").model_copy(
             update={"referenceId": "local:1:1", "sourceType": "local", "sourceName": "本地知识库"}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,7 +71,7 @@ def compact_context(value: Any, limit: int = 3600) -> str:
 
 
 def action_risk(action_type: str, payload: Dict[str, Any]) -> str:
-    if action_type == "device_command":
+    if action_type in {"device_command", "send_position", "water_gun_target"}:
         return "high"
     if action_type == "smart_control":
         return "high" if payload.get("operation") == "disable" else "medium"
@@ -91,6 +92,8 @@ def default_title(action_type: str) -> str:
         "knowledge_item": "操作知识条目",
         "run_knowledge_analysis": "生成知识库分析",
         "refresh_data": "刷新数据",
+        "send_position": "发送目标位置到 ESP32",
+        "water_gun_target": "确认水枪喷射目标",
     }
     return titles.get(action_type, "建议操作")
 
@@ -197,6 +200,15 @@ def sanitize_action(raw: Any, index: int) -> Optional[AssistantAction]:
             payload["kbId"] = kb_id
     elif action_type == "refresh_data":
         payload = {}
+    elif action_type in {"send_position", "water_gun_target"}:
+        result_id = safe_text(raw_payload.get("result_id") or raw_payload.get("resultId"))
+        if not result_id:
+            payload = None
+        else:
+            payload = {"result_id": result_id[:120]}
+            device_id = safe_text(raw_payload.get("device_id") or raw_payload.get("deviceId"))
+            if device_id:
+                payload["device_id"] = device_id[:80]
     else:
         payload = None
 
@@ -343,11 +355,24 @@ def parse_model_content(content: str) -> Tuple[str, List[AssistantAction], List[
             except json.JSONDecodeError:
                 parsed = None
 
+        for fenced in re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE):
+            try:
+                candidate = json.loads(fenced.strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                parsed = candidate
+                break
+
         # Tool-capable chat completions are not always returned with
         # response_format enabled. A harmless plain-text answer (for example
         # a greeting) is still useful, but it must never create actions.
         if parsed is None and not text.startswith(("{", "[")):
-            return text[:1600], [], []
+            cleaned = re.sub(r"```(?:json)?\s*[\s\S]*?```", "", text, flags=re.IGNORECASE).strip()
+            marker = re.search(r'\n\s*\{\s*["\']?(?:answer|actions|referenceIds)["\']?\s*:', cleaned)
+            if marker:
+                cleaned = cleaned[:marker.start()].strip()
+            return safe_text(cleaned, "我已收到问题，但暂时没有生成可靠回答。")[:1600], [], []
         if parsed is None:
             raise ValueError("assistant response contained malformed JSON")
 
@@ -356,6 +381,7 @@ def parse_model_content(content: str) -> Tuple[str, List[AssistantAction], List[
     if not isinstance(parsed, dict):
         raise ValueError("assistant response must be a JSON object")
     answer = safe_text(parsed.get("answer"), "我已收到问题，但暂时没有生成可靠回答。")
+    answer = re.sub(r"```(?:json)?\s*[\s\S]*?```", "", answer, flags=re.IGNORECASE).strip()
     raw_reference_ids = parsed.get("referenceIds")
     reference_ids: List[str] = []
     if isinstance(raw_reference_ids, list):

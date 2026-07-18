@@ -29,6 +29,7 @@ from monitoring_service import (
 
 
 DEFAULT_DEVICE_ID = os.getenv("DEFAULT_DEVICE_ID", "sensairshuttle_001")
+S3_DEVICE_ID = os.getenv("S3_DEVICE_ID", "greenhouse_001_s3")
 SECOND_TIMESTAMP_CUTOFF = 100_000_000_000
 
 
@@ -162,7 +163,23 @@ def get_history(db: Session, device_id: str, limit: int) -> list[HistoryPoint]:
 
 
 def queue_command(db: Session, payload: DeviceCommandRequest) -> CommandResult:
-    current_status = record_status(latest_record(db, payload.device_id))
+    try:
+        current_status = record_status(latest_record(db, payload.device_id))
+    except DeviceNotFoundError:
+        if payload.command != "target_position" or payload.device_id != S3_DEVICE_ID:
+            raise
+        # The S3 reports through the site-state telemetry contract rather than
+        # the legacy TelemetryRecord table. Position delivery still uses this
+        # durable command queue, so return a neutral status for the queue result.
+        current_status = DeviceRuntimeStatus(
+            wifi="warning",
+            mqtt="warning",
+            fan=0,
+            pump=0,
+            light=0,
+            alarm=0,
+            curtain=0,
+        )
     created_at = now_ms()
     command_payload = payload.model_dump()
     record = DeviceCommandRecord(
@@ -177,10 +194,11 @@ def queue_command(db: Session, payload: DeviceCommandRequest) -> CommandResult:
     db.add(record)
     db.commit()
     db.refresh(record)
+    response_payload = {**command_payload, "id": record.id}
     return CommandResult(
         success=True,
         message=f"指令已进入待执行队列（编号 {record.id}），等待设备拉取并回传执行结果。",
-        command=command_payload,
+        command=response_payload,
         executed_at=created_at,
         status=current_status,
     )

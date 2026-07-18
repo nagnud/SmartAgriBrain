@@ -353,11 +353,16 @@ class MqttRuntime:
             return False
 
     def _dispatch_legacy_command(self) -> None:
-        device_id = os.getenv("DEFAULT_DEVICE_ID", "sensairshuttle_001")
+        device_ids = [os.getenv("DEFAULT_DEVICE_ID", "sensairshuttle_001"), s3_device_id()]
+        device_ids = list(dict.fromkeys(device_id for device_id in device_ids if device_id))
         queued_command_id: int | None = None
         try:
             with SessionLocal() as db:
-                queued = claim_next_command(db, device_id, consumer_transport="mqtt")
+                queued = None
+                for device_id in device_ids:
+                    queued = claim_next_command(db, device_id, consumer_transport="mqtt")
+                    if queued is not None:
+                        break
                 if queued is None:
                     return
                 queued_command_id = queued.command_id
@@ -378,11 +383,18 @@ class MqttRuntime:
                     "source": "web_manual",
                     "reason": queued.reason,
                     "command": {
-                        "operation": "set",
-                        "target": command_target(queued.command),
+                        "operation": "target_position" if queued.command == "target_position" else "set",
+                        "target": "position" if queued.command == "target_position" else command_target(queued.command),
                         "value": queued.value,
                     },
                 }
+                if queued.command == "target_position":
+                    position = queued.payload.get("position") if isinstance(queued.payload, dict) else None
+                    if isinstance(position, dict):
+                        body["command"]["position"] = position
+                    water_gun = queued.payload.get("water_gun") if isinstance(queued.payload, dict) else None
+                    if isinstance(water_gun, dict):
+                        body["command"]["water_gun"] = water_gun
                 if not self._publish_json(f"{self._topic_prefix}/devices/{queued.device_id}/command", body):
                     record = db.get(DeviceCommandRecord, queued.command_id)
                     if record is not None and record.status == "dispatched":
@@ -400,7 +412,7 @@ class MqttRuntime:
                         db.commit()
 
     def _command_loop(self) -> None:
-        while not self._stop_event.wait(0.5):
+        while not self._stop_event.wait(0.05):
             if not self._connected.is_set() or self._client is None:
                 continue
             dispatched = self._dispatch_site_command()

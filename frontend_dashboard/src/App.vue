@@ -51,20 +51,29 @@ import {
   analyzeFarm,
   analyzeKnowledge,
   createKnowledgeBase,
+  createAssistantTurn,
+  defaultSiteId,
   decideSharedAssistantAction,
+  deleteAssistantPreference,
   deleteDiseasePhoto,
   deleteKnowledgeBase,
   deleteKnowledgeItem,
   getAlarmRecords,
   getAlarmSettings,
+  getAssistantPreferences,
   getAgriSources,
   getDiseasePhotos,
   getDeviceHealth,
+  getCameraPositionConfig,
+  getBackendCameraConfig,
   getCurrentWeather,
   getWeatherBundle,
   getWeatherCities,
   getWeatherCitiesForProvince,
   getWeatherRegions,
+  getWaterGunState,
+  previewWaterGunTarget,
+  heartbeatWaterGunDynamic,
   getKnowledgeBases,
   getKnowledgeItems,
   getLatestTelemetry,
@@ -74,17 +83,26 @@ import {
   getSiteState,
   savePersistedDashboardState,
   saveAlarmSettings,
+  saveCameraPositionConfig,
+  saveBackendCameraConfig,
   saveDiseasePhotoAnalysis,
   sendDeviceCommand,
   sendExpertChatMessage,
   sendSharedAssistantMessage,
   sendSiteCommand,
+  setWaterGunStaticTarget,
   siteStateToTelemetry,
   subscribeSiteEvents,
+  streamAssistantTurn,
+  startWaterGunDynamic,
+  stopWaterGunDynamic,
   testAgriSource,
+  locateCameraObject,
+  resolveApiAssetUrl,
   updateAgriSource,
   updateKnowledgeBase,
   updateKnowledgeItem,
+  updateWaterGunDynamicTarget,
   uploadDiseasePhoto,
 } from './services/api';
 import type {
@@ -94,12 +112,16 @@ import type {
   DeviceHealth,
   AssistantAction,
   AssistantThread,
+  AssistantPreferenceItem,
   ChatMessage,
   CommandResult,
+  CameraPositionConfig,
+  BackendCameraConfig,
   DeviceCommand,
   DeviceRuntimeStatus,
   DiseaseDetectionResult,
   DiseasePhotoInfo,
+  PositionLocateResult,
   HistoryPoint,
   HistoryMetricKey,
   KnowledgeAnalyzeResult,
@@ -127,6 +149,8 @@ import type {
   WeatherCityOption,
   WeatherDailyItem,
   WeatherAlarmItem,
+  WaterGunState,
+  WaterGunTargetSource,
 } from './types';
 import {
   confidenceText,
@@ -146,6 +170,7 @@ import {
   smartControlParamKeys,
   smartControlParamLabel,
   smartControlValueFromDemands,
+  waterPumpSmartControlPaused,
   zeroSmartControlDemands,
 } from './services/smartControl';
 
@@ -221,6 +246,7 @@ interface SmartControlParamVm {
   mode: 'auto' | 'manual';
   value: number;
   autoValue: number;
+  locked: boolean;
 }
 
 interface AiRiskFactor {
@@ -319,8 +345,54 @@ const diseasePhotos = ref<DiseasePhotoInfo[]>([]);
 const selectedDiseasePhoto = ref<DiseasePhotoInfo | null>(null);
 const selectedDiseasePhotoImageError = ref(false);
 const currentDiseasePhotoId = ref<number | null>(null);
-const cameraGrowthPanelRef = ref<{ captureAndAnalyze: () => Promise<void> } | null>(null);
+const cameraGrowthPanelRef = ref<{
+  captureAndAnalyze: () => Promise<void>;
+  captureCurrentFrame: () => Promise<File | null>;
+} | null>(null);
 const cameraAnalysisResult = ref<DiseaseDetectionResult | null>(null);
+const defaultCameraPositionConfig: CameraPositionConfig = {
+  image_width: 1280,
+  image_height: 720,
+  fx: 0,
+  fy: 0,
+  cx: 640,
+  cy: 360,
+  distortion: [],
+  camera_height_mm: 60,
+  pitch_down_deg: 30,
+  yaw_deg: 0,
+  roll_deg: 0,
+};
+const cameraPositionConfig = ref<CameraPositionConfig>({ ...defaultCameraPositionConfig });
+const backendCameraConfig = ref<BackendCameraConfig>({ device_index: 0, width: 1280, height: 720, fps: 15 });
+const cameraDistortionText = ref('');
+const cameraPositionConfigSaving = ref(false);
+const cameraPositionConfigMessage = ref('请先填写棋盘格标定得到的 fx、fy、cx、cy。');
+let savedCameraPositionConfigSnapshot: CameraPositionConfig = {
+  ...defaultCameraPositionConfig,
+  distortion: [...defaultCameraPositionConfig.distortion],
+};
+let savedBackendCameraConfigSnapshot: BackendCameraConfig = { ...backendCameraConfig.value };
+const positionSelectionSession = ref<PositionLocateResult | null>(null);
+const positionImageModal = ref<{ url: string; title: string; capturedAt: number } | null>(null);
+const positionImageModalError = ref(false);
+const positionCaptureErrors = ref<Record<string, boolean>>({});
+const waterGunFieldRef = ref<SVGSVGElement | null>(null);
+const waterGunState = ref<WaterGunState | null>(null);
+const waterGunRangeMm = ref(600);
+const waterGunBearingDeg = ref(0);
+const waterGunTargetSource = ref<WaterGunTargetSource>('manual');
+const waterGunTargetLabel = ref('');
+const waterGunBusy = ref(false);
+const waterGunMessage = ref('等待设置水枪目标。');
+const waterGunStaticConfirmOpen = ref(false);
+const waterGunDynamicConfirmOpen = ref(false);
+const waterGunLeaveConfirmOpen = ref(false);
+const waterGunPointerActive = ref(false);
+const waterGunDynamicSequence = ref(1);
+const waterGunPendingDynamicTarget = ref<{ range: number; bearing: number } | null>(null);
+let waterGunDynamicSendTimer: number | undefined;
+let waterGunHeartbeatTimer: number | undefined;
 const diseasePhotoLoading = ref(false);
 const diseasePhotoDeletingId = ref<number | null>(null);
 const diseasePhotoError = ref('');
@@ -328,6 +400,9 @@ const chatMessages = ref<ChatMessage[]>([]);
 const assistantThreads = ref<AssistantThread[]>([]);
 const activeAssistantThreadId = ref('');
 const assistantHistoryOpen = ref(false);
+const assistantPreferencesOpen = ref(false);
+const assistantPreferences = ref<AssistantPreferenceItem[]>([]);
+const assistantPreferencesLoading = ref(false);
 const renamingAssistantThreadId = ref('');
 const assistantThreadNameDraft = ref('');
 const chatInput = ref('番茄叶片有黄斑，结合当前环境应该怎么处理？');
@@ -547,6 +622,10 @@ function actuatorMasterEnabled(state: SiteActuatorState): boolean {
     : (state.actual ?? 0) > 0;
 }
 
+function displayedActuatorMasterEnabled(target: SiteActuatorTarget, state: SiteActuatorState): boolean {
+  return target === 'pump' ? waterGunSpraying.value : actuatorMasterEnabled(state);
+}
+
 function siteCommandValueText(result: SiteCommandResult): string {
   return result.value > 0 ? '总开关开启' : '总开关关闭';
 }
@@ -559,6 +638,259 @@ function siteCommandStateText(state: SiteCommandResult['state']): string {
     failed: '执行失败',
     expired: '指令已过期',
   }[state];
+}
+
+const waterGunDynamicActive = computed(() => waterGunState.value?.mode === 'dynamic');
+const waterGunSpraying = computed(() => Boolean(waterGunState.value?.spray_enabled));
+const waterGunManualForwardMaxMm = 1200;
+const waterGunManualHalfWidthMm = 1200;
+const waterGunFullScaleRangeMm = 1700;
+const waterGunMappedPumpPercent = computed(() => (
+  Math.min(100, Math.max(0, waterGunRangeMm.value / waterGunFullScaleRangeMm * 100))
+));
+const waterGunPumpPercent = computed(() => (
+  waterGunSpraying.value ? waterGunMappedPumpPercent.value : 0
+));
+const waterGunTargetCartesian = computed(() => {
+  const radians = waterGunBearingDeg.value * Math.PI / 180;
+  return {
+    right: waterGunRangeMm.value * Math.sin(radians),
+    forward: waterGunRangeMm.value * Math.cos(radians),
+  };
+});
+const waterGunTargetOutside = computed(() => {
+  const { right, forward } = waterGunTargetCartesian.value;
+  return forward < 0 || forward > waterGunManualForwardMaxMm || Math.abs(right) > waterGunManualHalfWidthMm;
+});
+const waterGunMarker = computed(() => {
+  const { right, forward } = waterGunTargetCartesian.value;
+  let displayRight = right;
+  let displayForward = forward;
+  if (waterGunTargetOutside.value) {
+    const scales = [1];
+    if (Math.abs(right) > waterGunManualHalfWidthMm) scales.push(waterGunManualHalfWidthMm / Math.abs(right));
+    if (forward > waterGunManualForwardMaxMm) scales.push(waterGunManualForwardMaxMm / forward);
+    if (forward < 0) scales.push(0);
+    const scale = Math.min(...scales);
+    displayRight *= scale;
+    displayForward = Math.max(0, displayForward * scale);
+  }
+  return {
+    x: 400 + (displayRight / waterGunManualHalfWidthMm) * 370,
+    y: 385 - (displayForward / waterGunManualForwardMaxMm) * 370,
+  };
+});
+const waterGunBearingText = computed(() => {
+  const bearing = waterGunBearingDeg.value;
+  if (Math.abs(bearing) < 0.05) return '正前方 0.0°';
+  return `${bearing < 0 ? '左' : '右'} ${Math.abs(bearing).toFixed(1)}°`;
+});
+
+function waterGunTargetPayload() {
+  return {
+    ground_range_mm: Math.round(waterGunRangeMm.value * 10) / 10,
+    bearing_deg: Math.round(waterGunBearingDeg.value * 10) / 10,
+    device_id: s3State.value?.device_id ?? 'greenhouse_001_s3',
+    source: waterGunTargetSource.value,
+    target_label: waterGunTargetLabel.value,
+  };
+}
+
+function syncWaterGunState(state: WaterGunState, syncTarget = true): void {
+  waterGunState.value = state;
+  if (syncTarget) {
+    waterGunRangeMm.value = state.ground_range_mm;
+    waterGunBearingDeg.value = state.bearing_deg;
+    waterGunTargetSource.value = state.source;
+    waterGunTargetLabel.value = state.target_label;
+  }
+  waterGunDynamicSequence.value = Math.max(1, state.sequence);
+  if (state.timed_out) {
+    waterGunMessage.value = '动态会话已超时，水泵已停止，最后目标位置已保留。';
+  }
+}
+
+async function loadWaterGunControlState(): Promise<void> {
+  try {
+    const state = await getWaterGunState();
+    syncWaterGunState(state);
+    if (state.mode === 'dynamic') startWaterGunHeartbeat();
+  } catch (error) {
+    waterGunMessage.value = userErrorText(error, '水枪控制状态暂时无法读取。');
+  }
+}
+
+function setWaterGunTargetFromPointer(event: PointerEvent): void {
+  const element = waterGunFieldRef.value;
+  if (!element) return;
+  const rect = element.getBoundingClientRect();
+  const viewX = (event.clientX - rect.left) / rect.width * 800;
+  const viewY = (event.clientY - rect.top) / rect.height * 400;
+  const clampedX = Math.max(30, Math.min(770, viewX));
+  const clampedY = Math.max(15, Math.min(385, viewY));
+  const right = (clampedX - 400) / 370 * waterGunManualHalfWidthMm;
+  const forward = (385 - clampedY) / 370 * waterGunManualForwardMaxMm;
+  waterGunRangeMm.value = Math.round(Math.hypot(right, forward));
+  waterGunBearingDeg.value = Math.round(Math.atan2(right, forward) * 180 / Math.PI * 10) / 10;
+  waterGunTargetSource.value = 'manual';
+  waterGunTargetLabel.value = '';
+  waterGunMessage.value = waterGunDynamicActive.value ? '动态目标正在实时更新。' : '目标已调整，尚未发送。';
+  if (waterGunDynamicActive.value) scheduleWaterGunDynamicSend();
+}
+
+async function setWaterGunSprayEnabled(enabled: boolean): Promise<void> {
+  if (waterGunBusy.value || waterGunSpraying.value === enabled) return;
+  if (waterGunDynamicActive.value) {
+    if (!enabled) await finishWaterGunDynamic(false);
+    return;
+  }
+  waterGunBusy.value = true;
+  try {
+    const state = await previewWaterGunTarget({
+      ...waterGunTargetPayload(),
+      spray_enabled: enabled,
+    });
+    syncWaterGunState(state);
+    waterGunMessage.value = enabled ? '水枪模拟已开启。' : '水枪模拟已关闭。';
+  } catch (error) {
+    waterGunMessage.value = userErrorText(error, '水枪模拟状态更新失败。');
+  } finally {
+    waterGunBusy.value = false;
+  }
+}
+
+function selectWaterGunMode(mode: 'static' | 'dynamic'): void {
+  if (mode === 'dynamic') {
+    if (!waterGunDynamicActive.value) waterGunDynamicConfirmOpen.value = true;
+    return;
+  }
+  if (waterGunDynamicActive.value) void finishWaterGunDynamic(false);
+}
+
+function startWaterGunPointer(event: PointerEvent): void {
+  event.preventDefault();
+  waterGunPointerActive.value = true;
+  waterGunFieldRef.value?.setPointerCapture(event.pointerId);
+  setWaterGunTargetFromPointer(event);
+}
+
+function moveWaterGunPointer(event: PointerEvent): void {
+  if (waterGunPointerActive.value) setWaterGunTargetFromPointer(event);
+}
+
+function endWaterGunPointer(event: PointerEvent): void {
+  if (!waterGunPointerActive.value) return;
+  waterGunPointerActive.value = false;
+  waterGunFieldRef.value?.releasePointerCapture(event.pointerId);
+  if (waterGunDynamicActive.value) scheduleWaterGunDynamicSend(true);
+}
+
+function scheduleWaterGunDynamicSend(immediate = false): void {
+  if (!waterGunDynamicActive.value || !waterGunState.value?.session_id) return;
+  waterGunPendingDynamicTarget.value = { range: waterGunRangeMm.value, bearing: waterGunBearingDeg.value };
+  if (waterGunDynamicSendTimer !== undefined) return;
+  waterGunDynamicSendTimer = window.setTimeout(() => {
+    waterGunDynamicSendTimer = undefined;
+    void flushWaterGunDynamicTarget();
+  }, immediate ? 0 : 200);
+}
+
+async function flushWaterGunDynamicTarget(): Promise<void> {
+  const target = waterGunPendingDynamicTarget.value;
+  const sessionId = waterGunState.value?.session_id;
+  if (!target || !sessionId || !waterGunDynamicActive.value) return;
+  waterGunPendingDynamicTarget.value = null;
+  waterGunDynamicSequence.value += 1;
+  try {
+    const state = await updateWaterGunDynamicTarget(sessionId, waterGunDynamicSequence.value, {
+      ground_range_mm: target.range,
+      bearing_deg: target.bearing,
+    });
+    syncWaterGunState(state, false);
+  } catch (error) {
+    waterGunMessage.value = userErrorText(error, '动态目标发送失败，正在读取安全状态。');
+    await loadWaterGunControlState();
+  }
+}
+
+function startWaterGunHeartbeat(): void {
+  stopWaterGunHeartbeat();
+  waterGunHeartbeatTimer = window.setInterval(() => {
+    const sessionId = waterGunState.value?.session_id;
+    if (!sessionId || !waterGunDynamicActive.value) return;
+    void heartbeatWaterGunDynamic(sessionId).catch(async (error) => {
+      waterGunMessage.value = userErrorText(error, '动态会话已断开，水泵将自动停止。');
+      stopWaterGunHeartbeat();
+      await loadWaterGunControlState();
+    });
+  }, 1000);
+}
+
+function stopWaterGunHeartbeat(): void {
+  if (waterGunHeartbeatTimer !== undefined) window.clearInterval(waterGunHeartbeatTimer);
+  waterGunHeartbeatTimer = undefined;
+  if (waterGunDynamicSendTimer !== undefined) window.clearTimeout(waterGunDynamicSendTimer);
+  waterGunDynamicSendTimer = undefined;
+  waterGunPendingDynamicTarget.value = null;
+}
+
+async function confirmWaterGunStaticTarget(): Promise<void> {
+  waterGunBusy.value = true;
+  try {
+    const state = await setWaterGunStaticTarget({
+      ...waterGunTargetPayload(),
+      spray_enabled: waterGunState.value?.spray_enabled ?? false,
+    });
+    syncWaterGunState(state);
+    waterGunStaticConfirmOpen.value = false;
+    waterGunMessage.value = '目标已确认。';
+  } catch (error) {
+    waterGunMessage.value = userErrorText(error, '静态目标发送失败。');
+  } finally {
+    waterGunBusy.value = false;
+  }
+}
+
+async function confirmWaterGunDynamicStart(): Promise<void> {
+  waterGunBusy.value = true;
+  try {
+    const state = await startWaterGunDynamic(waterGunTargetPayload());
+    syncWaterGunState(state);
+    waterGunDynamicConfirmOpen.value = false;
+    waterGunMessage.value = '已进入动态模式。';
+    startWaterGunHeartbeat();
+  } catch (error) {
+    waterGunMessage.value = userErrorText(error, '无法进入动态模式。');
+  } finally {
+    waterGunBusy.value = false;
+  }
+}
+
+async function finishWaterGunDynamic(keepSpraying: boolean): Promise<void> {
+  const sessionId = waterGunState.value?.session_id;
+  if (!sessionId) return;
+  waterGunBusy.value = true;
+  try {
+    stopWaterGunHeartbeat();
+    const state = await stopWaterGunDynamic(sessionId, keepSpraying);
+    syncWaterGunState(state);
+    waterGunMessage.value = keepSpraying
+      ? '已保持最后目标和喷射请求，并转为静态模式。'
+      : '水泵已停止，最后目标位置已保留。';
+    waterGunLeaveConfirmOpen.value = false;
+  } catch (error) {
+    waterGunMessage.value = userErrorText(error, '动态模式退出失败，请立即检查设备状态。');
+  } finally {
+    waterGunBusy.value = false;
+  }
+}
+
+function requestViewChange(view: ViewKey): void {
+  if (activeView.value === 'control' && view !== 'control' && waterGunDynamicActive.value) {
+    waterGunLeaveConfirmOpen.value = true;
+    return;
+  }
+  activeView.value = view;
 }
 
 function lastDataUpdateText(timestamp?: number): string {
@@ -865,8 +1197,11 @@ const smartControlParams = computed<SmartControlParamVm[]>(() => smartControlPar
     label: smartControlParamLabel(key),
     color: smartControlParamColor(key),
     mode: state.mode,
-    value: smartControlValueFromDemands(key, smartControlEffectiveDemands.value),
+    value: key === 'water' && waterPumpSmartControlPaused
+      ? Math.round(waterGunMappedPumpPercent.value)
+      : smartControlValueFromDemands(key, smartControlEffectiveDemands.value),
     autoValue: smartControlValueFromDemands(key, smartControlAutoDemands.value),
+    locked: waterPumpSmartControlPaused && key === 'water',
   };
 }));
 
@@ -1227,6 +1562,9 @@ function persistedSmartControlParamStates(value: unknown): Record<SmartControlPa
       lastManualValue: clampControlValue(rawLastManualValue),
     };
   });
+  if (waterPumpSmartControlPaused) {
+    states.water = { key: 'water', mode: 'manual', value: 0, lastManualValue: 0 };
+  }
   return states;
 }
 
@@ -2087,7 +2425,10 @@ function handleAssistantViewportResize(): void {
   requestAssistantLayoutResize();
 }
 
-watch(activeView, (view) => {
+watch(activeView, (view, previousView) => {
+  if (previousView === 'overview' && view !== 'overview') {
+    restoreSavedCameraPositionConfig();
+  }
   if (view !== 'realtime') {
     closeMetricEditor();
   }
@@ -2462,6 +2803,149 @@ function handleCameraAnalysisUpdated(result: DiseaseDetectionResult | null): voi
   cameraAnalysisResult.value = result;
 }
 
+function isPositionQuestion(question: string): boolean {
+  const compact = question.replace(/\s+/g, '');
+  return /距离|多远|位置|坐标|方位|角度|极坐标|在哪(?:里|儿)?|什么地方|何处|在何方|什么方位/.test(compact);
+}
+
+function pendingPositionSelection(): PositionLocateResult | null {
+  return positionSelectionSession.value;
+}
+
+function pendingPositionTargetLabel(): string {
+  return pendingPositionSelection()?.candidates[0]?.label ?? '';
+}
+
+function isPositionRefinement(question: string, result: PositionLocateResult | null): boolean {
+  if (!result || question.trim().length === 0) return false;
+  const compact = question.replace(/\s+/g, '').toLowerCase();
+  const labels = result.candidates
+    .map((candidate) => candidate.label.replace(/\s+/g, '').toLowerCase())
+    .filter(Boolean);
+  if (labels.some((label) => compact.includes(label))) return true;
+
+  // A short visual/spatial description following a multiple-target result is
+  // treated as a continuation, even when the user does not repeat the object name.
+  const hasDiscriminatingFeature = /左|右|中间|中央|最近|最远|前面|后面|上面|下面|旁边|靠近|第[一二三四五六七八九十\d]+|银|金色|黑|白|灰|红|橙|黄|绿|青|蓝|紫|粉|透明|深色|浅色|金属|塑料|木质|玻璃|长|短|大|小|圆|方|宽|窄|粗|细|亮|暗|带有|有个|有一|没有|无/.test(compact);
+  return compact.length <= 40 && hasDiscriminatingFeature;
+}
+
+function formatPositionReply(result: PositionLocateResult): string {
+  if (result.status === 'located' && result.selected) {
+    const item = result.selected;
+    const side = item.bearing_deg > 0 ? '右' : item.bearing_deg < 0 ? '左' : '正前方';
+    return `已定位到${item.label}。它距摄像头约 **${Math.round(item.camera_range_mm)} mm**；从上方看，位于 A 点${side} **${Math.abs(item.bearing_deg).toFixed(1)}°**，A→B 平面距离约 **${Math.round(item.ground_range_mm)} mm**。`;
+  }
+  return result.message;
+}
+
+function positionAnchorTypeLabel(type: PositionLocateResult['candidates'][number]['anchor_type']): string {
+  return {
+    visual_center: '物体视觉中心',
+    surface_center: '物体表面中心',
+    footprint_center: '物体底面中心',
+    custom: 'AI 选择点',
+  }[type] ?? 'AI 选择点';
+}
+
+function positionStrategySummary(result: PositionLocateResult): string {
+  const candidate = result.selected;
+  if (!candidate) return '按本轮候选目标定位';
+  if (candidate.height_fallback) return '按桌面投影定位';
+  return `按${positionAnchorTypeLabel(candidate.anchor_type)}定位`;
+}
+
+function openPositionCapture(result: PositionLocateResult): void {
+  const url = resolveApiAssetUrl(result.annotated_image_url);
+  if (!url) return;
+  positionImageModal.value = {
+    url,
+    title: result.selected?.label ? `${result.selected.label} 定位截图` : '本轮定位截图',
+    capturedAt: result.captured_at,
+  };
+  positionImageModalError.value = false;
+}
+
+function closePositionCapture(): void {
+  positionImageModal.value = null;
+  positionImageModalError.value = false;
+}
+
+function markPositionCaptureUnavailable(result: PositionLocateResult): void {
+  const key = result.annotated_image_url ?? '';
+  if (!key) return;
+  positionCaptureErrors.value = { ...positionCaptureErrors.value, [key]: true };
+}
+
+function handleGlobalKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && positionImageModal.value) {
+    closePositionCapture();
+  }
+}
+
+async function loadCameraPositionConfig(): Promise<void> {
+  const [saved, cameraConfig] = await Promise.all([
+    getCameraPositionConfig(),
+    getBackendCameraConfig().catch(() => null),
+  ]);
+  if (cameraConfig) backendCameraConfig.value = cameraConfig;
+  if (saved) {
+    cameraPositionConfig.value = { ...defaultCameraPositionConfig, ...saved };
+    cameraDistortionText.value = cameraPositionConfig.value.distortion.join(', ');
+    cameraPositionConfigMessage.value = saved.fx > 0 && saved.fy > 0 ? '定位参数已从后端加载。' : cameraPositionConfigMessage.value;
+  }
+  rememberSavedCameraPositionConfig();
+}
+
+function rememberSavedCameraPositionConfig(): void {
+  savedCameraPositionConfigSnapshot = {
+    ...cameraPositionConfig.value,
+    distortion: [...cameraPositionConfig.value.distortion],
+  };
+  savedBackendCameraConfigSnapshot = { ...backendCameraConfig.value };
+}
+
+function restoreSavedCameraPositionConfig(): void {
+  if (cameraPositionConfigSaving.value) return;
+  cameraPositionConfig.value = {
+    ...savedCameraPositionConfigSnapshot,
+    distortion: [...savedCameraPositionConfigSnapshot.distortion],
+  };
+  backendCameraConfig.value = { ...savedBackendCameraConfigSnapshot };
+  cameraDistortionText.value = savedCameraPositionConfigSnapshot.distortion.join(', ');
+}
+
+function handleCameraPositionConfigToggle(event: Event): void {
+  const details = event.currentTarget as HTMLDetailsElement;
+  if (!details.open) restoreSavedCameraPositionConfig();
+}
+
+function normalizedCameraPositionConfig(): CameraPositionConfig {
+  const distortion = cameraDistortionText.value
+    .split(',')
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value))
+    .slice(0, 5);
+  return { ...cameraPositionConfig.value, distortion };
+}
+
+async function saveCurrentCameraPositionConfig(): Promise<void> {
+  cameraPositionConfigSaving.value = true;
+  try {
+    cameraPositionConfig.value = normalizedCameraPositionConfig();
+    await Promise.all([
+      saveCameraPositionConfig(cameraPositionConfig.value),
+      saveBackendCameraConfig(backendCameraConfig.value),
+    ]);
+    rememberSavedCameraPositionConfig();
+    cameraPositionConfigMessage.value = '定位参数和后端摄像头配置已保存，下一次定位立即生效。';
+  } catch (error) {
+    cameraPositionConfigMessage.value = userErrorText(error, '定位参数保存失败，请稍后重试。');
+  } finally {
+    cameraPositionConfigSaving.value = false;
+  }
+}
+
 function clearAiAnalysisTimer(): void {
   if (aiAnalysisTimer !== undefined) {
     window.clearTimeout(aiAnalysisTimer);
@@ -2693,6 +3177,10 @@ async function applyCommand(command: string, value: number, reason: string): Pro
 }
 
 async function setSiteActuatorMaster(target: SiteActuatorTarget, enabled: boolean): Promise<void> {
+  if (target === 'pump') {
+    await setWaterGunSprayEnabled(enabled);
+    return;
+  }
   const value = enabled ? 100 : 0;
   const label = siteActuatorDefinitions.find((item) => item.target === target)?.label ?? target;
   const queued = await sendSiteCommand(target, value, `Web 手动${enabled ? '开启' : '关闭'}${label}总开关`);
@@ -2722,6 +3210,11 @@ function buildSmartControlCommand(action: 'smart_control_update' | 'smart_contro
     throw new Error('No telemetry available');
   }
   const safeDemands = cloneSmartControlDemands(demands);
+  // The water gun has exclusive control of the pump for now.  Retain the
+  // field in the protocol for compatibility, but never issue a pump demand.
+  if (waterPumpSmartControlPaused) {
+    safeDemands.water = 0;
+  }
   const tempDemand = safeDemands.heat > 0 ? safeDemands.heat : -safeDemands.cool;
   const timestamp = Date.now();
   return {
@@ -2775,6 +3268,9 @@ async function setSmartControlEnabled(enabled: boolean): Promise<void> {
 }
 
 async function setSmartParamManual(key: SmartControlParamKey): Promise<void> {
+  if (waterPumpSmartControlPaused && key === 'water') {
+    return;
+  }
   const current = smartControlParamStates.value[key];
   const initialValue = current.lastManualValue > 0 ? current.lastManualValue : smartControlValueFromDemands(key, smartControlEffectiveDemands.value);
   smartControlEnabled.value = true;
@@ -2792,6 +3288,9 @@ async function setSmartParamManual(key: SmartControlParamKey): Promise<void> {
 }
 
 async function updateSmartParamManualValue(key: SmartControlParamKey, value: number): Promise<void> {
+  if (waterPumpSmartControlPaused && key === 'water') {
+    return;
+  }
   const current = smartControlParamStates.value[key];
   if (current.mode !== 'manual') {
     return;
@@ -2815,6 +3314,9 @@ function handleSmartParamSliderChange(key: SmartControlParamKey, event: Event): 
 }
 
 async function restoreSmartParamAuto(key: SmartControlParamKey): Promise<void> {
+  if (waterPumpSmartControlPaused && key === 'water') {
+    return;
+  }
   const current = smartControlParamStates.value[key];
   const autoValue = smartControlValueFromDemands(key, smartControlAutoDemands.value);
   smartControlEnabled.value = true;
@@ -2831,6 +3333,9 @@ async function restoreSmartParamAuto(key: SmartControlParamKey): Promise<void> {
 }
 
 async function toggleSmartParamMode(key: SmartControlParamKey): Promise<void> {
+  if (waterPumpSmartControlPaused && key === 'water') {
+    return;
+  }
   if (smartControlParamStates.value[key].mode === 'manual') {
     await restoreSmartParamAuto(key);
     return;
@@ -2842,6 +3347,10 @@ async function setAllSmartParamsAuto(): Promise<void> {
   const nextStates = defaultSmartControlParamStates();
   smartControlParamKeys.forEach((key) => {
     const current = smartControlParamStates.value[key];
+    if (waterPumpSmartControlPaused && key === 'water') {
+      nextStates[key] = { key, mode: 'manual', value: 0, lastManualValue: 0 };
+      return;
+    }
     nextStates[key] = {
       ...current,
       mode: 'auto',
@@ -2867,7 +3376,7 @@ async function toggleDevice(
 function commandResultText(result: CommandResult): string {
   const command = result.command;
   if (command.command === 'smart_control_update') {
-    const labelsText = smartControlParamKeys.map((key) => smartControlParamLabel(key)).join('、');
+    const labelsText = smartControlParamKeys.filter((key) => key !== 'water').map((key) => smartControlParamLabel(key)).join('、');
     if (command.reason === '一键自动托管') {
       return `已恢复${labelsText}的自动调控，远程设备开关保持当前状态。`;
     }
@@ -2986,6 +3495,9 @@ function assistantActionConfirmText(action: AssistantAction): string {
   if (assistantExecutingActionId.value === action.id) {
     return '处理中';
   }
+  if (action.type === 'water_gun_target') {
+    return '确认喷水';
+  }
   if (action.risk === 'high' && assistantConfirmActionId.value !== action.id) {
     return '确认操作';
   }
@@ -3009,7 +3521,16 @@ async function executeAssistantAction(action: AssistantAction): Promise<void> {
   }
   assistantExecutingActionId.value = action.id;
   try {
-    if (action.type === 'navigate_view') {
+    if (action.payload._assistant_v2 === true) {
+      const decided = await decideSharedAssistantAction(action.id, 'confirm');
+      if (!['confirmed', 'executed'].includes(decided.state)) {
+        throw new Error('后端没有接受这次确认，请重新发起操作。');
+      }
+      const decidedWaterGun = decided.payload.water_gun;
+      if (action.type === 'water_gun_target' && decidedWaterGun && typeof decidedWaterGun === 'object') {
+        syncWaterGunState(decidedWaterGun as WaterGunState);
+      }
+    } else if (action.type === 'navigate_view') {
       const view = actionPayloadText(action, 'view');
       if (!isViewKey(view)) {
         throw new Error('未知页面');
@@ -3132,15 +3653,27 @@ async function confirmAssistantAction(action: AssistantAction): Promise<void> {
   if (action.status !== 'pending' && action.status !== 'failed' && action.status !== undefined) {
     return;
   }
-  if (action.risk === 'high' && assistantConfirmActionId.value !== action.id) {
+  if (action.type !== 'water_gun_target' && action.risk === 'high' && assistantConfirmActionId.value !== action.id) {
     assistantConfirmActionId.value = action.id;
     return;
   }
   await executeAssistantAction(action);
 }
 
-function cancelAssistantAction(action: AssistantAction): void {
+async function cancelAssistantAction(action: AssistantAction): Promise<void> {
   assistantConfirmActionId.value = assistantConfirmActionId.value === action.id ? null : assistantConfirmActionId.value;
+  if (action.payload._assistant_v2 === true) {
+    try {
+      const decided = await decideSharedAssistantAction(action.id, 'cancel');
+      const decidedWaterGun = decided.payload.water_gun;
+      if (action.type === 'water_gun_target' && decidedWaterGun && typeof decidedWaterGun === 'object') {
+        syncWaterGunState(decidedWaterGun as WaterGunState);
+      }
+    } catch (error) {
+      setAssistantActionStatus(action, 'failed', userErrorText(error, '取消操作没有完成，请稍后重试。'));
+      return;
+    }
+  }
   setAssistantActionStatus(action, 'canceled');
 }
 
@@ -3751,6 +4284,29 @@ function stopVoiceInputAfterSend(): void {
   voiceMessage.value = '语音输入已随消息发送停止';
 }
 
+async function openAssistantPreferences(): Promise<void> {
+  assistantPreferencesOpen.value = true;
+  assistantPreferencesLoading.value = true;
+  try {
+    assistantPreferences.value = await getAssistantPreferences();
+  } catch (error) {
+    console.warn('Assistant preferences could not be loaded.', error);
+  } finally {
+    assistantPreferencesLoading.value = false;
+  }
+}
+
+async function removeAssistantPreference(key: string): Promise<void> {
+  assistantPreferencesLoading.value = true;
+  try {
+    assistantPreferences.value = await deleteAssistantPreference(key);
+  } catch (error) {
+    console.warn('Assistant preference could not be removed.', error);
+  } finally {
+    assistantPreferencesLoading.value = false;
+  }
+}
+
 async function sendChat(): Promise<void> {
   if (!latest.value || chatSending.value) {
     return;
@@ -3761,7 +4317,26 @@ async function sendChat(): Promise<void> {
   }
   const pendingImageUrl = chatImageUrl.value;
   const pendingImageFile = chatImageFile.value;
-  const messageImageUrl = pendingImageFile ? URL.createObjectURL(pendingImageFile) : pendingImageUrl;
+  const useAssistantV2 = !pendingImageFile && !pendingImageUrl;
+  const seedHistory = chatMessages.value
+    .filter((message) => !message.typing && message.content.trim().length > 0)
+    .slice(-30)
+    .map((message) => ({
+      id: message.id.slice(0, 80),
+      role: message.role,
+      content: message.content.slice(0, 2000),
+      created_at: message.created_at,
+    }));
+  const pendingPosition = pendingPositionSelection();
+  const pendingTargetLabel = pendingPositionTargetLabel();
+  const positionRefinement = isPositionRefinement(question, pendingPosition);
+  const positionQuestion = !useAssistantV2 && (isPositionQuestion(question) || positionRefinement);
+  if (!positionQuestion) {
+    positionSelectionSession.value = null;
+  }
+  const realtimePositionFrame = positionQuestion ? await cameraGrowthPanelRef.value?.captureCurrentFrame() : null;
+  const messageImageFile = realtimePositionFrame ?? pendingImageFile;
+  const messageImageUrl = messageImageFile ? URL.createObjectURL(messageImageFile) : pendingImageUrl;
   stopVoiceInputAfterSend();
   clearChatComposerInput();
   const userMessage: ChatMessage = {
@@ -3788,6 +4363,71 @@ async function sendChat(): Promise<void> {
   startAssistantThinking(thinkingMessage.id);
   chatSending.value = true;
   try {
+    if (useAssistantV2) {
+      chatSendingStage.value = 'chat';
+      stopAssistantThinking();
+      updateChatMessage(thinkingMessage.id, { content: '正在结合当前对话理解你的意思…' });
+      const accepted = await createAssistantTurn({
+        session_id: activeAssistantThreadId.value,
+        site_id: defaultSiteId,
+        channel: 'web',
+        message_id: userMessage.id,
+        text: userMessage.content,
+        seed_history: seedHistory,
+      });
+      const response = await streamAssistantTurn(accepted.turn_id, (progressText) => {
+        stopAssistantThinking();
+        updateChatMessage(thinkingMessage.id, { content: progressText });
+      });
+      const contextPosition = response.message.context?.position_result as PositionLocateResult | undefined;
+      const v2Actions = (response.actions ?? response.message.suggested_actions ?? []).map((action) => ({
+        ...action,
+        payload: { ...action.payload, _assistant_v2: true },
+      }));
+      const shouldFollowResponse = assistantAtBottom.value;
+      await revealAssistantMessage(
+        {
+          ...response.message,
+          referencesVerified: true,
+          suggested_actions: v2Actions,
+          position_result: contextPosition,
+        },
+        thinkingMessage.id,
+        shouldFollowResponse,
+      );
+      clearChatImage();
+      return;
+    }
+    if (positionQuestion) {
+      if (!realtimePositionFrame) {
+        throw new Error('无法获取实时摄像头画面，请先进入总览页并确认摄像头已连接。');
+      }
+      chatSendingStage.value = 'vision';
+      stopAssistantThinking();
+      updateChatMessage(thinkingMessage.id, { content: '正在识别当前画面并计算位置…' });
+      const locatorQuestion = positionRefinement && pendingTargetLabel
+        ? `这是对上一轮 ${pendingPosition?.candidates.length ?? 0} 个“${pendingTargetLabel}”候选的继续筛选。`
+          + `用户本轮描述是：“${userMessage.content}”。请比较画面中的同类候选，只返回符合本轮颜色、材质、形状、大小或相对位置描述的目标。`
+        : userMessage.content;
+      const positionResult = await locateCameraObject(realtimePositionFrame, locatorQuestion, normalizedCameraPositionConfig());
+      if (!positionRefinement) {
+        positionSelectionSession.value = positionResult.status === 'multiple' ? positionResult : null;
+      }
+      const shouldFollowResponse = assistantAtBottom.value;
+      await revealAssistantMessage(
+        {
+          id: `assistant-position-${Date.now()}`,
+          role: 'assistant',
+          content: formatPositionReply(positionResult),
+          created_at: Date.now(),
+          position_result: positionResult,
+        },
+        thinkingMessage.id,
+        shouldFollowResponse,
+      );
+      clearChatImage();
+      return;
+    }
     let chatDiseaseContext = diseaseResult.value;
     if (pendingImageFile) {
       chatSendingStage.value = 'vision';
@@ -3824,7 +4464,7 @@ async function sendChat(): Promise<void> {
   } catch (error) {
     const shouldFollowResponse = assistantAtBottom.value;
     const failureContent = chatSendingStage.value === 'vision'
-      ? '图片识别没有完成，因此没有继续生成回答。请确认图片格式和大小符合要求，然后重试。'
+      ? `图片识别没有完成：${userErrorText(error, '请确认摄像头和视觉识别服务均已连接，然后重试。')}`
       : '智能助手暂时无法回答，请稍后重试；如持续无法使用，请联系平台管理员。';
     await revealAssistantMessage(
       {
@@ -4144,6 +4784,7 @@ async function initializeDashboard(): Promise<void> {
   await loadDashboard();
   await stateLoad;
   await syncDeviceAlarmSettings();
+  void loadCameraPositionConfig();
   syncAiAnalysisSchedule();
   void refreshKnowledge(selectedKbId.value);
   void refreshAgriSources();
@@ -4199,6 +4840,8 @@ function startSiteEventStream(): void {
       } else if (eventType === 'command_update') {
         mergeSiteCommand(data as SiteCommandResult);
         void refreshSharedAssistantConversation();
+      } else if (eventType === 'water_gun') {
+        syncWaterGunState(data as WaterGunState);
       } else if (eventType === 'assistant_message' || eventType === 'assistant_action') {
         void refreshSharedAssistantConversation();
       }
@@ -4234,7 +4877,11 @@ async function decideSharedAction(action: SharedAssistantAction, decision: 'conf
   if (sharedAssistantActionBusy.value || action.state !== 'pending') return;
   sharedAssistantActionBusy.value = action.id;
   try {
-    await decideSharedAssistantAction(action.id, decision);
+    const decided = await decideSharedAssistantAction(action.id, decision);
+    const decidedWaterGun = decided.payload.water_gun;
+    if (decidedWaterGun && typeof decidedWaterGun === 'object') {
+      syncWaterGunState(decidedWaterGun as WaterGunState);
+    }
     await refreshSharedAssistantConversation();
   } finally {
     sharedAssistantActionBusy.value = '';
@@ -4242,6 +4889,7 @@ async function decideSharedAction(action: SharedAssistantAction, decision: 'conf
 }
 
 function sharedActionLabel(action: SharedAssistantAction): string {
+  if (action.type === 'water_gun_target') return '确认水枪喷射目标';
   const command = String(action.payload.command ?? '设备操作');
   return {
     pump_on: '开启水泵总开关',
@@ -4262,8 +4910,10 @@ onMounted(() => {
   void initializeDashboard();
   startSiteEventStream();
   void refreshSharedAssistantConversation();
+  void loadWaterGunControlState();
   document.addEventListener('visibilitychange', handleDocumentVisibilityChange);
   window.addEventListener('resize', handleAssistantViewportResize);
+  window.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('beforeunload', persistDashboardBeforeUnload);
   refreshTimer = window.setInterval(() => {
     void loadDashboard(true);
@@ -4274,6 +4924,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopWaterGunHeartbeat();
   closeSiteEvents?.();
   closeSiteEvents = undefined;
   if (persistentStateSaveTimer) {
@@ -4288,6 +4939,7 @@ onBeforeUnmount(() => {
   clearAiAnalysisTimer();
   document.removeEventListener('visibilitychange', handleDocumentVisibilityChange);
   window.removeEventListener('resize', handleAssistantViewportResize);
+  window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('beforeunload', persistDashboardBeforeUnload);
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
@@ -4338,7 +4990,7 @@ onBeforeUnmount(() => {
           class="nav-item"
           :class="{ 'nav-item--active': activeView === item.key }"
           type="button"
-          @click="activeView = item.key"
+          @click="requestViewChange(item.key)"
         >
           <component :is="item.icon" :size="19" />
           <span>{{ item.label }}</span>
@@ -4524,6 +5176,34 @@ onBeforeUnmount(() => {
               </div>
             </section>
           </div>
+
+          <details class="panel camera-position-config" @toggle="handleCameraPositionConfigToggle">
+            <summary>相机定位参数</summary>
+            <p>用于计算 A→B 的平面距离和方位角。请使用棋盘格标定值；仅填写 58° 视场角不能保证定位精度。</p>
+            <div class="camera-position-config__grid">
+              <label>后端摄像头编号 <input v-model.number="backendCameraConfig.device_index" type="number" min="0" max="20" /></label>
+              <label>采集宽度 <input v-model.number="backendCameraConfig.width" type="number" min="160" /></label>
+              <label>采集高度 <input v-model.number="backendCameraConfig.height" type="number" min="120" /></label>
+              <label>采集帧率 <input v-model.number="backendCameraConfig.fps" type="number" min="1" max="30" /></label>
+              <label>图像宽度 <input v-model.number="cameraPositionConfig.image_width" type="number" min="1" /></label>
+              <label>图像高度 <input v-model.number="cameraPositionConfig.image_height" type="number" min="1" /></label>
+              <label>fx <input v-model.number="cameraPositionConfig.fx" type="number" min="0" step="0.01" /></label>
+              <label>fy <input v-model.number="cameraPositionConfig.fy" type="number" min="0" step="0.01" /></label>
+              <label>cx <input v-model.number="cameraPositionConfig.cx" type="number" min="0" step="0.01" /></label>
+              <label>cy <input v-model.number="cameraPositionConfig.cy" type="number" min="0" step="0.01" /></label>
+              <label>畸变 k1,k2,p1,p2,k3 <input v-model="cameraDistortionText" type="text" placeholder="例如 0.01,-0.02,0,0,0" /></label>
+              <label>镜头高度（mm）<input v-model.number="cameraPositionConfig.camera_height_mm" type="number" min="1" step="0.1" /></label>
+              <label>向下俯角（°）<input v-model.number="cameraPositionConfig.pitch_down_deg" type="number" min="-89" max="89" step="0.1" /></label>
+              <label>水平朝向偏移（°）<input v-model.number="cameraPositionConfig.yaw_deg" type="number" min="-180" max="180" step="0.1" /></label>
+              <label>横滚角（°）<input v-model.number="cameraPositionConfig.roll_deg" type="number" min="-180" max="180" step="0.1" /></label>
+            </div>
+            <div class="camera-position-config__actions">
+              <button class="primary-button" type="button" :disabled="cameraPositionConfigSaving" @click="saveCurrentCameraPositionConfig">
+                <Save :size="16" /> {{ cameraPositionConfigSaving ? '保存中' : '保存定位参数' }}
+              </button>
+              <span>{{ cameraPositionConfigMessage }}</span>
+            </div>
+          </details>
 
           <div class="two-column">
             <EChartPanel title="近 6 小时环境趋势" :option="overviewChartOption" :active="activeView === 'overview'" :min-width="multiMetricChartMinWidth">
@@ -5046,7 +5726,7 @@ onBeforeUnmount(() => {
             <div class="section-heading">
               <div>
                 <h2>智能托管</h2>
-                <span>自动计算控制需求值，手动模式会固定用户设置</span>
+                <span>自动计算控制需求值；水泵已由水枪接管，不参与托管调控</span>
               </div>
               <div class="smart-control-actions">
                 <StatusPill :label="smartControlDecision?.status ?? '等待数据'" :state="smartControlStatusState" />
@@ -5072,11 +5752,12 @@ onBeforeUnmount(() => {
                 type="button"
                 class="smart-demand-chip"
                 :class="{ 'smart-demand-chip--manual': param.mode === 'manual' }"
-                @click="toggleSmartParamMode(param.key)"
+                :disabled="param.locked"
+                @click="!param.locked && toggleSmartParamMode(param.key)"
               >
                 <div>
                   <strong>{{ param.label }}</strong>
-                  <span>{{ param.mode === 'manual' ? '手动' : '自动' }}</span>
+                  <span>{{ param.locked ? '水枪接管' : param.mode === 'manual' ? '手动' : '自动' }}</span>
                 </div>
                 <b :style="{ color: param.mode === 'manual' ? '#C26A1B' : param.color }">{{ param.value }}%</b>
               </button>
@@ -5086,9 +5767,9 @@ onBeforeUnmount(() => {
                 <div class="smart-param-row__head">
                   <div>
                     <strong>{{ param.label }}</strong>
-                    <span>当前 {{ param.value }}% · 自动 {{ param.autoValue }}%</span>
+                    <span>{{ param.locked ? `水枪距离 ${Math.round(waterGunRangeMm)} mm，映射水泵参数 ${param.value}%（100% = 1700 mm）。` : `当前 ${param.value}% · 自动 ${param.autoValue}%` }}</span>
                   </div>
-                  <StatusPill :label="param.mode === 'manual' ? '手动' : '自动'" :state="param.mode === 'manual' ? 'watch' : 'good'" />
+                  <StatusPill :label="param.locked ? '水枪接管' : param.mode === 'manual' ? '手动' : '自动'" :state="param.locked || param.mode === 'manual' ? 'watch' : 'good'" />
                 </div>
                 <div class="smart-param-row__control">
                   <input
@@ -5097,15 +5778,132 @@ onBeforeUnmount(() => {
                     max="100"
                     step="1"
                     :value="param.value"
-                    :disabled="param.mode !== 'manual'"
+                    :disabled="param.locked || param.mode !== 'manual'"
                     :style="{ accentColor: param.color }"
                     @change="handleSmartParamSliderChange(param.key, $event)"
                   />
-                  <button class="text-button" type="button" @click="param.mode === 'manual' ? restoreSmartParamAuto(param.key) : setSmartParamManual(param.key)">
+                  <button v-if="!param.locked" class="text-button" type="button" @click="param.mode === 'manual' ? restoreSmartParamAuto(param.key) : setSmartParamManual(param.key)">
                     {{ param.mode === 'manual' ? '恢复自动' : '手动' }}
                   </button>
+                  <span v-else class="smart-param-row__locked">由水枪控制</span>
                 </div>
               </article>
+            </div>
+          </section>
+
+          <section class="panel water-gun-panel">
+            <div class="section-heading water-gun-heading">
+              <div>
+                <h2>水枪目标控制</h2>
+                <span>拖动三角目标，设置水枪的瞄准位置。</span>
+              </div>
+              <div class="water-gun-heading__status">
+                <div class="water-gun-mode-switch" role="group" aria-label="水枪控制模式">
+                  <button type="button" :class="{ 'is-active': !waterGunDynamicActive }" @click="selectWaterGunMode('static')">静态模式</button>
+                  <button type="button" :class="{ 'is-active': waterGunDynamicActive }" @click="selectWaterGunMode('dynamic')">动态模式</button>
+                </div>
+                <button
+                  class="water-gun-state-button"
+                  :class="{ 'is-on': waterGunSpraying }"
+                  type="button"
+                  :disabled="waterGunBusy"
+                  @click="setWaterGunSprayEnabled(!waterGunSpraying)"
+                >
+                  <span></span>{{ waterGunSpraying ? '水枪开启' : '水枪关闭' }}
+                </button>
+                <span v-if="waterGunState?.simulation_only" class="water-gun-simulation-badge"><ShieldCheck :size="15" />安全模拟</span>
+              </div>
+            </div>
+            <div class="water-gun-layout">
+              <div class="water-gun-field-wrap">
+                <svg
+                  ref="waterGunFieldRef"
+                  class="water-gun-field"
+                  viewBox="0 0 800 400"
+                  role="application"
+                  aria-label="水枪目标俯视极坐标控制区域"
+                  @pointerdown="startWaterGunPointer"
+                  @pointermove="moveWaterGunPointer"
+                  @pointerup="endWaterGunPointer"
+                  @pointercancel="endWaterGunPointer"
+                >
+                  <defs>
+                    <linearGradient id="water-gun-field-bg" x1="0" y1="1" x2="0" y2="0">
+                      <stop offset="0" stop-color="#e9f8f0" />
+                      <stop offset="1" stop-color="#f8fcf9" />
+                    </linearGradient>
+                    <linearGradient id="water-gun-body" x1="0" y1="1" x2="0" y2="0">
+                      <stop offset="0" stop-color="#10a9ad" />
+                      <stop offset="1" stop-color="#33d1c6" />
+                    </linearGradient>
+                    <linearGradient id="water-gun-base" x1="0" y1="0" x2="1" y2="1">
+                      <stop offset="0" stop-color="#ffb33c" />
+                      <stop offset="1" stop-color="#ff6f61" />
+                    </linearGradient>
+                    <pattern id="water-gun-spray-pattern" width="8" height="8" patternUnits="userSpaceOnUse">
+                      <rect width="8" height="8" fill="#168f8a" />
+                      <circle cx="2" cy="2" r="1.2" fill="#bdf6ed" />
+                      <circle cx="7" cy="6" r="1" fill="#7ee8dc" />
+                    </pattern>
+                  </defs>
+                  <rect x="30" y="15" width="740" height="370" rx="16" fill="url(#water-gun-field-bg)" stroke="#8db89a" stroke-width="2" />
+                  <path d="M400 385 V15 M30 200 H770" class="water-gun-grid-line" />
+                  <path d="M215 15 V385 M585 15 V385 M30 107.5 H770 M30 292.5 H770" class="water-gun-grid-line water-gun-grid-line--minor" />
+                  <text x="400" y="32" text-anchor="middle" class="water-gun-field-label">正前方 1200 mm</text>
+                  <text x="44" y="375" class="water-gun-field-label">左 −</text>
+                  <text x="756" y="375" text-anchor="end" class="water-gun-field-label">右 +</text>
+                  <line x1="400" y1="385" :x2="waterGunMarker.x" :y2="waterGunMarker.y" class="water-gun-aim-line" />
+                  <g class="water-gun-origin" transform="translate(400 385)">
+                    <circle class="water-gun-base" r="23" />
+                    <g class="water-gun-body" :transform="`rotate(${waterGunBearingDeg})`">
+                      <rect x="-10" y="-48" width="20" height="37" rx="9" />
+                      <rect class="water-gun-nozzle" x="-5" y="-70" width="10" height="29" rx="5" />
+                      <rect class="water-gun-tip" x="-8" y="-74" width="16" height="8" rx="4" />
+                      <path class="water-gun-wing" d="M-10 -34 L-24 -27 L-20 -14 L-8 -20 Z" />
+                      <path class="water-gun-wing" d="M10 -34 L24 -27 L20 -14 L8 -20 Z" />
+                      <circle class="water-gun-tank" cy="-23" r="8" />
+                    </g>
+                  </g>
+                  <g
+                    class="water-gun-target"
+                    :class="{ 'water-gun-target--spraying': waterGunSpraying, 'water-gun-target--outside': waterGunTargetOutside }"
+                    :transform="`translate(${waterGunMarker.x} ${waterGunMarker.y})`"
+                  >
+                    <path d="M0 -15 L14 11 L-14 11 Z" :fill="waterGunSpraying ? 'url(#water-gun-spray-pattern)' : '#7c8780'" />
+                  </g>
+                  <g v-if="waterGunTargetOutside" :transform="`translate(${waterGunMarker.x} ${waterGunMarker.y})`">
+                    <rect x="-36" y="18" width="72" height="24" rx="12" class="water-gun-outside-badge" />
+                    <text y="35" text-anchor="middle" class="water-gun-outside-text">范围外</text>
+                  </g>
+                </svg>
+              </div>
+              <aside class="water-gun-readout">
+                <div v-if="waterGunTargetSource === 'vision'" class="water-gun-vision-notice">
+                  <Bot :size="19" />
+                  <div><strong>视觉识别目标</strong><span>{{ waterGunTargetLabel || '已识别物体' }}</span></div>
+                </div>
+                <div class="water-gun-compact-values">
+                  <article><span>水平距离</span><strong>{{ Math.round(waterGunRangeMm) }} mm</strong></article>
+                  <article><span>当前方向</span><strong>{{ waterGunBearingText }}</strong></article>
+                </div>
+                <p v-if="waterGunTargetOutside" class="water-gun-warning">
+                  目标超出手动区域，三角形已停在对应边缘。
+                </p>
+                <p class="water-gun-message">{{ waterGunMessage }}</p>
+                <div class="water-gun-actions">
+                  <button v-if="!waterGunDynamicActive" class="primary-button" type="button" :disabled="waterGunBusy" @click="waterGunStaticConfirmOpen = true">
+                    <Send :size="17" /> 确认目标
+                  </button>
+                  <button
+                    :class="waterGunSpraying ? 'danger-button' : 'water-gun-dynamic-button'"
+                    type="button"
+                    :disabled="waterGunBusy"
+                    @click="setWaterGunSprayEnabled(!waterGunSpraying)"
+                  >
+                    <Droplets :size="17" /> {{ waterGunSpraying ? '关闭水枪' : '开启水枪' }}
+                  </button>
+                </div>
+              </aside>
             </div>
           </section>
 
@@ -5123,15 +5921,15 @@ onBeforeUnmount(() => {
               <article v-for="actuator in siteActuatorCards" :key="actuator.target" class="control-card site-actuator-card">
                 <component :is="actuator.icon" :size="28" />
                 <strong>{{ actuator.label }}</strong>
-                <span>总开关 {{ actuatorMasterEnabled(actuator.state) ? '开启' : '关闭' }}</span>
+                <span>{{ actuator.target === 'pump' ? `模拟控制 ${waterGunPumpPercent.toFixed(0)}%` : `总开关 ${displayedActuatorMasterEnabled(actuator.target, actuator.state) ? '开启' : '关闭'}` }}</span>
                 <small>需求 {{ actuatorValueText(actuator.state.desired) }} · 实际 {{ actuatorValueText(actuator.state.actual) }}</small>
                 <button
                   class="toggle-switch"
-                  :class="{ 'toggle-switch--on': actuatorMasterEnabled(actuator.state) }"
+                  :class="{ 'toggle-switch--on': displayedActuatorMasterEnabled(actuator.target, actuator.state) }"
                   type="button"
-                  :disabled="!actuator.state.supported"
-                  :aria-label="`${actuatorMasterEnabled(actuator.state) ? '关闭' : '开启'}${actuator.label}总开关`"
-                  @click="setSiteActuatorMaster(actuator.target, !actuatorMasterEnabled(actuator.state))"
+                  :disabled="actuator.target !== 'pump' && !actuator.state.supported"
+                  :aria-label="`${displayedActuatorMasterEnabled(actuator.target, actuator.state) ? '关闭' : '开启'}${actuator.label}总开关`"
+                  @click="setSiteActuatorMaster(actuator.target, !displayedActuatorMasterEnabled(actuator.target, actuator.state))"
                 >
                   <span>关闭</span><span>开启</span><i></i>
                 </button>
@@ -5461,10 +6259,27 @@ onBeforeUnmount(() => {
             <button class="icon-button" type="button" title="历史对话" @click="assistantHistoryOpen = true">
               <History :size="18" />
             </button>
+            <button class="icon-button" type="button" title="已记住的偏好" @click="openAssistantPreferences">
+              <SlidersHorizontal :size="18" />
+            </button>
             <button class="icon-button" type="button" title="关闭 AI 助手" @click="assistantOpen = false">
               <X :size="18" />
             </button>
           </div>
+        </div>
+        <div v-if="assistantPreferencesOpen" class="assistant-preferences-panel">
+          <div>
+            <strong>已记住的偏好</strong>
+            <button class="icon-button" type="button" title="关闭偏好" @click="assistantPreferencesOpen = false">
+              <X :size="16" />
+            </button>
+          </div>
+          <p v-if="assistantPreferencesLoading">正在读取…</p>
+          <p v-else-if="!assistantPreferences.length">还没有保存偏好。你可以在对话中明确说“记住……”。</p>
+          <article v-for="preference in assistantPreferences" :key="preference.key">
+            <span><b>{{ preference.key }}</b>：{{ preference.value }}</span>
+            <button class="text-button" type="button" :disabled="assistantPreferencesLoading" @click="removeAssistantPreference(preference.key)">删除</button>
+          </article>
         </div>
         <div class="assistant-voice-status">
           <StatusPill :label="voiceMessage" :state="listening ? 'watch' : 'neutral'" />
@@ -5488,6 +6303,63 @@ onBeforeUnmount(() => {
                 :label="retrievalStatusLabel(message.retrievalStatus)"
                 :state="retrievalStatusState(message.retrievalStatus)"
               />
+              <div v-if="message.position_result" class="position-result-card">
+                <button
+                  v-if="message.position_result.annotated_image_url && !positionCaptureErrors[message.position_result.annotated_image_url]"
+                  class="position-result-card__capture"
+                  type="button"
+                  title="点击查看本轮定位大图"
+                  @click="openPositionCapture(message.position_result)"
+                >
+                  <img
+                    :src="resolveApiAssetUrl(message.position_result.annotated_image_url)"
+                    :alt="message.position_result.selected ? `${message.position_result.selected.label} 定位标注图` : '本轮定位标注图'"
+                    @error="markPositionCaptureUnavailable(message.position_result)"
+                  />
+                  <span>本轮实时截图 · {{ formatDateTime(message.position_result.captured_at) }} · 点击放大</span>
+                </button>
+                <p
+                  v-else-if="message.position_result.annotated_image_url"
+                  class="position-result-card__capture-error"
+                >
+                  这张定位截图已超过 24 小时或暂时无法读取，请重新查询目标位置。
+                </p>
+                <template v-if="message.position_result.selected">
+                  <strong>{{ message.position_result.selected.label }} 定位结果</strong>
+                  <span>镜头直线距离 {{ Math.round(message.position_result.selected.camera_range_mm) }} mm</span>
+                  <span>A→B 平面距离 {{ Math.round(message.position_result.selected.ground_range_mm) }} mm</span>
+                  <span>方位角 {{ message.position_result.selected.bearing_deg.toFixed(1) }}°</span>
+                  <span>{{ positionStrategySummary(message.position_result) }}</span>
+                  <details class="position-result-details">
+                    <summary>定位详情</summary>
+                    <dl>
+                      <div>
+                        <dt>AI 选择点</dt>
+                        <dd>{{ positionAnchorTypeLabel(message.position_result.selected.anchor_type) }}</dd>
+                      </div>
+                      <div>
+                        <dt>AI 高度估计</dt>
+                        <dd>{{ Math.round(message.position_result.selected.estimated_height_mm) }} mm</dd>
+                      </div>
+                      <div>
+                        <dt>实际计算高度</dt>
+                        <dd>{{ Math.round(message.position_result.selected.effective_height_mm) }} mm</dd>
+                      </div>
+                      <div>
+                        <dt>高度可信度</dt>
+                        <dd>{{ Math.round(message.position_result.selected.height_confidence * 100) }}%</dd>
+                      </div>
+                    </dl>
+                    <p>{{ message.position_result.selected.anchor_reason }}</p>
+                  </details>
+                </template>
+                <template v-else-if="message.position_result.candidates.length">
+                  <strong>发现 {{ message.position_result.candidates.length }} 个候选目标</strong>
+                  <span v-for="candidate in message.position_result.candidates" :key="candidate.id">
+                    {{ candidate.label }}：{{ Math.round(candidate.ground_range_mm) }} mm，{{ candidate.bearing_deg.toFixed(1) }}°
+                  </span>
+                </template>
+              </div>
               <div v-if="message.referencesVerified === true && message.references?.length" class="reference-list">
                 <strong>资料引用</strong>
                 <template v-for="refItem in message.references" :key="`${message.id}-${referenceKey(refItem)}`">
@@ -5614,6 +6486,71 @@ onBeforeUnmount(() => {
                 </button>
               </div>
             </article>
+          </div>
+        </section>
+      </div>
+      <div v-if="positionImageModal" class="modal-backdrop position-capture-modal" @click.self="closePositionCapture">
+        <section class="modal-card position-capture-modal__card" role="dialog" aria-modal="true" aria-labelledby="position-capture-title">
+          <div class="modal-card__header">
+            <div>
+              <span>AI 实时定位依据</span>
+              <h2 id="position-capture-title">{{ positionImageModal.title }}</h2>
+            </div>
+            <button class="icon-button" type="button" title="关闭" @click="closePositionCapture">
+              <X :size="18" />
+            </button>
+          </div>
+          <img
+            v-if="!positionImageModalError"
+            :src="positionImageModal.url"
+            :alt="positionImageModal.title"
+            @error="positionImageModalError = true"
+          />
+          <p v-else class="position-result-card__capture-error">定位截图已过期或暂时无法读取，请重新查询目标位置。</p>
+          <p>拍摄时间：{{ formatDateTime(positionImageModal.capturedAt) }}。绿色框表示目标，红点表示 AI 为本轮几何计算选择的定位点。</p>
+        </section>
+      </div>
+      <div v-if="waterGunStaticConfirmOpen" class="modal-backdrop" @click.self="waterGunStaticConfirmOpen = false">
+        <section class="modal-card water-gun-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="water-gun-static-title">
+          <div class="modal-card__header">
+            <div><span>目标确认</span><h2 id="water-gun-static-title">瞄准这个位置？</h2></div>
+            <button class="icon-button" type="button" title="关闭" @click="waterGunStaticConfirmOpen = false"><X :size="18" /></button>
+          </div>
+          <div class="water-gun-confirm-values">
+            <strong>{{ Math.round(waterGunRangeMm) }} mm</strong>
+            <strong>{{ waterGunBearingDeg.toFixed(1) }}°</strong>
+          </div>
+          <div class="modal-card__actions">
+            <button class="water-gun-modal-choice is-cancel" type="button" :disabled="waterGunBusy" @click="waterGunStaticConfirmOpen = false">取消</button>
+            <button class="water-gun-modal-choice is-confirm" type="button" :disabled="waterGunBusy" @click="confirmWaterGunStaticTarget">{{ waterGunBusy ? '处理中…' : '确认' }}</button>
+          </div>
+        </section>
+      </div>
+      <div v-if="waterGunDynamicConfirmOpen" class="modal-backdrop" @click.self="waterGunDynamicConfirmOpen = false">
+        <section class="modal-card water-gun-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="water-gun-dynamic-title">
+          <div class="modal-card__header">
+            <div><span>风险确认</span><h2 id="water-gun-dynamic-title">进入动态模式？</h2></div>
+            <button class="icon-button" type="button" title="关闭" @click="waterGunDynamicConfirmOpen = false"><X :size="18" /></button>
+          </div>
+          <div class="water-gun-risk-callout">
+            <AlertTriangle :size="23" />
+            <p>动态模式会持续改变瞄准位置，请确认周围安全。</p>
+          </div>
+          <div class="modal-card__actions">
+            <button class="water-gun-modal-choice is-cancel" type="button" :disabled="waterGunBusy" @click="waterGunDynamicConfirmOpen = false">取消</button>
+            <button class="water-gun-modal-choice is-confirm" type="button" :disabled="waterGunBusy" @click="confirmWaterGunDynamicStart">{{ waterGunBusy ? '启动中…' : '确认进入' }}</button>
+          </div>
+        </section>
+      </div>
+      <div v-if="waterGunLeaveConfirmOpen" class="modal-backdrop">
+        <section class="modal-card water-gun-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="water-gun-leave-title">
+          <div class="modal-card__header">
+            <div><span>动态模式正在运行</span><h2 id="water-gun-leave-title">切页前如何处理喷射？</h2></div>
+          </div>
+          <p>两种处理都会保留当前目标位置并转成静态模式。本次操作后不会立即切页，请再次点击导航。</p>
+          <div class="water-gun-leave-actions">
+            <button class="water-gun-dynamic-button" type="button" :disabled="waterGunBusy" @click="finishWaterGunDynamic(true)">保持喷射并转为静态</button>
+            <button class="danger-button" type="button" :disabled="waterGunBusy" @click="finishWaterGunDynamic(false)">停止喷水并转为静态</button>
           </div>
         </section>
       </div>

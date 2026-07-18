@@ -71,6 +71,7 @@ ALLOWED_COMMANDS = {
     "alarm_off",
     "curtain_open",
     "curtain_close",
+    "target_position",
 }
 
 
