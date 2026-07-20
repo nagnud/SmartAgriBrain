@@ -4,6 +4,14 @@ sdkconfig.old
 managed_components/
 dependencies.lock
 
+# PlatformIO / Arduino ESP32 local artifacts and secrets
+esp32/.pio/
+esp32/.vscode/
+esp32/.clangd/
+esp32/include/config.h
+esp32/include/config.local.h
+esp32/.env
+
 # Python
 __pycache__/
 *.pyc
