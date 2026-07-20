@@ -21,6 +21,8 @@ from site_service import (
     create_edge_assistant_reply,
     decide_edge_assistant_action,
     expire_site_commands,
+    get_edge_conversation,
+    now_ms,
     return_site_command_to_queue,
     s3_device_id,
     save_site_telemetry,
@@ -167,7 +169,15 @@ class MqttRuntime:
         self._connected.set()
         qos = int(os.getenv("MQTT_QOS", "1"))
         base = f"{self._topic_prefix}/devices/+"
-        for suffix in ("telemetry", "status", "capabilities", "command_ack", "assistant/request", "assistant/decision"):
+        for suffix in (
+            "telemetry",
+            "status",
+            "capabilities",
+            "command_ack",
+            "assistant/request",
+            "assistant/decision",
+            "assistant/recover",
+        ):
             client.subscribe(f"{base}/{suffix}", qos=qos)
 
     def _on_disconnect(
@@ -217,6 +227,56 @@ class MqttRuntime:
             retain=False,
         )
 
+    @staticmethod
+    def _pending_actions(actions: Any, *, current_ms: int | None = None) -> list[dict[str, Any]]:
+        if not isinstance(actions, list):
+            return []
+        timestamp = now_ms() if current_ms is None else current_ms
+        pending: list[dict[str, Any]] = []
+        for action in actions:
+            if not isinstance(action, dict) or action.get("state") != "pending":
+                continue
+            try:
+                expires_at = int(action.get("expires_at") or 0)
+            except (TypeError, ValueError):
+                continue
+            if expires_at >= timestamp:
+                pending.append(action)
+        return pending
+
+    def publish_voice_control(
+        self,
+        *,
+        answer: str,
+        actions: Any,
+        session_id: str,
+        user_content: str = "",
+        turn_id: str | None = None,
+        next_input: str = "none",
+    ) -> bool:
+        """Deliver pending voice actions independently from streamed audio."""
+        pending = self._pending_actions(actions)
+        resolved_next_input = next_input if next_input in {"none", "duration", "confirmation"} else "none"
+        if pending and resolved_next_input == "none":
+            resolved_next_input = "confirmation"
+        payload: dict[str, Any] = {
+            "kind": "voice_control",
+            "session_id": session_id,
+            "user_content": user_content,
+            "assistant": {
+                "content": answer,
+                "actions": pending,
+                "next_input": resolved_next_input,
+            },
+        }
+        if turn_id:
+            payload["turn_id"] = turn_id
+        return self._publish_json(
+            f"{self._topic_prefix}/devices/{c5_device_id()}/assistant/response",
+            payload,
+            retain=False,
+        )
+
     def _handle_assistant_message(self, raw: dict[str, Any], topic_device_id: str) -> None:
         try:
             if topic_device_id != c5_device_id():
@@ -260,6 +320,52 @@ class MqttRuntime:
         except Exception as exc:
             logger.exception("Unable to process C5 assistant decision")
             self._publish_assistant_response({"error": {"code": "DECISION_ERROR", "message": str(exc)}})
+
+    def _handle_assistant_recovery(self, raw: dict[str, Any], topic_device_id: str) -> None:
+        """Restore a still-pending action after the C5 reconnects."""
+        try:
+            if topic_device_id != c5_device_id():
+                raise ValueError("assistant recovery is only accepted from the configured C5")
+            site_id = str(raw.get("site_id") or os.getenv("DEFAULT_SITE_ID", "greenhouse_001"))
+            requested_session = str(raw.get("session_id") or "").strip() or None
+            with SessionLocal() as db:
+                conversation = get_edge_conversation(db, site_id, requested_session)
+                if requested_session is not None:
+                    latest_conversation = get_edge_conversation(db, site_id, None)
+                    requested_updated_at = conversation.messages[-1].created_at if conversation.messages else 0
+                    latest_updated_at = latest_conversation.messages[-1].created_at if latest_conversation.messages else 0
+                    if latest_updated_at > requested_updated_at:
+                        conversation = latest_conversation
+
+            recovered_message: Any = None
+            recovered_actions: list[dict[str, Any]] = []
+            timestamp = now_ms()
+            for message in reversed(conversation.messages):
+                if message.role != "assistant":
+                    continue
+                recovered_message = message
+                candidate_actions = self._pending_actions(
+                    [action.model_dump(mode="json") for action in message.actions],
+                    current_ms=timestamp,
+                )
+                if candidate_actions:
+                    recovered_actions = candidate_actions
+                break
+
+            self._publish_assistant_response({
+                "kind": "voice_control",
+                "recovered": True,
+                "session_id": conversation.session_id or requested_session or "",
+                "assistant": {
+                    "content": recovered_message.content if recovered_message is not None else "",
+                    "actions": recovered_actions,
+                },
+            })
+            if recovered_actions:
+                logger.info("Recovered pending C5 assistant action for session %s", conversation.session_id)
+        except Exception as exc:
+            logger.exception("Unable to recover C5 assistant action")
+            self._publish_assistant_response({"error": {"code": "RECOVERY_ERROR", "message": str(exc)}})
 
     def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
         try:
@@ -327,6 +433,15 @@ class MqttRuntime:
                     target=self._handle_assistant_decision,
                     args=(raw, topic_device_id),
                     name="c5-assistant-decision",
+                    daemon=True,
+                ).start()
+                return
+
+            if suffix == "assistant/recover":
+                threading.Thread(
+                    target=self._handle_assistant_recovery,
+                    args=(raw, topic_device_id),
+                    name="c5-assistant-recovery",
                     daemon=True,
                 ).start()
         except Exception:

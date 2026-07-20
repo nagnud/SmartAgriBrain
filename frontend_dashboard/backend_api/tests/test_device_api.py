@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -43,12 +44,14 @@ from site_models import (  # noqa: E402
     EdgeAssistantMessage,
     EdgeAssistantSession,
     EdgeDeviceRecord,
+    SiteActuatorControlState,
     SiteCommandRecord,
     SiteHistorySample,
     SiteSnapshotRecord,
 )
 from site_schemas import SiteCommandRequest  # noqa: E402
 from site_service import (  # noqa: E402
+    _message_response,
     acknowledge_site_command,
     claim_next_site_command,
     command_wire_payload,
@@ -60,7 +63,12 @@ from site_service import (  # noqa: E402
     save_site_telemetry,
     now_ms,
 )
-from assistant_orchestrator import _execute_tool, _is_camera_configuration_request, run_assistant_turn  # noqa: E402
+from assistant_orchestrator import (  # noqa: E402
+    _execute_tool,
+    _fast_edge_water_gun_duration_reply,
+    _is_camera_configuration_request,
+    run_assistant_turn,
+)
 from schemas import AssistantTurnRequest, PositionCandidate  # noqa: E402
 from position_service import _remember  # noqa: E402
 from water_gun_service import water_gun_runtime  # noqa: E402
@@ -116,6 +124,7 @@ class DeviceApiTests(unittest.TestCase):
             db.query(EdgeAssistantMessage).delete()
             db.query(EdgeAssistantSession).delete()
             db.query(SiteCommandRecord).delete()
+            db.query(SiteActuatorControlState).delete()
             db.query(SiteHistorySample).delete()
             db.query(SiteSnapshotRecord).delete()
             db.query(EdgeDeviceRecord).delete()
@@ -346,16 +355,33 @@ class DeviceApiTests(unittest.TestCase):
         )
         self.assertEqual(started.status_code, 200)
         session_id = started.json()["session_id"]
-        self.assertTrue(started.json()["spray_enabled"])
+        self.assertFalse(started.json()["spray_enabled"])
+
+        spraying = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/spray",
+            json={"session_id": session_id, "spray_enabled": True},
+        )
+        self.assertEqual(spraying.status_code, 200)
+        self.assertEqual(spraying.json()["mode"], "dynamic")
+        self.assertTrue(spraying.json()["spray_enabled"])
+
+        dry_tracking = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/dynamic/spray",
+            json={"session_id": session_id, "spray_enabled": False},
+        )
+        self.assertEqual(dry_tracking.status_code, 200)
+        self.assertEqual(dry_tracking.json()["mode"], "dynamic")
+        self.assertFalse(dry_tracking.json()["spray_enabled"])
+        next_sequence = dry_tracking.json()["sequence"] + 1
 
         updated = self.client.put(
             "/api/v1/sites/greenhouse_001/water-gun/dynamic/target",
-            json={"session_id": session_id, "sequence": 2, "ground_range_mm": 700, "bearing_deg": -10},
+            json={"session_id": session_id, "sequence": next_sequence, "ground_range_mm": 700, "bearing_deg": -10},
         )
         self.assertEqual(updated.status_code, 200)
         repeated = self.client.put(
             "/api/v1/sites/greenhouse_001/water-gun/dynamic/target",
-            json={"session_id": session_id, "sequence": 2, "ground_range_mm": 710, "bearing_deg": -9},
+            json={"session_id": session_id, "sequence": next_sequence, "ground_range_mm": 710, "bearing_deg": -9},
         )
         self.assertEqual(repeated.status_code, 422)
 
@@ -374,6 +400,80 @@ class DeviceApiTests(unittest.TestCase):
             self.assertEqual(latest_command.payload["water_gun"]["mode"], "static")
             self.assertFalse(latest_command.payload["water_gun"]["spray_enabled"])
 
+    def test_water_gun_timed_boundaries_target_change_and_automatic_stop(self) -> None:
+        missing_duration = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={"ground_range_mm": 600, "bearing_deg": 0, "spray_enabled": True, "spray_schedule": "timed"},
+        )
+        self.assertEqual(missing_duration.status_code, 422)
+        too_long = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={
+                "ground_range_mm": 600,
+                "bearing_deg": 0,
+                "spray_enabled": True,
+                "spray_schedule": "timed",
+                "spray_duration_seconds": 86_400,
+            },
+        )
+        self.assertEqual(too_long.status_code, 422)
+
+        events = site_event_bus.stream("greenhouse_001")
+        self.assertEqual(next(events), "retry: 2000\n\n")
+        started = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={
+                "ground_range_mm": 600,
+                "bearing_deg": 0,
+                "spray_enabled": True,
+                "spray_schedule": "timed",
+                "spray_duration_seconds": 10,
+            },
+        )
+        self.assertEqual(started.status_code, 200)
+        self.assertTrue(started.json()["spray_enabled"])
+        self.assertEqual(started.json()["remaining_seconds"], 10)
+        timed_event = next(events)
+        events.close()
+        self.assertIn("event: water_gun", timed_event)
+        self.assertIn('"spray_schedule":"timed"', timed_event)
+        self.assertIn('"remaining_seconds":10', timed_event)
+
+        changed = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={
+                "ground_range_mm": 700,
+                "bearing_deg": 5,
+                "spray_enabled": True,
+                "spray_schedule": "timed",
+                "spray_duration_seconds": 10,
+            },
+        )
+        self.assertEqual(changed.status_code, 200)
+        self.assertFalse(changed.json()["spray_enabled"])
+        self.assertEqual(changed.json()["spray_schedule"], "continuous")
+        self.assertEqual(changed.json()["stop_reason"], "target_changed")
+
+        one_second = self.client.post(
+            "/api/v1/sites/greenhouse_001/water-gun/static",
+            json={
+                "ground_range_mm": 700,
+                "bearing_deg": 5,
+                "spray_enabled": True,
+                "spray_schedule": "timed",
+                "spray_duration_seconds": 1,
+            },
+        )
+        self.assertEqual(one_second.status_code, 200)
+        deadline = time.monotonic() + 2.5
+        stopped = one_second.json()
+        while stopped["spray_enabled"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+            stopped = self.client.get("/api/v1/sites/greenhouse_001/water-gun").json()
+        self.assertFalse(stopped["spray_enabled"])
+        self.assertEqual(stopped["stop_reason"], "timed_complete")
+        self.assertIsNone(stopped["spray_ends_at"])
+
     def test_water_gun_assistant_cancel_previews_and_confirm_dispatches(self) -> None:
         candidate = PositionCandidate(
             id="target-1",
@@ -386,7 +486,7 @@ class DeviceApiTests(unittest.TestCase):
             anchor={"x": 140, "y": 120},
         )
 
-        def add_action(db, result_id: str) -> EdgeAssistantAction:
+        def add_action(db, result_id: str, duration_seconds: int | None = None) -> EdgeAssistantAction:
             current = now_ms()
             session_id = f"edge-{uuid.uuid4()}"
             message_id = f"message-{uuid.uuid4()}"
@@ -398,7 +498,14 @@ class DeviceApiTests(unittest.TestCase):
                 action_type="water_gun_target",
                 risk="high",
                 state="pending",
-                payload={"result_id": result_id},
+                payload={
+                    "result_id": result_id,
+                    **({
+                        "target_label": "U盘",
+                        "spray_schedule": "timed",
+                        "spray_duration_seconds": duration_seconds,
+                    } if duration_seconds is not None else {}),
+                },
                 created_at=current,
                 expires_at=current + 30_000,
             )
@@ -424,12 +531,118 @@ class DeviceApiTests(unittest.TestCase):
             self.assertFalse(canceled.payload["water_gun"]["spray_enabled"])
             self.assertEqual(db.query(DeviceCommandRecord).count(), 0)
 
-            confirmed_action = add_action(db, _remember(candidate))
+            confirmed_action = add_action(db, _remember(candidate), 113)
             confirmed = decide_edge_assistant_action(db, "greenhouse_001", confirmed_action.id, "confirm")
             self.assertEqual(confirmed.state, "confirmed")
             self.assertTrue(confirmed.payload["water_gun"]["spray_enabled"])
             command = db.query(DeviceCommandRecord).one()
             self.assertEqual(command.payload["position"], {"ground_range_mm": 750.0, "bearing_deg": -12.0})
+            self.assertEqual(command.payload["water_gun"]["spray_schedule"], "timed")
+            self.assertEqual(command.payload["water_gun"]["spray_duration_seconds"], 113)
+
+    def test_water_gun_duration_follow_up_creates_timed_confirmation(self) -> None:
+        candidate = PositionCandidate(
+            id="target-duration",
+            label="番茄",
+            confidence=0.96,
+            bbox={"x": 120, "y": 80, "width": 90, "height": 110},
+            camera_range_mm=900,
+            ground_range_mm=810,
+            bearing_deg=8,
+            anchor={"x": 165, "y": 190},
+        )
+        result_id = _remember(candidate)
+        message = EdgeAssistantMessage(
+            id=f"message-{uuid.uuid4()}",
+            session_id=f"edge-{uuid.uuid4()}",
+            site_id="greenhouse_001",
+            role="assistant",
+            channel="edge_text",
+            content="已找到番茄，需要喷多久？",
+            created_at=now_ms(),
+            message_metadata={
+                "assistant_context": {
+                    "water_gun_duration_request": {
+                        "result_id": result_id,
+                        "target_label": "番茄",
+                        "expires_at": now_ms() + 30_000,
+                    },
+                },
+            },
+        )
+        reply = _fast_edge_water_gun_duration_reply(
+            AssistantTurnRequest(
+                site_id="greenhouse_001",
+                channel="edge_text",
+                message_id=f"request-{uuid.uuid4()}",
+                text="一分五十三秒",
+            ),
+            [message],
+        )
+        self.assertIsNotNone(reply)
+        self.assertIn("番茄", reply.answer)
+        self.assertIn("1 分钟 53 秒", reply.answer)
+        self.assertEqual(len(reply.actions), 1)
+        self.assertEqual(reply.actions[0].payload["spray_schedule"], "timed")
+        self.assertEqual(reply.actions[0].payload["spray_duration_seconds"], 113)
+
+        canceled = _fast_edge_water_gun_duration_reply(
+            AssistantTurnRequest(
+                site_id="greenhouse_001",
+                channel="edge_text",
+                message_id=f"request-{uuid.uuid4()}",
+                text="取消",
+            ),
+            [message],
+        )
+        self.assertIsNotNone(canceled)
+        self.assertEqual(canceled.actions, [])
+        self.assertTrue(canceled.context["water_gun_duration_resolved"])
+
+    def test_edge_message_next_input_comes_from_context_and_pending_actions(self) -> None:
+        current = now_ms()
+        message = EdgeAssistantMessage(
+            id=f"message-{uuid.uuid4()}",
+            session_id=f"edge-{uuid.uuid4()}",
+            site_id="greenhouse_001",
+            role="assistant",
+            channel="edge_text",
+            content="已找到番茄，需要喷多久？",
+            created_at=current,
+            message_metadata={
+                "assistant_context": {
+                    "water_gun_duration_request": {
+                        "result_id": "result-duration",
+                        "target_label": "番茄",
+                        "expires_at": current + 30_000,
+                    },
+                },
+            },
+        )
+        self.assertEqual(_message_response(message, []).next_input, "duration")
+
+        action = EdgeAssistantAction(
+            id=f"action-{uuid.uuid4()}",
+            session_id=message.session_id,
+            site_id=message.site_id,
+            message_id=message.id,
+            action_type="water_gun_target",
+            risk="high",
+            state="pending",
+            payload={},
+            created_at=current,
+            expires_at=current + 30_000,
+        )
+        self.assertEqual(_message_response(message, [action]).next_input, "confirmation")
+
+        action.state = "confirmed"
+        message.message_metadata = {
+            "assistant_context": {
+                "water_gun_duration_resolved": True,
+                "water_gun_duration_request": {"expires_at": current + 30_000},
+            },
+        }
+        self.assertEqual(_message_response(message, [action]).next_input, "none")
 
     def test_message_id_deduplicates_telemetry(self) -> None:
         payload = telemetry("sensairshuttle_001", 1_710_000_000)
@@ -531,6 +744,8 @@ class DeviceApiTests(unittest.TestCase):
         self.assertEqual(empty.status_code, 200)
         self.assertIsNone(empty.json()["sensors"]["temperature_c"])
         self.assertEqual(empty.json()["quality"]["temperature_c"], "unavailable")
+        self.assertEqual(empty.json()["sensor_display"]["temperature_c"], "unavailable")
+        self.assertEqual(empty.json()["sensor_display"]["humidity_pct"], "unavailable")
 
         payload = self.site_telemetry()
         payload["actuators"]["pump"]["master_enabled"] = False
@@ -548,8 +763,11 @@ class DeviceApiTests(unittest.TestCase):
 
         state = self.client.get("/api/v1/sites/greenhouse_001/state").json()
         self.assertEqual(state["sensors"]["temperature_c"], 25.5)
+        self.assertEqual(state["sensor_display"]["temperature_c"], "normal")
         self.assertIsNone(state["sensors"]["illuminance_lux"])
         self.assertEqual(state["quality"]["illuminance_lux"], "sensor_error")
+        self.assertEqual(state["sensor_display"]["illuminance_lux"], "unavailable")
+        self.assertEqual(state["sensor_display"]["co2_ppm"], "normal")
         self.assertEqual(state["actuators"]["pump"]["actual"], 65)
         self.assertFalse(state["actuators"]["pump"]["master_enabled"])
         self.assertEqual(len(published), 1)
@@ -747,6 +965,35 @@ class DeviceApiTests(unittest.TestCase):
             canceled = decide_edge_assistant_action(db, "greenhouse_001", reply.actions[0].id, "cancel")
             self.assertEqual(canceled.state, "canceled")
             self.assertEqual(db.query(SiteCommandRecord).count(), 0)
+
+    def test_frontend_actuator_command_succeeds_and_persists_state(self) -> None:
+        response = self.client.post(
+            "/api/v1/sites/greenhouse_001/commands",
+            json={"target": "curtain", "value": 100, "source": "web_manual", "reason": "test"},
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["state"], "succeeded")
+        state = self.client.get("/api/v1/sites/greenhouse_001/state").json()
+        self.assertEqual(
+            state["actuators"]["curtain"],
+            {"supported": True, "desired": 100, "actual": 100, "unit": "percent", "master_enabled": True},
+        )
+        with SessionLocal() as db:
+            self.assertIsNone(claim_next_site_command(db))
+
+    def test_edge_fan_action_can_be_confirmed_and_synced_to_frontend(self) -> None:
+        with SessionLocal() as db:
+            reply = create_edge_assistant_reply(db, "greenhouse_001", "打开风扇", None, "edge_text")
+            self.assertEqual(len(reply.actions), 1)
+            self.assertEqual(reply.actions[0].payload["command"], "fan_on")
+
+            confirmed = decide_edge_assistant_action(db, "greenhouse_001", reply.actions[0].id, "confirm")
+            self.assertEqual(confirmed.state, "confirmed")
+            command = db.query(SiteCommandRecord).one()
+            self.assertEqual((command.target, command.value, command.source), ("fan", 100, "edge_voice"))
+            self.assertEqual((command.state, command.actual_value), ("succeeded", 100))
+            state = db.query(SiteActuatorControlState).one()
+            self.assertEqual((state.target, state.master_enabled), ("fan", True))
 
     def test_v2_assistant_keeps_history_and_hidden_tool_context(self) -> None:
         captured_messages: list[list[dict]] = []

@@ -71,6 +71,21 @@ class SiteCommandRecord(Base):
     error: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
+class SiteActuatorControlState(Base):
+    """Persistent state for dashboard-only on/off devices shared with C5."""
+
+    __tablename__ = "site_actuator_control_states"
+    __table_args__ = (UniqueConstraint("site_id", "target", name="uq_site_actuator_control_target"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    site_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    target: Mapped[str] = mapped_column(String(32), nullable=False)
+    desired: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    actual: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    master_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
 class EdgeAssistantSession(Base):
     __tablename__ = "edge_assistant_sessions"
 

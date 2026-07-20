@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,8 @@ from site_events import site_event_bus
 
 Mode = Literal["static", "dynamic"]
 Source = Literal["manual", "vision"]
+SpraySchedule = Literal["continuous", "timed"]
+StopReason = Literal["idle", "manual", "timed_complete", "target_changed", "mode_changed", "dynamic_timeout"]
 
 DYNAMIC_INTERVAL_MS = 200
 DYNAMIC_TIMEOUT_MS = 3_000
@@ -41,6 +43,16 @@ class WaterGunStaticRequest(WaterGunTarget):
     source: Source = "manual"
     target_label: str = Field(default="", max_length=120)
     spray_enabled: bool | None = None
+    spray_schedule: SpraySchedule = "continuous"
+    spray_duration_seconds: int | None = Field(default=None, ge=1, le=86_399)
+
+    @model_validator(mode="after")
+    def validate_spray_schedule(self) -> "WaterGunStaticRequest":
+        if self.spray_schedule == "timed" and self.spray_duration_seconds is None:
+            raise ValueError("定时喷射必须设置 1 秒至 23 小时 59 分 59 秒的时长。")
+        if self.spray_schedule == "continuous":
+            self.spray_duration_seconds = None
+        return self
 
 
 class WaterGunPreviewRequest(WaterGunStaticRequest):
@@ -51,6 +63,7 @@ class WaterGunDynamicStartRequest(WaterGunTarget):
     device_id: str = Field(default="greenhouse_001_s3", min_length=1, max_length=80)
     source: Source = "manual"
     target_label: str = Field(default="", max_length=120)
+    spray_enabled: bool = False
 
 
 class WaterGunDynamicUpdateRequest(WaterGunTarget):
@@ -60,6 +73,11 @@ class WaterGunDynamicUpdateRequest(WaterGunTarget):
 
 class WaterGunHeartbeatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=80)
+
+
+class WaterGunDynamicSprayRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=80)
+    spray_enabled: bool
 
 
 class WaterGunStopRequest(BaseModel):
@@ -83,6 +101,11 @@ class WaterGunStateResponse(BaseModel):
     timed_out: bool = False
     simulation_only: bool = True
     pump_control_percent: float = 0
+    spray_schedule: SpraySchedule = "continuous"
+    spray_duration_seconds: int | None = None
+    spray_ends_at: int | None = None
+    remaining_seconds: int | None = None
+    stop_reason: StopReason = "idle"
 
 
 @dataclass
@@ -103,6 +126,10 @@ class _WaterGunState:
     last_command_id: int | None = None
     pending: bool = False
     timed_out: bool = False
+    spray_schedule: SpraySchedule = "continuous"
+    spray_duration_seconds: int | None = None
+    spray_ends_at: int | None = None
+    stop_reason: StopReason = "idle"
 
 
 def _now_ms() -> int:
@@ -135,6 +162,9 @@ def _manual_target_in_bounds(target: WaterGunTarget) -> bool:
 
 
 def _response(state: _WaterGunState) -> WaterGunStateResponse:
+    remaining_seconds = None
+    if state.spray_enabled and state.spray_schedule == "timed" and state.spray_ends_at is not None:
+        remaining_seconds = max(0, math.ceil((state.spray_ends_at - _now_ms()) / 1000))
     return WaterGunStateResponse(
         site_id=state.site_id,
         device_id=state.device_id,
@@ -151,6 +181,11 @@ def _response(state: _WaterGunState) -> WaterGunStateResponse:
         timed_out=state.timed_out,
         simulation_only=_simulation_only(),
         pump_control_percent=round(_pump_control_percent(state), 1),
+        spray_schedule=state.spray_schedule,
+        spray_duration_seconds=state.spray_duration_seconds,
+        spray_ends_at=state.spray_ends_at,
+        remaining_seconds=remaining_seconds,
+        stop_reason=state.stop_reason,
     )
 
 
@@ -209,6 +244,14 @@ class WaterGunRuntime:
             state.target_label = request.target_label.strip()
             if request.spray_enabled is not None:
                 state.spray_enabled = request.spray_enabled
+            state.spray_schedule = request.spray_schedule
+            state.spray_duration_seconds = request.spray_duration_seconds
+            state.spray_ends_at = (
+                current + request.spray_duration_seconds * 1000
+                if state.spray_enabled and request.spray_schedule == "timed" and request.spray_duration_seconds
+                else None
+            )
+            state.stop_reason = "idle" if state.spray_enabled else "manual"
             state.session_id = None
             state.sequence += 1
             state.updated_at = current
@@ -226,6 +269,12 @@ class WaterGunRuntime:
         with self._lock:
             state = self._state(site_id)
             previous = replace(state)
+            target_changed = (
+                abs(state.ground_range_mm - request.ground_range_mm) > 0.05
+                or abs(state.bearing_deg - request.bearing_deg) > 0.05
+                or state.source != request.source
+                or state.target_label != request.target_label.strip()
+            )
             state.device_id = request.device_id
             state.mode = "static"
             state.ground_range_mm = request.ground_range_mm
@@ -234,6 +283,25 @@ class WaterGunRuntime:
             state.target_label = request.target_label.strip()
             if request.spray_enabled is not None:
                 state.spray_enabled = request.spray_enabled
+            state.spray_schedule = request.spray_schedule
+            state.spray_duration_seconds = request.spray_duration_seconds
+            if target_changed and previous.spray_enabled:
+                state.spray_enabled = False
+                state.spray_schedule = "continuous"
+                state.spray_duration_seconds = None
+            state.spray_ends_at = (
+                current + request.spray_duration_seconds * 1000
+                if state.spray_enabled and request.spray_schedule == "timed" and request.spray_duration_seconds
+                else None
+            )
+            if state.spray_enabled:
+                state.stop_reason = "idle"
+            elif target_changed and previous.spray_enabled:
+                state.stop_reason = "target_changed"
+            elif previous.spray_enabled:
+                state.stop_reason = "manual"
+            elif target_changed:
+                state.stop_reason = "target_changed"
             state.session_id = None
             state.sequence += 1
             state.updated_at = current
@@ -260,9 +328,13 @@ class WaterGunRuntime:
             state.mode = "dynamic"
             state.ground_range_mm = request.ground_range_mm
             state.bearing_deg = request.bearing_deg
-            state.spray_enabled = True
+            state.spray_enabled = request.spray_enabled
             state.source = request.source
             state.target_label = request.target_label.strip()
+            state.spray_schedule = "continuous"
+            state.spray_duration_seconds = None
+            state.spray_ends_at = None
+            state.stop_reason = "idle" if request.spray_enabled else "manual"
             state.session_id = f"water-gun-{uuid.uuid4().hex}"
             state.sequence = 1
             state.updated_at = current
@@ -271,7 +343,11 @@ class WaterGunRuntime:
             state.pending = False
             state.timed_out = False
             try:
-                state.last_command_id = self._queue_state(db, state, "进入水枪动态喷射模拟")
+                state.last_command_id = self._queue_state(
+                    db,
+                    state,
+                    "进入水枪动态喷射模拟" if request.spray_enabled else "进入水枪动态移动模拟，保持关闭喷水",
+                )
             except Exception:
                 self._states[site_id] = previous
                 raise
@@ -304,9 +380,42 @@ class WaterGunRuntime:
             state = self._state(site_id)
             if state.mode != "dynamic" or state.session_id != request.session_id:
                 raise LookupError("动态控制会话不存在或已经结束。")
-            previous = replace(state)
             state.last_heartbeat_at = _now_ms()
             return _response(state)
+
+    def set_dynamic_spray(
+        self,
+        db: Session,
+        site_id: str,
+        request: WaterGunDynamicSprayRequest,
+    ) -> WaterGunStateResponse:
+        current = _now_ms()
+        with self._lock:
+            state = self._state(site_id)
+            if state.mode != "dynamic" or state.session_id != request.session_id:
+                raise LookupError("动态控制会话不存在或已经结束。")
+            previous = replace(state)
+            state.spray_enabled = request.spray_enabled
+            state.sequence += 1
+            state.updated_at = current
+            state.last_heartbeat_at = current
+            state.pending = False
+            state.spray_schedule = "continuous"
+            state.spray_duration_seconds = None
+            state.spray_ends_at = None
+            state.stop_reason = "idle" if request.spray_enabled else "manual"
+            try:
+                state.last_command_id = self._queue_state(
+                    db,
+                    state,
+                    "动态模式开启水枪喷射模拟" if request.spray_enabled else "动态模式关闭水枪喷射模拟",
+                )
+            except Exception:
+                self._states[site_id] = previous
+                raise
+            response = _response(state)
+        self._publish(response)
+        return response
 
     def stop_dynamic(self, db: Session, site_id: str, request: WaterGunStopRequest) -> WaterGunStateResponse:
         current = _now_ms()
@@ -314,8 +423,13 @@ class WaterGunRuntime:
             state = self._state(site_id)
             if state.mode != "dynamic" or state.session_id != request.session_id:
                 raise LookupError("动态控制会话不存在或已经结束。")
+            previous = replace(state)
             state.mode = "static"
             state.spray_enabled = request.keep_spraying
+            state.spray_schedule = "continuous"
+            state.spray_duration_seconds = None
+            state.spray_ends_at = None
+            state.stop_reason = "idle" if request.keep_spraying else "mode_changed"
             state.session_id = None
             state.sequence += 1
             state.updated_at = current
@@ -340,6 +454,9 @@ class WaterGunRuntime:
             "pump_control_percent": round(_pump_control_percent(state), 1),
             "session_id": state.session_id,
             "sequence": state.sequence,
+            "spray_schedule": state.spray_schedule,
+            "spray_duration_seconds": state.spray_duration_seconds,
+            "spray_ends_at": state.spray_ends_at,
         }
         position = {
             "ground_range_mm": round(state.ground_range_mm, 1),
@@ -387,8 +504,18 @@ class WaterGunRuntime:
             current = _now_ms()
             publish_sites: list[str] = []
             timeout_sites: list[str] = []
+            timed_stop_sites: list[str] = []
             with self._lock:
                 for site_id, state in self._states.items():
+                    if (
+                        state.mode == "static"
+                        and state.spray_enabled
+                        and state.spray_schedule == "timed"
+                        and state.spray_ends_at is not None
+                        and current >= state.spray_ends_at
+                    ):
+                        timed_stop_sites.append(site_id)
+                        continue
                     if state.mode != "dynamic":
                         continue
                     if current - state.last_heartbeat_at > DYNAMIC_TIMEOUT_MS:
@@ -413,6 +540,35 @@ class WaterGunRuntime:
                         state = self._states.get(site_id)
                         if state is not None and state.mode == "dynamic":
                             state.pending = True
+            for site_id in timed_stop_sites:
+                try:
+                    with SessionLocal() as db:
+                        with self._lock:
+                            state = self._states.get(site_id)
+                            if (
+                                state is None
+                                or state.mode != "static"
+                                or not state.spray_enabled
+                                or state.spray_schedule != "timed"
+                                or state.spray_ends_at is None
+                                or current < state.spray_ends_at
+                            ):
+                                continue
+                            previous = replace(state)
+                            state.spray_enabled = False
+                            state.spray_ends_at = None
+                            state.sequence += 1
+                            state.updated_at = current
+                            state.stop_reason = "timed_complete"
+                            try:
+                                state.last_command_id = self._queue_state(db, state, "定时喷射结束，自动停止水枪")
+                            except Exception:
+                                self._states[site_id] = previous
+                                raise
+                            response = _response(state)
+                        self._publish(response)
+                except Exception:
+                    logger.exception("Unable to queue timed water-gun stop for %s", site_id)
             for site_id in timeout_sites:
                 try:
                     with SessionLocal() as db:
@@ -427,6 +583,10 @@ class WaterGunRuntime:
                             state.updated_at = current
                             state.pending = False
                             state.timed_out = True
+                            state.spray_schedule = "continuous"
+                            state.spray_duration_seconds = None
+                            state.spray_ends_at = None
+                            state.stop_reason = "dynamic_timeout"
                             state.last_command_id = self._queue_state(db, state, "动态会话超时，自动停止水泵")
                             response = _response(state)
                         self._publish(response)

@@ -309,11 +309,11 @@ export function siteStateToTelemetry(state: SiteState): TelemetryPayload {
     status: {
       wifi: edgeOnline ? 'connected' : 'disconnected',
       mqtt: edgeOnline ? 'connected' : 'disconnected',
-      fan: 0,
+      fan: actual('fan'),
       pump: actual('pump'),
       light: actual('grow_light'),
-      alarm: 0,
-      curtain: 0,
+      alarm: actual('alarm'),
+      curtain: actual('curtain'),
     },
   };
 }
@@ -808,6 +808,17 @@ export async function heartbeatWaterGunDynamic(sessionId: string, siteId = defau
   return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/dynamic/heartbeat`, {
     method: 'POST',
     body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+export async function setWaterGunDynamicSpray(
+  sessionId: string,
+  sprayEnabled: boolean,
+  siteId = defaultSiteId,
+): Promise<WaterGunState> {
+  return requestJson<WaterGunState>(`/api/v1/sites/${encodeURIComponent(siteId)}/water-gun/dynamic/spray`, {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, spray_enabled: sprayEnabled }),
   });
 }
 

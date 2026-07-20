@@ -41,23 +41,6 @@ def _city_option(province: str, city: str) -> dict[str, Any]:
     }
 
 
-def region_catalog() -> dict[str, Any]:
-    return {
-        "items": [
-            {
-                **_province_option(region),
-                "cities": [
-                    _city_option(str(region.get("name") or ""), str(city))
-                    for city in region.get("cities", [])
-                    if str(city).strip()
-                ],
-            }
-            for region in weather_regions()
-            if str(region.get("name") or "").strip()
-        ]
-    }
-
-
 def search_region_options(query: str) -> dict[str, Any]:
     text = query.strip()
     if not text:

@@ -14,13 +14,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agri_source_service import search_online_agriculture
+from agri_text_normalizer import TextInterpretation, normalize_agri_text
 from app_state_service import read_app_state_value, save_app_state_value
 from assistant_service import parse_model_content
 from camera_service import camera_service
 from database import SessionLocal
-from deepseek_service import call_deepseek_chat_message, deepseek_api_key
+from deepseek_service import call_deepseek_chat_message, deepseek_api_key, stream_deepseek_chat_message
 from kb_service import search_knowledge_references
-from position_service import locate_object
+from position_service import locate_object, take_position_result
 from schemas import (
     AssistantAction,
     AssistantChatMessage,
@@ -36,9 +37,12 @@ from vision_service import call_ark_vision
 
 
 ProgressCallback = Callable[[str], None]
+DeltaCallback = Callable[[str], None]
+AssistantEventCallback = Callable[[str, dict[str, Any]], None]
 MAX_TOOL_ROUNDS = 3
 MAX_TOOL_CALLS = 5
 RECENT_MESSAGE_LIMIT = 16
+EDGE_RECENT_MESSAGE_LIMIT = 8
 SUMMARY_TRIGGER_MESSAGES = 24
 ACTION_TTL_MS = 5 * 60_000
 logger = logging.getLogger(__name__)
@@ -406,10 +410,18 @@ def _seed_history(db: Session, session: EdgeAssistantSession, request: Assistant
         )
 
 
-def _store_user_message(db: Session, session: EdgeAssistantSession, request: AssistantTurnRequest) -> None:
+def _store_user_message(
+    db: Session,
+    session: EdgeAssistantSession,
+    request: AssistantTurnRequest,
+    interpretation: TextInterpretation | None = None,
+) -> None:
     message_id = _safe_message_id(request.message_id)
     if db.get(EdgeAssistantMessage, message_id) is not None:
         return
+    metadata: dict[str, Any] = {}
+    if interpretation is not None and interpretation.corrected:
+        metadata["input_interpretation"] = interpretation.as_dict()
     db.add(
         EdgeAssistantMessage(
             id=message_id,
@@ -419,7 +431,7 @@ def _store_user_message(db: Session, session: EdgeAssistantSession, request: Ass
             channel=request.channel,
             content=request.text,
             created_at=now_ms(),
-            message_metadata={},
+            message_metadata=metadata,
         )
     )
 
@@ -463,7 +475,8 @@ def _update_summary(db: Session, session: EdgeAssistantSession, messages: list[E
 
 def _system_prompt(channel: str) -> str:
     length_rule = (
-        "回答适合语音播报，只说最必要的信息，位置回答最多两句，不解释计算过程。"
+        "回答适合语音播报，只回答用户本轮所问，不主动补充背景、建议或客套话。"
+        "简单问题最多两句、约六十个汉字；位置回答最多两句，不解释计算过程。"
         if channel == "edge_text"
         else "回答使用简洁自然的中文，可使用少量 Markdown。"
     )
@@ -502,6 +515,130 @@ def _thinking_mode(text: str) -> str:
     return "disabled"
 
 
+def _short_edge_answer(answer: str, limit: int = 60, max_sentences: int = 2) -> str:
+    """Keep the on-device answer compact even when the model ignores its prompt."""
+
+    compact = re.sub(r"[*_`#]+", "", str(answer or ""))
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if not compact:
+        return compact
+    matches = re.findall(r".*?[。！？!?](?:[”’\"']|$)?", compact)
+    if matches:
+        compact = "".join(matches[:max_sentences]).strip()
+    if len(compact) <= limit:
+        return compact
+    shortened = compact[:limit].rstrip("，、；;：:。！？!? ")
+    return shortened + ("。" if shortened else "")
+
+
+@dataclass(frozen=True)
+class _FastEdgeReply:
+    answer: str
+    context: dict[str, Any]
+    actions: list[AssistantAction] = field(default_factory=list)
+
+
+_EDGE_COMPLEX_MARKERS = (
+    "为什么", "原因", "怎么办", "如何", "怎么做", "建议", "影响", "趋势", "历史", "比较", "预测", "分析",
+)
+
+
+def _format_sensor_value(value: Any, unit: str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    rendered = str(int(number)) if number.is_integer() else f"{number:.1f}".rstrip("0").rstrip(".")
+    return f"{rendered}{unit}"
+
+
+def _fast_edge_device_action(text: str) -> _FastEdgeReply | None:
+    compact = "".join(text.lower().split())
+    if _is_object_directed_watering(compact) and "水泵" not in compact:
+        # “对橡皮浇水” names a camera target, not the greenhouse pump.
+        return None
+    action_word = ""
+    if any(word in compact for word in ("关闭", "关掉", "停止", "停用")):
+        action_word = "off"
+    elif any(word in compact for word in ("打开", "开启", "启动", "浇水", "浇一下水", "加水", "灌一下水", "灌溉")):
+        action_word = "on"
+    if not action_word:
+        return None
+    devices = (
+        (("水泵", "浇水", "浇一下水", "加水", "灌一下水", "灌溉"), "水泵", "pump"),
+        (("补光", "补光灯", "灯"), "补光灯", "light"),
+        (("加热器", "加热"), "加热器", "heater"),
+        (("风扇", "通风"), "风扇", "fan"),
+        (("窗帘", "卷帘"), "窗帘", "curtain"),
+        (("报警", "警报"), "报警器", "alarm"),
+    )
+    matched = next((item for item in devices if any(marker in compact for marker in item[0])), None)
+    if matched is None:
+        return None
+    _markers, label, target = matched
+    verb = "打开" if action_word == "on" else "关闭"
+    command = ("curtain_open" if action_word == "on" else "curtain_close") \
+        if target == "curtain" else f"{target}_{action_word}"
+    value = 100 if action_word == "on" else 0
+    action = AssistantAction(
+        id=f"assistant-action-fast-{uuid.uuid4().hex}",
+        type="device_command",
+        title=f"确认{verb}{label}",
+        description=f"请确认是否{verb}{label}；确认后才会发送设备命令。",
+        risk="high",
+        payload={"command": command, "value": value, "reason": f"现场语音请求{verb}{label}"},
+    )
+    return _FastEdgeReply(
+        f"要{verb}{label}吗？请直接说确认或取消，也可以点击屏幕。",
+        {},
+        [action],
+    )
+
+
+def _fast_edge_reply(db: Session, request: AssistantTurnRequest) -> _FastEdgeReply | None:
+    """Serve short, factual edge requests without waiting for the language model."""
+
+    if request.channel != "edge_text":
+        return None
+    compact = "".join(request.text.lower().split()).strip("。！!？?")
+    if not compact or any(marker in compact for marker in _EDGE_COMPLEX_MARKERS):
+        return None
+    action_reply = _fast_edge_device_action(compact)
+    if action_reply is not None:
+        return action_reply
+
+    from site_service import get_site_state
+
+    sensor_specs = (
+        (("温度",), "temperature_c", "温度", "℃"),
+        (("湿度",), "humidity_pct", "环境湿度", "%RH"),
+        (("光照", "照度"), "illuminance_lux", "光照", " lux"),
+        (("二氧化碳", "co2"), "co2_ppm", "CO₂", " ppm"),
+    )
+    matched = [spec for spec in sensor_specs if any(marker in compact for marker in spec[0])]
+    overview = any(marker in compact for marker in ("环境", "传感器", "状态", "数据"))
+    if (len(matched) != 1 and not overview) or len(compact) > 24:
+        return None
+
+    state = get_site_state(db, request.site_id).model_dump(mode="json")
+    sensors = state.get("sensors") if isinstance(state.get("sensors"), dict) else {}
+    display = state.get("sensor_display") if isinstance(state.get("sensor_display"), dict) else {}
+    status_labels = {"high": "偏高", "low": "偏低", "normal": "适中", "unavailable": "不可用"}
+    if overview and not matched:
+        items: list[str] = []
+        for _markers, key, label, unit in sensor_specs:
+            value = _format_sensor_value(sensors.get(key), unit)
+            items.append(f"{label}{value}" if value else f"{label}不可用")
+        return _FastEdgeReply("当前环境：" + "，".join(items[:4]) + "。", {"site_state": state})
+
+    _markers, key, label, unit = matched[0]
+    value = _format_sensor_value(sensors.get(key), unit)
+    status = status_labels.get(str(display.get(key) or "unavailable"), "不可用")
+    if not value or status == "不可用":
+        return _FastEdgeReply(f"当前{label}数据不可用。", {"site_state": state})
+    return _FastEdgeReply(f"当前{label}{value}，状态{status}。", {"site_state": state})
+
+
 def _assistant_history_message(message: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
     if isinstance(message.get("tool_calls"), list):
@@ -519,6 +656,70 @@ def _json_arguments(raw: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _partial_json_string(raw: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"', raw)
+    if match is None:
+        return ""
+    cursor = match.end()
+    output: list[str] = []
+    escapes = {"\"": "\"", "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+    while cursor < len(raw):
+        character = raw[cursor]
+        if character == '"':
+            break
+        if character != "\\":
+            output.append(character)
+            cursor += 1
+            continue
+        if cursor + 1 >= len(raw):
+            break
+        escaped = raw[cursor + 1]
+        if escaped == "u":
+            if cursor + 6 > len(raw):
+                break
+            code = raw[cursor + 2: cursor + 6]
+            try:
+                output.append(chr(int(code, 16)))
+            except ValueError:
+                break
+            cursor += 6
+            continue
+        output.append(escapes.get(escaped, escaped))
+        cursor += 2
+    return "".join(output)
+
+
+class _AnswerDeltaDecoder:
+    def __init__(self, callback: DeltaCallback | None) -> None:
+        self._callback = callback
+        self._raw = ""
+        self.emitted = ""
+
+    def feed(self, delta: str) -> None:
+        if not delta:
+            return
+        self._raw += delta
+        current = _partial_json_string(self._raw, "answer")
+        if current.startswith(self.emitted) and len(current) > len(self.emitted):
+            addition = current[len(self.emitted):]
+            self.emitted = current
+            if self._callback is not None:
+                self._callback(addition)
+
+    def finish(self, answer: str) -> None:
+        if self._callback is None or not answer:
+            return
+        if answer.startswith(self.emitted):
+            addition = answer[len(self.emitted):]
+        elif not self.emitted:
+            addition = answer
+        else:
+            return
+        if addition:
+            self.emitted += addition
+            self._callback(addition)
 
 
 @dataclass
@@ -770,12 +971,165 @@ def _deduplicate_references(references: list[KnowledgeReference]) -> list[Knowle
     return unique[:8]
 
 
+def _is_object_directed_watering(text: str) -> bool:
+    compact = "".join(text.lower().split())
+    return bool(re.search(r"(?:给|对|向|往|朝).{1,20}(?:浇水|喷水|喷一下|冲一下)", compact))
+
+
 def _is_water_gun_spray_request(text: str) -> bool:
     compact = "".join(text.lower().split())
-    return bool(re.search(
+    return _is_object_directed_watering(compact) or bool(re.search(
         r"喷(?:水|射|向|到|一下|这个|那个)|冲(?:一下|这个|那个)|瞄准|打中|(?:让|用|叫)水枪(?:去|对|朝|喷|冲|打)",
         compact,
     ))
+
+
+_DURATION_NUMBER_PATTERN = r"[零〇一二两三四五六七八九十百千万\d]+"
+
+
+def _duration_number(value: str) -> int | None:
+    compact = value.strip()
+    if not compact:
+        return None
+    if compact.isdigit():
+        return int(compact)
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    units = {"十": 10, "百": 100, "千": 1000, "万": 10_000}
+    total = 0
+    section = 0
+    number = 0
+    for character in compact:
+        if character in digits:
+            number = digits[character]
+            continue
+        unit = units.get(character)
+        if unit is None:
+            return None
+        if unit == 10_000:
+            section = (section + number) * unit
+            total += section
+            section = 0
+            number = 0
+        else:
+            section += (number or 1) * unit
+            number = 0
+    return total + section + number
+
+
+def _parse_water_gun_duration_seconds(text: str) -> int | None:
+    compact = "".join(text.lower().split())
+    clock_match = re.search(r"(?<!\d)(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?!\d)", compact)
+    if clock_match:
+        first = int(clock_match.group(1))
+        second = int(clock_match.group(2))
+        third = int(clock_match.group(3)) if clock_match.group(3) is not None else None
+        hours, minutes, seconds = (first, second, third) if third is not None else (0, first, second)
+        if hours > 23 or minutes > 59 or seconds > 59:
+            return None
+    else:
+        def component(pattern: str) -> int | None:
+            match = re.search(pattern, compact, re.IGNORECASE)
+            return _duration_number(match.group(1)) if match else None
+
+        hours = component(rf"({_DURATION_NUMBER_PATTERN})(?:个)?小时")
+        minutes = component(rf"({_DURATION_NUMBER_PATTERN})(?:分(?:钟)?)")
+        seconds = component(rf"({_DURATION_NUMBER_PATTERN})秒")
+        if hours is None:
+            hours = component(r"(\d+)h(?:ours?)?")
+        if minutes is None:
+            minutes = component(r"(\d+)m(?:in(?:utes?)?)?")
+        if seconds is None:
+            seconds = component(r"(\d+)s(?:ec(?:onds?)?)?")
+        if hours is None and minutes is None and seconds is None:
+            return None
+        hours = hours or 0
+        minutes = minutes or 0
+        seconds = seconds or 0
+    duration = hours * 3600 + minutes * 60 + seconds
+    return duration if 1 <= duration <= 86_399 else None
+
+
+def _format_water_gun_duration(seconds: int) -> str:
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds_part = divmod(remainder, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} 小时")
+    if minutes:
+        parts.append(f"{minutes} 分钟")
+    if seconds_part:
+        parts.append(f"{seconds_part} 秒")
+    return " ".join(parts)
+
+
+def _pending_water_gun_duration_request(messages: list[EdgeAssistantMessage]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if message.role != "assistant" or not isinstance(message.message_metadata, dict):
+            continue
+        context = message.message_metadata.get("assistant_context")
+        if not isinstance(context, dict):
+            continue
+        if context.get("water_gun_duration_resolved"):
+            return None
+        request = context.get("water_gun_duration_request")
+        if isinstance(request, dict):
+            if int(request.get("expires_at") or 0) < now_ms():
+                return {**request, "expired": True}
+            return request
+    return None
+
+
+def _fast_edge_water_gun_duration_reply(
+    request: AssistantTurnRequest,
+    messages: list[EdgeAssistantMessage],
+) -> _FastEdgeReply | None:
+    pending = _pending_water_gun_duration_request(messages)
+    if pending is None:
+        return None
+    label = str(pending.get("target_label") or "目标")
+    if pending.get("expired"):
+        return _FastEdgeReply(
+            f"{label}的定位已过期，请重新说要向哪里喷水。",
+            {"water_gun_duration_resolved": True},
+        )
+    compact_request = "".join(request.text.lower().split())
+    if re.search(r"取消|算了|不用|不要|别喷|不喷|cancel", compact_request):
+        return _FastEdgeReply(
+            "已取消本次喷水请求。",
+            {"water_gun_duration_resolved": True},
+        )
+    duration = _parse_water_gun_duration_seconds(request.text)
+    if duration is None:
+        return _FastEdgeReply(
+            "请说具体喷射时长，例如 1 分钟 53 秒。",
+            {"water_gun_duration_request": pending},
+        )
+    result_id = str(pending.get("result_id") or "")
+    if not result_id or take_position_result(result_id) is None:
+        return _FastEdgeReply(
+            f"{label}的定位已过期，请重新说要向哪里喷水。",
+            {"water_gun_duration_resolved": True},
+        )
+    duration_text = _format_water_gun_duration(duration)
+    action = AssistantAction(
+        id=f"assistant-action-watergun-{uuid.uuid4().hex}",
+        type="water_gun_target",
+        title=f"确认向{label}喷水 {duration_text}",
+        description=f"确认后将向{label}定时喷水 {duration_text}。",
+        risk="high",
+        payload={
+            "result_id": result_id,
+            "target_label": label,
+            "spray_schedule": "timed",
+            "spray_duration_seconds": duration,
+        },
+    )
+    return _FastEdgeReply(
+        f"将向{label}喷水 {duration_text}，请确认或取消。",
+        {"water_gun_duration_resolved": True},
+        [action],
+    )
 
 
 def _deterministic_position_answer(context: dict[str, Any], channel: str) -> str | None:
@@ -832,21 +1186,34 @@ def _deterministic_camera_configuration_answer(context: dict[str, Any], text: st
     return f"已保存的镜头安装高度为 {height_text} mm（{centimeters_text} cm），指镜头到定位平面的垂直高度。"
 
 
-def run_assistant_turn(request: AssistantTurnRequest, progress: ProgressCallback | None = None) -> AssistantChatResponse:
+def run_assistant_turn(
+    request: AssistantTurnRequest,
+    progress: ProgressCallback | None = None,
+    delta: DeltaCallback | None = None,
+    event: AssistantEventCallback | None = None,
+) -> AssistantChatResponse:
     progress = progress or (lambda _text: None)
+    event = event or (lambda _name, _payload: None)
+    interpretation = normalize_agri_text(request.text)
+    if interpretation.corrected:
+        request = request.model_copy(update={"text": interpretation.normalized})
     turn_started_at = now_ms()
     with SessionLocal() as db:
         session = _ensure_session(db, request)
         _seed_history(db, session, request)
-        _store_user_message(db, session, request)
+        _store_user_message(db, session, request, interpretation)
         db.commit()
 
+        edge_channel = request.channel == "edge_text"
+        history_limit = EDGE_RECENT_MESSAGE_LIMIT if edge_channel else RECENT_MESSAGE_LIMIT
         messages = _conversation_messages(db, session.id)
-        summary = _update_summary(db, session, messages)
+        # A summary call is another model request. It is useful for the Web
+        # archive, but must never delay an on-device voice response.
+        summary = "" if edge_channel else _update_summary(db, session, messages)
         preferences = list_preferences(db, request.site_id)
         recent_context = [
             message.message_metadata.get("assistant_context")
-            for message in messages[-RECENT_MESSAGE_LIMIT:]
+            for message in messages[-history_limit:]
             if isinstance(message.message_metadata, dict) and message.message_metadata.get("assistant_context")
         ]
 
@@ -860,19 +1227,43 @@ def run_assistant_turn(request: AssistantTurnRequest, progress: ProgressCallback
             memory_parts.append("最近工具结果上下文：" + json.dumps(_context_for_model(recent_context[-6:]), ensure_ascii=False)[:6000])
         if memory_parts:
             working_messages.append({"role": "system", "content": "\n".join(memory_parts)})
-        for message in messages[-RECENT_MESSAGE_LIMIT:]:
+        for message in messages[-history_limit:]:
             working_messages.append({"role": message.role, "content": message.content})
 
         collected_context: dict[str, Any] = {}
+        if interpretation.corrected:
+            collected_context["input_interpretation"] = interpretation.as_dict()
         references: list[KnowledgeReference] = []
         tool_call_count = 0
         final_content = ""
+        fast_reply: _FastEdgeReply | None = None
+        if edge_channel:
+            event("assistant_status", {"stage": "reading_state", "message": "正在读取实时数据"})
+            if _is_water_gun_spray_request(request.text):
+                fast_reply = _fast_edge_reply(db, request)
+            else:
+                duration_reply = _fast_edge_water_gun_duration_reply(request, messages)
+                ordinary_reply = _fast_edge_reply(db, request)
+                if ordinary_reply is not None and _parse_water_gun_duration_seconds(request.text) is None:
+                    fast_reply = _FastEdgeReply(
+                        ordinary_reply.answer,
+                        {**ordinary_reply.context, "water_gun_duration_resolved": True},
+                        ordinary_reply.actions,
+                    )
+                else:
+                    fast_reply = duration_reply or ordinary_reply
+            if fast_reply is not None:
+                final_content = json.dumps(
+                    {"answer": fast_reply.answer, "actions": [], "referenceIds": []},
+                    ensure_ascii=False,
+                )
+                collected_context.update(fast_reply.context)
 
-        if not deepseek_api_key():
+        if fast_reply is None and not deepseek_api_key():
             raise RuntimeError("AI 助手尚未配置。")
 
         progress("正在结合当前对话理解你的意思。")
-        thinking_mode = _thinking_mode(request.text)
+        thinking_mode = "disabled" if edge_channel else _thinking_mode(request.text)
         camera_configuration_request = _is_camera_configuration_request(request.text)
         assistant_tools = ASSISTANT_TOOLS
         if camera_configuration_request:
@@ -932,16 +1323,64 @@ def run_assistant_turn(request: AssistantTurnRequest, progress: ProgressCallback
                     + json.dumps(execution.content, ensure_ascii=False, default=str)[:12000],
                 }
             )
-        for _round in range(MAX_TOOL_ROUNDS):
-            message = call_deepseek_chat_message(
-                working_messages,
-                max_tokens=1200,
-                timeout_seconds=100,
-                temperature=0.15,
-                tools=assistant_tools,
-                tool_choice="auto",
-                thinking_mode=thinking_mode,
-            )
+        answer_decoder = _AnswerDeltaDecoder(delta)
+        first_answer_emitted = fast_reply is not None
+        deepseek_model_ms = 0.0
+        active_model_started_at = 0.0
+        thinking_to_first_answer_ms: float | None = None
+
+        def emit_answer_delta(value: str) -> None:
+            nonlocal first_answer_emitted, thinking_to_first_answer_ms
+            before = answer_decoder.emitted
+            answer_decoder.feed(value)
+            if not first_answer_emitted and len(answer_decoder.emitted) > len(before):
+                first_answer_emitted = True
+                thinking_to_first_answer_ms = deepseek_model_ms
+                if active_model_started_at > 0:
+                    thinking_to_first_answer_ms += (time.perf_counter() - active_model_started_at) * 1000
+                event("thinking_finished", {
+                    "at_ms": now_ms(),
+                    "thinking_ms": round(thinking_to_first_answer_ms),
+                })
+
+        can_stream_model = fast_reply is None and delta is not None and not camera_configuration_request and not (
+            _is_water_gun_spray_request(request.text)
+            or _is_high_confidence_position_request(request.text, recent_context)
+        )
+        max_tokens = 128 if edge_channel else 1200
+        timeout_seconds = 20 if edge_channel else 100
+        rounds = 0 if fast_reply is not None else (2 if edge_channel else MAX_TOOL_ROUNDS)
+        event("assistant_status", {"stage": "thinking", "message": "AI 正在分析"})
+        event("thinking_started", {"at_ms": now_ms()})
+        if fast_reply is not None:
+            event("thinking_finished", {"at_ms": now_ms(), "thinking_ms": 0})
+        for _round in range(rounds):
+            active_model_started_at = time.perf_counter()
+            try:
+                if can_stream_model:
+                    message = stream_deepseek_chat_message(
+                        working_messages,
+                        max_tokens=max_tokens,
+                        timeout_seconds=timeout_seconds,
+                        temperature=0.15,
+                        tools=assistant_tools,
+                        tool_choice="auto",
+                        thinking_mode=thinking_mode,
+                        on_content_delta=emit_answer_delta,
+                    )
+                else:
+                    message = call_deepseek_chat_message(
+                        working_messages,
+                        max_tokens=max_tokens,
+                        timeout_seconds=timeout_seconds,
+                        temperature=0.15,
+                        tools=assistant_tools,
+                        tool_choice="auto",
+                        thinking_mode=thinking_mode,
+                    )
+            finally:
+                deepseek_model_ms += (time.perf_counter() - active_model_started_at) * 1000
+                active_model_started_at = 0.0
             tool_calls = message.get("tool_calls")
             if not isinstance(tool_calls, list) or not tool_calls:
                 final_content = str(message.get("content") or "")
@@ -989,19 +1428,39 @@ def run_assistant_turn(request: AssistantTurnRequest, progress: ProgressCallback
                 )
 
         if not final_content:
-            final_message = call_deepseek_chat_message(
-                working_messages,
-                max_tokens=1200,
-                timeout_seconds=100,
-                temperature=0.15,
-                tools=assistant_tools,
-                tool_choice="none",
-                response_format={"type": "json_object"},
-                thinking_mode=thinking_mode,
-            )
+            active_model_started_at = time.perf_counter()
+            try:
+                if can_stream_model:
+                    final_message = stream_deepseek_chat_message(
+                        working_messages,
+                        max_tokens=max_tokens,
+                        timeout_seconds=timeout_seconds,
+                        temperature=0.15,
+                        tools=assistant_tools,
+                        tool_choice="none",
+                        response_format={"type": "json_object"},
+                        thinking_mode=thinking_mode,
+                        on_content_delta=emit_answer_delta,
+                    )
+                else:
+                    final_message = call_deepseek_chat_message(
+                        working_messages,
+                        max_tokens=max_tokens,
+                        timeout_seconds=timeout_seconds,
+                        temperature=0.15,
+                        tools=assistant_tools,
+                        tool_choice="none",
+                        response_format={"type": "json_object"},
+                        thinking_mode=thinking_mode,
+                    )
+            finally:
+                deepseek_model_ms += (time.perf_counter() - active_model_started_at) * 1000
+                active_model_started_at = 0.0
             final_content = str(final_message.get("content") or "")
 
         answer, actions, _reference_ids = parse_model_content(final_content)
+        if fast_reply is not None:
+            actions = list(fast_reply.actions)
         if (
             not camera_configuration_request
             and _looks_like_position_answer(answer)
@@ -1029,22 +1488,64 @@ def run_assistant_turn(request: AssistantTurnRequest, progress: ProgressCallback
             answer = str(current_position.get("message") or answer)
         has_current_position = isinstance(current_position, dict) and current_position.get("status") == "located" and current_position.get("result_id")
         spray_requested = _is_water_gun_spray_request(request.text) or any(action.type == "water_gun_target" for action in actions)
+        timed_water_gun_actions = [
+            action for action in actions
+            if action.type == "water_gun_target" and action.payload.get("spray_schedule") == "timed"
+        ]
         actions = [action for action in actions if action.type not in {"send_position", "water_gun_target"}]
+        actions.extend(timed_water_gun_actions)
         if has_current_position and spray_requested:
+            collected_context["water_gun_duration_resolved"] = True
             result_id = str(current_position["result_id"])
             selected = current_position.get("selected") if isinstance(current_position.get("selected"), dict) else {}
             label = str(selected.get("label") or "目标")
-            actions.append(
-                AssistantAction(
-                    id=f"assistant-action-watergun-{uuid.uuid4().hex}",
-                    type="water_gun_target",
-                    title=f"确认喷水到{label}",
-                    description="请先核对本轮定位图片，确认后才会发送水枪目标。",
-                    risk="high",
-                    payload={"result_id": result_id},
+            requested_duration = _parse_water_gun_duration_seconds(request.text) if edge_channel else None
+            if edge_channel and requested_duration is None:
+                actions = [action for action in actions if action.type != "water_gun_target"]
+                answer = f"已找到{label}，需要喷多久？"
+                collected_context.pop("water_gun_duration_resolved", None)
+                collected_context["water_gun_duration_request"] = {
+                    "result_id": result_id,
+                    "target_label": label,
+                    "expires_at": now_ms() + ACTION_TTL_MS,
+                }
+            else:
+                duration_text = _format_water_gun_duration(requested_duration) if requested_duration else ""
+                payload: dict[str, Any] = {"result_id": result_id}
+                if requested_duration:
+                    payload.update({
+                        "target_label": label,
+                        "spray_schedule": "timed",
+                        "spray_duration_seconds": requested_duration,
+                    })
+                actions.append(
+                    AssistantAction(
+                        id=f"assistant-action-watergun-{uuid.uuid4().hex}",
+                        type="water_gun_target",
+                        title=(f"确认向{label}喷水 {duration_text}" if requested_duration else f"确认喷水到{label}"),
+                        description=(
+                            f"确认后将向{label}定时喷水 {duration_text}。"
+                            if requested_duration
+                            else "请先核对本轮定位图片，确认后才会发送水枪目标。"
+                        ),
+                        risk="high",
+                        payload=payload,
+                    )
                 )
-            )
-            answer += " 请在屏幕确认是否喷水。" if request.channel == "edge_text" else " 请核对本轮定位图片，确认后才会设置水枪目标。"
+                answer = (
+                    f"将向{label}喷水 {duration_text}，请确认或取消。"
+                    if requested_duration
+                    else answer + " 请核对本轮定位图片，确认后才会设置水枪目标。"
+                )
+        if edge_channel:
+            answer = _short_edge_answer(answer)
+        if delta is not None:
+            if not first_answer_emitted:
+                event("thinking_finished", {
+                    "at_ms": now_ms(),
+                    "thinking_ms": round(deepseek_model_ms),
+                })
+            answer_decoder.finish(answer)
         references = _deduplicate_references(references)
         current = now_ms()
         message_id = f"msg-{uuid.uuid4()}"
@@ -1066,6 +1567,7 @@ def run_assistant_turn(request: AssistantTurnRequest, progress: ProgressCallback
                 content=answer,
                 created_at=current,
                 message_metadata={
+                    "reply_to_message_id": _safe_message_id(request.message_id),
                     "assistant_context": collected_context,
                     "references": [item.model_dump(mode="json") for item in references],
                     "actions": [item.model_dump(mode="json") for item in actions],

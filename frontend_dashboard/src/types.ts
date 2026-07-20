@@ -30,7 +30,8 @@ export interface TelemetryPayload {
   status: DeviceRuntimeStatus;
 }
 
-export type SiteActuatorTarget = 'pump' | 'heater' | 'grow_light';
+export type SiteActuatorTarget = 'pump' | 'heater' | 'grow_light' | 'fan' | 'curtain' | 'alarm';
+export type SiteCommandTarget = SiteActuatorTarget;
 
 export interface SiteActuatorState {
   supported: boolean;
@@ -62,7 +63,7 @@ export interface SiteCommandResult {
   command_id: string;
   site_id: string;
   device_id: string;
-  target: SiteActuatorTarget;
+  target: SiteCommandTarget;
   value: number;
   state: 'queued' | 'dispatched' | 'succeeded' | 'failed' | 'expired';
   created_at: number;
@@ -425,6 +426,8 @@ export interface PositionLocateResult {
 
 export type WaterGunMode = 'static' | 'dynamic';
 export type WaterGunTargetSource = 'manual' | 'vision';
+export type WaterGunSpraySchedule = 'continuous' | 'timed';
+export type WaterGunStopReason = 'idle' | 'manual' | 'timed_complete' | 'target_changed' | 'mode_changed' | 'dynamic_timeout';
 
 export interface WaterGunState {
   site_id: string;
@@ -442,6 +445,11 @@ export interface WaterGunState {
   timed_out: boolean;
   simulation_only: boolean;
   pump_control_percent: number;
+  spray_schedule: WaterGunSpraySchedule;
+  spray_duration_seconds: number | null;
+  spray_ends_at: number | null;
+  remaining_seconds: number | null;
+  stop_reason: WaterGunStopReason;
 }
 
 export interface WaterGunTargetInput {
@@ -451,6 +459,8 @@ export interface WaterGunTargetInput {
   source?: WaterGunTargetSource;
   target_label?: string;
   spray_enabled?: boolean;
+  spray_schedule?: WaterGunSpraySchedule;
+  spray_duration_seconds?: number | null;
 }
 
 export interface DiseaseDetection {

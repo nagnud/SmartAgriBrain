@@ -5,6 +5,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+SiteCommandTarget = Literal["pump", "heater", "grow_light", "fan", "curtain", "alarm"]
+
+
 class ActuatorState(BaseModel):
     supported: bool = False
     desired: int | None = Field(default=None, ge=0, le=100)
@@ -27,6 +30,7 @@ class SiteState(BaseModel):
     updated_at: int
     sensors: dict[str, float | None]
     quality: dict[str, str]
+    sensor_display: dict[str, Literal["high", "low", "normal", "unavailable"]] = Field(default_factory=dict)
     actuators: dict[str, ActuatorState]
     devices: dict[str, EdgeDeviceState]
 
@@ -45,7 +49,7 @@ class SiteHistoryPoint(BaseModel):
 
 
 class SiteCommandRequest(BaseModel):
-    target: Literal["pump", "heater", "grow_light"]
+    target: SiteCommandTarget
     value: int = Field(..., ge=0, le=100)
     reason: str = Field(default="", max_length=500)
     source: Literal["web_manual", "edge_voice", "smart_control"] = "web_manual"
@@ -98,6 +102,7 @@ class EdgeAssistantMessageResponse(BaseModel):
     content: str
     created_at: int
     actions: list[EdgeAssistantActionResponse] = Field(default_factory=list)
+    next_input: Literal["none", "duration", "confirmation"] = "none"
 
 
 class EdgeAssistantConversationResponse(BaseModel):

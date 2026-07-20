@@ -14,7 +14,6 @@ function Get-SmartAgriPaths {
     $s3Root = if ($s3Config) { Split-Path $s3Config -Parent } else { $null }
 
     if (-not $c5Root) { throw "ESP32C5 project was not found below $webRoot" }
-    if (-not $s3Root) { throw "ESP32-S3 PlatformIO project was not found below $webRoot" }
 
     [pscustomobject]@{
         ProRoot = $proRoot
@@ -22,8 +21,8 @@ function Get-SmartAgriPaths {
         Backend = Join-Path $proRoot "backend_api"
         Workspace = $workspaceRoot
         C5 = $c5Root
-        C5Ascii = "C:\SmartAgriBrain\ESP32C5"
-        C5Build = "C:\SmartAgriBrain\build-c5"
+        C5Ascii = "C:\SmartAgriBrain\ESP32C5-current-src"
+        C5Build = "C:\SmartAgriBrain\build-c5-current"
         S3 = $s3Root
         Python = Join-Path $proRoot "backend_api\.venv\Scripts\python.exe"
         PlatformIO = Join-Path $proRoot "backend_api\.venv\Scripts\pio.exe"
@@ -61,7 +60,29 @@ function Enter-EspIdf {
 function Assert-C5AsciiJunction {
     param([Parameter(Mandatory = $true)] $Paths)
     if (-not (Test-Path $Paths.C5Ascii)) {
-        throw "C5 ASCII junction is missing. Expected $($Paths.C5Ascii) -> $($Paths.C5)"
+        throw "C5 ASCII build source is missing. Expected $($Paths.C5Ascii)"
+    }
+}
+
+function Sync-C5AsciiSource {
+    param([Parameter(Mandatory = $true)] $Paths)
+
+    $source = (Resolve-Path $Paths.C5).Path
+    $mirror = $Paths.C5Ascii
+    if ($mirror -ne "C:\SmartAgriBrain\ESP32C5-current-src") {
+        throw "Refusing to sync C5 source to an unexpected mirror path: $mirror"
+    }
+
+    New-Item -ItemType Directory -Path $mirror -Force | Out-Null
+    & robocopy $source $mirror /MIR /XD build .git /NFL /NDL /NJH /NJS /NC /NS
+    $copyExitCode = $LASTEXITCODE
+    if ($copyExitCode -gt 7) {
+        throw "C5 ASCII source sync failed with robocopy exit code $copyExitCode"
+    }
+
+    $smartFarm = Join-Path $mirror "common_components\brookesia_app_smartfarm\esp_brookesia_app_smartfarm.cpp"
+    if (-not (Test-Path $smartFarm)) {
+        throw "C5 ASCII source sync is incomplete: $smartFarm is missing"
     }
 }
 

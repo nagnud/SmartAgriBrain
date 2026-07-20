@@ -3,7 +3,6 @@ import type {
   CommandResult,
   DeviceCommand,
   DeviceRuntimeStatus,
-  DiseaseDetectionResult,
   ExpertChatRequest,
   ExpertChatResponse,
   HistoryPoint,
@@ -34,7 +33,6 @@ let runtimeStatus: DeviceRuntimeStatus = {
 let tick = 0;
 let nextKnowledgeBaseId = 4;
 let nextKnowledgeItemId = 9;
-let lastDiseaseResult: DiseaseDetectionResult | null = null;
 
 const mockHistoryPointCount = 360;
 const mockHistoryStepMs = 60 * 1000;
@@ -70,7 +68,7 @@ const mockMetricDefinitions: Record<HistoryMetricKey, MockMetricDefinition> = {
   humidity: { label: '棚内湿度', unit: '%RH', advice: { low: '建议检查灌溉和加湿安排。', high: '建议加强通风并检查叶面结露。' } },
   light: { label: '光照强度', unit: 'lux', advice: { low: '建议检查补光灯和卷帘状态。', high: '建议检查遮阳和卷帘状态。' } },
   co2: { label: '二氧化碳浓度', unit: 'ppm', advice: { low: '建议检查通风时段和二氧化碳补充安排。', high: '建议加强通风并检查气体来源。' } },
-  soil_moisture: { label: '土壤湿度', unit: '%', advice: { low: '建议检查灌溉和水泵状态。', high: '建议减少灌溉并检查排水情况。' } },
+  soil_moisture: { label: '空气湿度', unit: '%', advice: { low: '建议检查灌溉和水泵状态。', high: '建议减少灌溉并检查排水情况。' } },
   soil_ec: { label: '土壤肥力', unit: 'mS/cm', advice: { low: '建议检查养分供应和施肥计划。', high: '建议检查施肥浓度并评估是否需要冲洗基质。' } },
   gas_resistance: { label: '空气质量', unit: 'Ω', advice: { low: '建议加强通风并排查异常气味来源。', high: '建议继续观察空气质量变化。' } },
 };
@@ -426,41 +424,6 @@ export function executeMockCommand(command: DeviceCommand): CommandResult {
   };
 }
 
-export function buildMockDiseaseDetection(imageUrl: string): DiseaseDetectionResult {
-  lastDiseaseResult = {
-    image_url: imageUrl,
-    crop: 'tomato',
-    model: 'YOLO11n-demo',
-    detections: [
-      {
-        id: 'det-1',
-        label: '疑似叶斑病',
-        class_name: 'leaf_spot',
-        confidence: 0.88,
-        bbox: { x: 31, y: 24, width: 30, height: 28 },
-        severity: 'medium',
-      },
-      {
-        id: 'det-2',
-        label: '早期霜霉风险',
-        class_name: 'downy_mildew',
-        confidence: 0.74,
-        bbox: { x: 58, y: 48, width: 22, height: 20 },
-        severity: 'low',
-      },
-    ],
-    summary: '检测到 2 处疑似病斑，整体为中等风险，建议结合湿度趋势复核。',
-    explanation: '图像中存在不规则黄褐色斑块，叠加近期湿度偏高，符合番茄叶斑病或霜霉病早期风险特征。',
-    suggestions: [
-      '立即检查叶背是否有霉层，并拍摄更清晰的近景图片复核。',
-      '优先通风降湿，避免叶面长时间结露。',
-      '隔离明显病叶，必要时请人工确认后再用药。',
-    ],
-    processed_at: Date.now(),
-  };
-  return lastDiseaseResult;
-}
-
 export const mockKnowledgeBases: KnowledgeBaseInfo[] = [
   { kbId: 1, name: '番茄管理知识库', description: '温室番茄水肥、光照、二氧化碳和病害管理经验', enabled: true, updatedAt: nowText() },
   { kbId: 2, name: '病虫害防治库', description: '叶斑病、霜霉病、白粉病等识别与处理建议', enabled: true, updatedAt: nowText() },
@@ -554,7 +517,7 @@ function selectedReferences(question: string, kbId?: number): KnowledgeReference
 
 export function buildMockExpertChat(request: ExpertChatRequest): ExpertChatResponse {
   const sensors = request.latest.sensors;
-  const diseaseText = request.disease?.summary ?? lastDiseaseResult?.summary ?? '当前没有新的病害图片检测结果。';
+  const diseaseText = request.disease?.summary ?? '当前没有新的病害图片检测结果。';
   const suggestFan = sensors.humidity > 68;
   const references = selectedReferences(request.question, request.knowledge_base_id);
   const referenceText = references.length > 0

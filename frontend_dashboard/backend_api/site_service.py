@@ -4,13 +4,15 @@ import os
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from device_schemas import DeviceCommandRequest
 from device_service import queue_command
+from agri_text_normalizer import normalize_agri_text
+from monitoring_service import get_alarm_settings
 from position_service import take_position_result
 from schemas import AssistantTurnRequest
 from site_events import site_event_bus
@@ -20,6 +22,7 @@ from site_models import (
     EdgeAssistantMessage,
     EdgeAssistantSession,
     EdgeDeviceRecord,
+    SiteActuatorControlState,
     SiteCommandRecord,
     SiteHistorySample,
     SiteSnapshotRecord,
@@ -48,6 +51,7 @@ SENSOR_KEYS = (
     "soil_ec_ms_cm",
 )
 ACTUATOR_KEYS = ("pump", "heater", "grow_light", "fan", "alarm", "curtain", "cooler", "ventilation", "co2_valve")
+FRONTEND_ACTUATOR_KEYS = ("fan", "curtain", "alarm")
 COMMAND_TTL_MS = 30_000
 ACTION_TTL_MS = 30_000
 HISTORY_SAMPLE_INTERVAL_MS = 10_000
@@ -58,6 +62,12 @@ VISIBLE_HISTORY_SENSOR_KEYS = (
     "co2_ppm",
     "soil_moisture_pct",
 )
+DISPLAY_SENSOR_RANGES = {
+    "temperature_c": "temperature",
+    "humidity_pct": "humidity",
+    "illuminance_lux": "light",
+    "co2_ppm": "co2",
+}
 
 
 def now_ms() -> int:
@@ -401,6 +411,19 @@ def get_site_state(db: Session, site_id: str) -> SiteState:
             for key in ACTUATOR_KEYS
         }
         updated_at = snapshot.sampled_at
+    frontend_actuators = db.scalars(
+        select(SiteActuatorControlState).where(SiteActuatorControlState.site_id == site_id)
+    ).all()
+    stored_frontend_states = {item.target: item for item in frontend_actuators}
+    for target in FRONTEND_ACTUATOR_KEYS:
+        stored = stored_frontend_states.get(target)
+        value = stored.actual if stored is not None else 0
+        actuators[target] = ActuatorState(
+            supported=True,
+            desired=stored.desired if stored is not None else 0,
+            actual=value,
+            master_enabled=stored.master_enabled if stored is not None else False,
+        )
     device_rows = db.scalars(select(EdgeDeviceRecord).where(EdgeDeviceRecord.site_id == site_id)).all()
     devices = {
         row.device_id: EdgeDeviceState(
@@ -412,11 +435,27 @@ def get_site_state(db: Session, site_id: str) -> SiteState:
         )
         for row in device_rows
     }
+    target_ranges = get_alarm_settings(db, s3_device_id()).ranges.model_dump()
+    sensor_display: dict[str, str] = {}
+    for sensor_key, range_key in DISPLAY_SENSOR_RANGES.items():
+        value = sensors.get(sensor_key)
+        sensor_quality = str(quality.get(sensor_key) or ("ok" if value is not None else "unavailable"))
+        if value is None or sensor_quality != "ok":
+            sensor_display[sensor_key] = "unavailable"
+            continue
+        target = target_ranges[range_key]
+        if float(value) > float(target["max"]):
+            sensor_display[sensor_key] = "high"
+        elif float(value) < float(target["min"]):
+            sensor_display[sensor_key] = "low"
+        else:
+            sensor_display[sensor_key] = "normal"
     return SiteState(
         site_id=site_id,
         updated_at=updated_at,
         sensors=sensors,
         quality=quality,
+        sensor_display=sensor_display,
         actuators=actuators,
         devices=devices,
     )
@@ -445,6 +484,7 @@ def queue_site_command(
     assistant_action_id: str | None = None,
 ) -> SiteCommandResponse:
     created_at = now_ms()
+    is_frontend_actuator = request.target in FRONTEND_ACTUATOR_KEYS
     record = SiteCommandRecord(
         command_id=str(uuid.uuid4()),
         site_id=site_id,
@@ -454,15 +494,42 @@ def queue_site_command(
         reason=request.reason,
         source=request.source,
         assistant_action_id=assistant_action_id,
-        state="queued",
+        state="succeeded" if is_frontend_actuator else "queued",
         created_at=created_at,
         expires_at=created_at + COMMAND_TTL_MS,
+        acknowledged_at=created_at if is_frontend_actuator else None,
+        actual_value=request.value if is_frontend_actuator else None,
     )
     db.add(record)
+    if is_frontend_actuator:
+        control_state = db.scalar(
+            select(SiteActuatorControlState).where(
+                SiteActuatorControlState.site_id == site_id,
+                SiteActuatorControlState.target == request.target,
+            )
+        )
+        if control_state is None:
+            control_state = SiteActuatorControlState(
+                site_id=site_id,
+                target=request.target,
+                desired=request.value,
+                actual=request.value,
+                master_enabled=request.value > 0,
+                updated_at=created_at,
+            )
+            db.add(control_state)
+        else:
+            control_state.desired = request.value
+            control_state.actual = request.value
+            control_state.master_enabled = request.value > 0
+            control_state.updated_at = created_at
     db.commit()
     db.refresh(record)
     response = _command_response(record)
     site_event_bus.publish(site_id, "command_update", response.model_dump(mode="json"))
+    if is_frontend_actuator:
+        state = get_site_state(db, site_id)
+        site_event_bus.publish(site_id, "device_status", state.model_dump(mode="json"))
     return response
 
 
@@ -579,29 +646,6 @@ def _ensure_session(db: Session, site_id: str, session_id: str | None, channel: 
     return session
 
 
-def _store_message(
-    db: Session,
-    session: EdgeAssistantSession,
-    role: str,
-    channel: str,
-    content: str,
-    *,
-    metadata: dict[str, Any] | None = None,
-) -> EdgeAssistantMessage:
-    message = EdgeAssistantMessage(
-        id=f"msg-{uuid.uuid4()}",
-        session_id=session.id,
-        site_id=session.site_id,
-        role=role,
-        channel=channel,
-        content=content,
-        created_at=now_ms(),
-        message_metadata=metadata or {},
-    )
-    db.add(message)
-    return message
-
-
 def _deterministic_device_action(text: str) -> tuple[str, dict[str, Any]] | None:
     if "水泵" not in text and not any(word in text for word in ("浇水", "加水", "灌溉")):
         return None
@@ -616,25 +660,6 @@ def _deterministic_device_action(text: str) -> tuple[str, dict[str, Any]] | None
     return None
 
 
-def _latest_for_assistant(db: Session, site_id: str) -> dict[str, Any]:
-    state = get_site_state(db, site_id)
-    sensors = state.sensors
-    return {
-        "device_id": s3_device_id(),
-        "timestamp": state.updated_at,
-        "sensors": {
-            "temperature": sensors.get("temperature_c"),
-            "humidity": sensors.get("humidity_pct"),
-            "pressure": sensors.get("pressure_kpa"),
-            "gas_resistance": sensors.get("gas_resistance_ohm"),
-            "light": sensors.get("illuminance_lux"),
-            "co2": sensors.get("co2_ppm"),
-            "soil_moisture": sensors.get("soil_moisture_pct"),
-            "soil_ec": sensors.get("soil_ec_ms_cm"),
-        },
-    }
-
-
 def _action_response(action: EdgeAssistantAction) -> EdgeAssistantActionResponse:
     return EdgeAssistantActionResponse(
         id=action.id,
@@ -647,6 +672,19 @@ def _action_response(action: EdgeAssistantAction) -> EdgeAssistantActionResponse
 
 
 def _message_response(message: EdgeAssistantMessage, actions: list[EdgeAssistantAction]) -> EdgeAssistantMessageResponse:
+    current = now_ms()
+    next_input = "none"
+    if any(action.state == "pending" and action.expires_at >= current for action in actions):
+        next_input = "confirmation"
+    elif isinstance(message.message_metadata, dict):
+        context = message.message_metadata.get("assistant_context")
+        if isinstance(context, dict) and not context.get("water_gun_duration_resolved"):
+            duration_request = context.get("water_gun_duration_request")
+            if (
+                isinstance(duration_request, dict)
+                and int(duration_request.get("expires_at") or 0) >= current
+            ):
+                next_input = "duration"
     return EdgeAssistantMessageResponse(
         id=message.id,
         session_id=message.session_id,
@@ -656,23 +694,62 @@ def _message_response(message: EdgeAssistantMessage, actions: list[EdgeAssistant
         content=message.content,
         created_at=message.created_at,
         actions=[_action_response(action) for action in actions],
+        next_input=next_input,
     )
 
 
-def create_edge_assistant_reply(db: Session, site_id: str, text: str, session_id: str | None, channel: str) -> EdgeAssistantMessageResponse:
+def create_edge_assistant_reply(
+    db: Session,
+    site_id: str,
+    text: str,
+    session_id: str | None,
+    channel: str,
+    *,
+    message_id: str | None = None,
+    delta: Callable[[str], None] | None = None,
+    event: Callable[[str, dict[str, Any]], None] | None = None,
+) -> EdgeAssistantMessageResponse:
     # The edge display and web UI now share the same context-aware orchestrator,
     # while retaining separate session ids and channel-specific answer lengths.
     from assistant_orchestrator import run_assistant_turn
 
     resolved_session_id = session_id or f"edge-{uuid.uuid4()}"
+    resolved_message_id = message_id or f"msg-{uuid.uuid4()}"
+    if message_id:
+        existing_messages = list(
+            db.scalars(
+                select(EdgeAssistantMessage)
+                .where(
+                    EdgeAssistantMessage.session_id == resolved_session_id,
+                    EdgeAssistantMessage.role == "assistant",
+                )
+                .order_by(EdgeAssistantMessage.created_at.desc())
+            ).all()
+        )
+        existing = next(
+            (
+                item
+                for item in existing_messages
+                if isinstance(item.message_metadata, dict)
+                and item.message_metadata.get("reply_to_message_id") == resolved_message_id
+            ),
+            None,
+        )
+        if existing is not None:
+            existing_actions = list(
+                db.scalars(select(EdgeAssistantAction).where(EdgeAssistantAction.message_id == existing.id)).all()
+            )
+            return _message_response(existing, existing_actions)
     orchestrated = run_assistant_turn(
         AssistantTurnRequest(
             session_id=resolved_session_id,
             site_id=site_id,
             channel="edge_text" if channel == "edge_text" else "web",
-            message_id=f"msg-{uuid.uuid4()}",
+            message_id=resolved_message_id,
             text=text,
-        )
+        ),
+        delta=delta,
+        event=event,
     )
     db.expire_all()
     assistant_message = db.get(EdgeAssistantMessage, orchestrated.message.id)
@@ -688,7 +765,7 @@ def create_edge_assistant_reply(db: Session, site_id: str, text: str, session_id
     # Safety fallback for an explicit actuator imperative if the model omitted
     # the mandatory confirmation action. It never executes the device directly.
     if not actions:
-        fallback = _deterministic_device_action(text)
+        fallback = _deterministic_device_action(normalize_agri_text(text).normalized)
         if fallback is not None:
             reply_text, action_payload = fallback
             assistant_message.content = _brief_text(reply_text) if channel == "edge_text" else reply_text
@@ -807,6 +884,8 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
             action.payload = {**action.payload, "error": "定位结果已过期，请重新查看摄像头。"}
         else:
             candidate, _captured_at = stored_result
+            spray_schedule = str(action.payload.get("spray_schedule") or "continuous")
+            spray_duration_seconds = action.payload.get("spray_duration_seconds")
             state = water_gun_runtime.set_static(
                 db,
                 site_id,
@@ -817,6 +896,12 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
                     source="vision",
                     target_label=candidate.label,
                     spray_enabled=True,
+                    spray_schedule="timed" if spray_schedule == "timed" else "continuous",
+                    spray_duration_seconds=(
+                        int(spray_duration_seconds)
+                        if spray_schedule == "timed" and spray_duration_seconds is not None
+                        else None
+                    ),
                 ),
             )
             action.state = "confirmed"

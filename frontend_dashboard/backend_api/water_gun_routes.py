@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from water_gun_service import (
     WaterGunDynamicStartRequest,
+    WaterGunDynamicSprayRequest,
     WaterGunDynamicUpdateRequest,
     WaterGunHeartbeatRequest,
     WaterGunPreviewRequest,
@@ -82,6 +83,20 @@ def heartbeat_dynamic_water_gun(
         return water_gun_runtime.heartbeat(site_id, payload)
     except LookupError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/{site_id}/water-gun/dynamic/spray", response_model=WaterGunStateResponse)
+def set_dynamic_water_gun_spray(
+    site_id: str,
+    payload: WaterGunDynamicSprayRequest,
+    db: Session = Depends(get_db),
+) -> WaterGunStateResponse:
+    try:
+        return water_gun_runtime.set_dynamic_spray(db, site_id, payload)
+    except LookupError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=409, detail="动态水枪开关指令未进入设备队列，请立即检查设备状态。") from error
 
 
 @router.post("/{site_id}/water-gun/dynamic/stop", response_model=WaterGunStateResponse)

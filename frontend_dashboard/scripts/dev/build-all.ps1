@@ -16,9 +16,13 @@ try { & $paths.PlatformIO run; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
 finally { Pop-Location }
 
 if (-not $SkipC5) {
+    Sync-C5AsciiSource $paths
     Assert-C5AsciiJunction $paths
     Enter-EspIdf $paths
     Push-Location $paths.C5Ascii
-    try { idf.py -B $paths.C5Build build; if ($LASTEXITCODE) { exit $LASTEXITCODE } }
+    try {
+        idf.py -B $paths.C5Build reconfigure; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        idf.py -B $paths.C5Build build; if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    }
     finally { Pop-Location }
 }
