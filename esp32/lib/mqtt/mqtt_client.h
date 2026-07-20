@@ -26,12 +26,17 @@ extern PubSubClient mqttClient;
 
 struct SmartControlCommand
 {
+  bool hasWaterDemand;
+  bool hasLightDemand;
+  bool hasPanAngle;
+  bool hasTiltAngle;
+  bool hasLegacyTempDemand;
   int waterDemand;
   int lightDemand;
-  int tempDemand;
+  int panAngle;
+  int tiltAngle;
+  int legacyTempDemand;
   int waterPwm;
-  int lightPwm;
-  int heaterPwm;
 };
 
 typedef void (*SmartControlHandler)(const SmartControlCommand &command);

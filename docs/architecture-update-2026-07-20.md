@@ -71,16 +71,30 @@ SmartAgriBrain/
 
 ## 4. 二维舵机云台状态
 
-二维舵机云台是新增功能。当前 `esp32/` 目录中没有 Servo/LEDC 云台驱动、水平/俯仰角度模型、限位保护、云台 MQTT 命令解析或云台 ACK 实现。
+二维舵机云台已经实现为 `esp32/lib/PanTilt/` 模块，使用 ESP32 LEDC 输出 50 Hz PWM，不额外引入第三方舵机库。
 
-后续代码阶段的固定模块边界如下：
+- 水平轴：GPIO27，LEDC 通道 2。
+- 俯仰轴：GPIO13，LEDC 通道 3。
+- 舵机：SG90。
+- 安全角度：0-180 度。
+- 上电初始位置：水平 90 度、俯仰 90 度。
+- 供电：独立稳定 5 V，且与 ESP32 GND 共地。
 
-- `lib/pan_tilt/`：二维舵机驱动、角度限幅、复位位和单轴运动接口。
-- `src/`：将云端命令转换为水平角和俯仰角请求，不直接散落 PWM 调用。
-- MQTT 命令：复用统一协议中的单原子命令原则；水平和俯仰分别确认，或由后端建立两个带独立 `command_id` 的命令。
-- 状态上报：在采集 ESP32 的遥测中追加 `pan_tilt.pan_deg`、`pan_tilt.tilt_deg`、`pan_tilt.state`，单位均为度。
+云台从 MQTT 主题 `farm/test/control_cmd_888` 接收同级 JSON 字段，固定格式如下：
 
-引脚、电源、舵机型号、有效角度范围和零点尚未出现在当前工程中，因此本文件不编造具体 GPIO 或角度值。它们必须在开始云台代码前由硬件负责人确认。
+```json
+{
+  "action": "smart_control_update",
+  "waterDemand": 0,
+  "lightDemand": 60,
+  "panAngle": 90,
+  "tiltAngle": 90
+}
+```
+
+`panAngle` 和 `tiltAngle` 都是整数角度。两个字段可以单独发送；未出现的轴保持当前角度，不会被重置。超出 0-180 的值由设备端限幅。`lightDemand` 固定驱动 GPIO14 的高电平有效 PWM 灯光，范围 0-90；`waterDemand` 继续驱动 GPIO26，范围 0-100。原 GPIO12 WS2812 灯带继续保留，但不再响应该 MQTT 亮度字段。
+
+旧 `tempDemand`、`heatDemand` 或 `demands.heat` 字段仍可被识别以兼容旧消息，但不会再控制 GPIO14；设备会通过串口打印忽略提示。
 
 ## 5. C5 语音与显示状态
 

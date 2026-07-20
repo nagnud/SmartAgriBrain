@@ -41,7 +41,7 @@ bool pendingLedBlink = false;
 bool pendingLedOn = false;
 bool pendingLedOff = false;
 bool pendingSmartControl = false;
-SmartControlCommand pendingSmartControlCommand = {0, 0, 0, 0, 0, 0};
+SmartControlCommand pendingSmartControlCommand = {};
 SmartControlHandler smartControlHandler = nullptr;
 
 void reconnect_mqtt_nonblocking();
@@ -50,6 +50,7 @@ void blink_led_local(int times, int speed);
 void execute_pending_actions();
 bool parse_smart_control(byte *payload, unsigned int length, SmartControlCommand &command);
 int read_demand(JsonDocument &doc, const char *rootKey, const char *nestedKey, int defaultValue);
+bool has_demand(JsonDocument &doc, const char *rootKey, const char *nestedKey);
 int clamp_percent(int value);
 int demand_to_pwm(int percent);
 
@@ -198,10 +199,17 @@ void callback(char *topic, byte *payload, unsigned int length)
     pendingLedOff = false;
     pendingLedBlink = false;
 
-    Serial.printf("[CONTROL] water=%d%%->%d light=%d%%->%d temp=%d->heater %d\n",
-                  command.waterDemand, command.waterPwm,
-                  command.lightDemand, command.lightPwm,
-                  command.tempDemand, command.heaterPwm);
+    Serial.printf("[CONTROL] water=%s%d%% light=%s%d%% pan=%s%ddeg tilt=%s%ddeg\n",
+                  command.hasWaterDemand ? "" : "unchanged/", command.waterDemand,
+                  command.hasLightDemand ? "" : "unchanged/", command.lightDemand,
+                  command.hasPanAngle ? "" : "unchanged/", command.panAngle,
+                  command.hasTiltAngle ? "" : "unchanged/", command.tiltAngle);
+
+    if (command.hasLegacyTempDemand)
+    {
+      Serial.printf("[CONTROL] Ignoring legacy tempDemand=%d; GPIO14 is now reserved for lightDemand.\n",
+                    command.legacyTempDemand);
+    }
   }
   else if (message == "LED_ON")
   {
@@ -275,41 +283,52 @@ bool parse_smart_control(byte *payload, unsigned int length, SmartControlCommand
     return false;
   }
 
-  const char *action = doc["action"] | "";
-  bool hasControlFields = doc["waterDemand"].is<int>() ||
-                          doc["lightDemand"].is<int>() ||
-                          doc["tempDemand"].is<int>() ||
-                          doc["heatDemand"].is<int>() ||
-                          doc["demands"]["water"].is<int>() ||
-                          doc["demands"]["light"].is<int>() ||
-                          doc["demands"]["heat"].is<int>();
+  const bool hasWaterDemand = has_demand(doc, "waterDemand", "water");
+  const bool hasLightDemand = has_demand(doc, "lightDemand", "light");
+  const bool hasPanAngle = doc["panAngle"].is<int>();
+  const bool hasTiltAngle = doc["tiltAngle"].is<int>();
+  const bool hasLegacyTempDemand = doc["tempDemand"].is<int>() ||
+                                    doc["heatDemand"].is<int>() ||
+                                    doc["demands"]["heat"].is<int>();
+  const bool hasControlFields = hasWaterDemand || hasLightDemand || hasPanAngle || hasTiltAngle || hasLegacyTempDemand;
 
-  if (strcmp(action, "smart_control_update") != 0 && !hasControlFields)
+  if (!hasControlFields)
   {
     return false;
   }
 
-  command.waterDemand = clamp_percent(read_demand(doc, "waterDemand", "water", 0));
-  command.lightDemand = clamp_percent(read_demand(doc, "lightDemand", "light", 0));
+  command = {};
+  command.hasWaterDemand = hasWaterDemand;
+  command.hasLightDemand = hasLightDemand;
+  command.hasPanAngle = hasPanAngle;
+  command.hasTiltAngle = hasTiltAngle;
+  command.hasLegacyTempDemand = hasLegacyTempDemand;
 
-  int rawTempDemand = read_demand(doc, "tempDemand", "heat", 0);
-  if (!doc["tempDemand"].is<int>() && doc["heatDemand"].is<int>())
+  if (command.hasWaterDemand)
   {
-    rawTempDemand = doc["heatDemand"] | 0;
+    command.waterDemand = clamp_percent(read_demand(doc, "waterDemand", "water", 0));
+    command.waterPwm = demand_to_pwm(command.waterDemand);
   }
-  if (rawTempDemand > 100)
+  if (command.hasLightDemand)
   {
-    rawTempDemand = 100;
+    command.lightDemand = clamp_percent(read_demand(doc, "lightDemand", "light", 0));
   }
-  if (rawTempDemand < -100)
+  if (command.hasPanAngle)
   {
-    rawTempDemand = -100;
+    command.panAngle = doc["panAngle"] | 0;
   }
-  command.tempDemand = rawTempDemand;
-
-  command.waterPwm = demand_to_pwm(command.waterDemand);
-  command.lightPwm = demand_to_pwm(command.lightDemand);
-  command.heaterPwm = command.tempDemand > 0 ? demand_to_pwm(command.tempDemand) : 0;
+  if (command.hasTiltAngle)
+  {
+    command.tiltAngle = doc["tiltAngle"] | 0;
+  }
+  if (command.hasLegacyTempDemand)
+  {
+    command.legacyTempDemand = read_demand(doc, "tempDemand", "heat", 0);
+    if (!doc["tempDemand"].is<int>() && doc["heatDemand"].is<int>())
+    {
+      command.legacyTempDemand = doc["heatDemand"] | 0;
+    }
+  }
 
   return true;
 }
@@ -328,6 +347,11 @@ int read_demand(JsonDocument &doc, const char *rootKey, const char *nestedKey, i
   }
 
   return defaultValue;
+}
+
+bool has_demand(JsonDocument &doc, const char *rootKey, const char *nestedKey)
+{
+  return doc[rootKey].is<int>() || doc["demands"][nestedKey].is<int>();
 }
 
 int clamp_percent(int value)

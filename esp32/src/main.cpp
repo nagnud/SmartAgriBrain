@@ -10,15 +10,21 @@
 #include "TempSensor.h"
 #include "SoilSensor.h"
 #include "JW01_CO2.h"
+#include "PanTilt.h"
 //#include "pump.h"
 
-#define HEATER_PIN 14
+#define LAMP_PIN 14
 #define PUMP_PIN 26
-#define HEATER_PWM_CHANNEL 0
+#define PAN_SERVO_PIN 27
+#define TILT_SERVO_PIN 13
+#define LAMP_PWM_CHANNEL 0
 #define PUMP_PWM_CHANNEL 1
+#define PAN_SERVO_PWM_CHANNEL 2
+#define TILT_SERVO_PWM_CHANNEL 3
 
-#define PWM_FREQ 1000 // PWM频率 1000Hz
-#define PWM_RES 8     // 8位分辨率，占空比范围0~255
+#define ACTUATOR_PWM_FREQ 1000
+#define ACTUATOR_PWM_RES 8
+#define LAMP_MAX_BRIGHTNESS_PERCENT 90
 
 LightSensor lightSensor(34); 
 // 使用 GPIO 34 (支持ADC) 这是光传感器测试
@@ -30,6 +36,7 @@ TempSensor tempSensor; //gpio4
 
 //WaterPump myPump(26, 1);// 定义水泵对象，使用 GPIO 26，LEDC 通道 0
 LedController ledController2;// 定义 LED 控制器对象
+PanTilt panTilt(PAN_SERVO_PIN, TILT_SERVO_PIN, PAN_SERVO_PWM_CHANNEL, TILT_SERVO_PWM_CHANNEL);
 
 unsigned long previousMillis = 0;
 const long interval = 10000; // 间隔 1000ms
@@ -39,15 +46,32 @@ bool ledState = false;
 
 void applySmartControl(const SmartControlCommand &command)
 {
-   ledcWrite(PUMP_PWM_CHANNEL, command.waterPwm);
-   ledcWrite(HEATER_PWM_CHANNEL, command.heaterPwm);
+   if (command.hasWaterDemand)
+   {
+      ledcWrite(PUMP_PWM_CHANNEL, command.waterPwm);
+   }
 
-   ledController2.setBrightness(1.0f);
-   ledController2.setAllColor(command.lightPwm, command.lightPwm, command.lightPwm);
-   ledController2.update();
+   if (command.hasLightDemand)
+   {
+      const int limitedBrightness = constrain(command.lightDemand, 0, LAMP_MAX_BRIGHTNESS_PERCENT);
+      const uint8_t lampDuty = static_cast<uint8_t>((limitedBrightness * 255) / LAMP_MAX_BRIGHTNESS_PERCENT);
+      ledcWrite(LAMP_PWM_CHANNEL, lampDuty);
+   }
 
-   Serial.printf("[CONTROL] Applied pump=%d light=%d heater=%d\n",
-                 command.waterPwm, command.lightPwm, command.heaterPwm);
+   if (command.hasPanAngle)
+   {
+      panTilt.setPanAngle(command.panAngle);
+   }
+
+   if (command.hasTiltAngle)
+   {
+      panTilt.setTiltAngle(command.tiltAngle);
+   }
+
+   Serial.printf("[CONTROL] pump=%d lamp=%d pan=%d tilt=%d\n",
+                 command.hasWaterDemand ? command.waterPwm : -1,
+                 command.hasLightDemand ? constrain(command.lightDemand, 0, LAMP_MAX_BRIGHTNESS_PERCENT) : -1,
+                 panTilt.getPanAngle(), panTilt.getTiltAngle());
 }
 
 void setup()
@@ -112,15 +136,17 @@ void setup()
    // digitalWrite(26, HIGH);
    // pinMode(14, OUTPUT);
    // digitalWrite(14, HIGH);
-   ledcSetup(HEATER_PWM_CHANNEL, PWM_FREQ, PWM_RES);
-   ledcSetup(PUMP_PWM_CHANNEL, PWM_FREQ, PWM_RES);
+   ledcSetup(LAMP_PWM_CHANNEL, ACTUATOR_PWM_FREQ, ACTUATOR_PWM_RES);
+   ledcSetup(PUMP_PWM_CHANNEL, ACTUATOR_PWM_FREQ, ACTUATOR_PWM_RES);
 
-   ledcAttachPin(HEATER_PIN, HEATER_PWM_CHANNEL);
+   ledcAttachPin(LAMP_PIN, LAMP_PWM_CHANNEL);
    ledcAttachPin(PUMP_PIN, PUMP_PWM_CHANNEL);
    
 
-   ledcWrite(HEATER_PWM_CHANNEL, 0);
+   ledcWrite(LAMP_PWM_CHANNEL, 0);
    ledcWrite(PUMP_PWM_CHANNEL, 0);
+   panTilt.begin(90, 90);
+   Serial.println("✅ 二维 SG90 云台初始化成功：pan=90°, tilt=90°");
    set_smart_control_handler(applySmartControl);
 }
 
