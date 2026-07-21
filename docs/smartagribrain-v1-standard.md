@@ -27,8 +27,9 @@
 ### 2.1 标识符、字符集和时间
 
 - 编码：全部 JSON、HTTP 与 MQTT 文本均为 UTF-8。
-- `device_id`：小写字母、数字、`_`、`-`；正则 `^[a-z][a-z0-9_-]{2,63}$`。首台设备固定 `sensairshuttle_001`。
-- `message_id` / `command_id`：UUID v4 小写字符串。一个逻辑消息只能使用一个 ID。
+- `device_id`：小写字母、数字、`_`、`-`；正则 `^[a-z][a-z0-9_-]{2,63}$`。现场普通 ESP32 的协议标识固定为 `greenhouse_001_s3`；后缀 `_s3` 只是兼容命名，不代表芯片型号。
+- `site_id`：现场设备固定为 `greenhouse_001`；命令中可省略以兼容现有水枪队列，上行消息必须携带。
+- `message_id`：UUID v4 小写字符串。`command_id` 接受 UUID v4 或 1 至 20 位十进制字符串；一个逻辑命令只能使用一个 ID，设备按完整字符串幂等。
 - 时间：所有 `*_at` 为 Unix Epoch 毫秒，UTC，JSON number，例 `1752220800123`。禁止秒级时间戳和本地化字符串。
 - 时间不可信：ESP32 未完成 SNTP 时，`sampled_at` 必须为 `0`，并将 `time_quality` 设为 `unsynced`。服务端写入 `received_at` 并按其排序。
 - 数值：JSON number；禁止 `NaN`、`Infinity`、字符串数字和隐式单位。
@@ -38,7 +39,7 @@
 ### 2.2 统一设备能力名
 
 - `fan`：现有 `fan`；类型为 `binary`。
-- `pump`：现有 `pump`；类型为 `binary`。
+- `pump`：GPIO26 水泵；类型为 `percent`，范围 0 至 100。
 - `grow_light`：映射现有 `light`；类型为 `binary` 或 `percent`。
 - `alarm`：现有 `alarm`；类型为 `binary`。
 - `curtain`：新增；类型为 `percent`。
@@ -78,7 +79,7 @@
   "error": {
     "code": "DEVICE_OFFLINE",
     "message": "设备当前离线，命令未发布。",
-    "details": { "device_id": "sensairshuttle_001" }
+    "details": { "device_id": "greenhouse_001_s3" }
   }
 }
 ```
@@ -119,9 +120,10 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 {
   "schema_version": "1.0",
   "message_id": "7c41943a-168f-4914-9303-8f89e7da4f02",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
+  "site_id": "greenhouse_001",
   "reported_at": 1752220800123,
-  "firmware": { "version": "1.0.0", "target": "esp32c5" },
+  "firmware": { "version": "0.3.0", "target": "esp32" },
   "sensors": {
     "temperature_c": true,
     "humidity_pct": true,
@@ -136,7 +138,7 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
   },
   "actuators": {
     "fan": { "supported": true, "type": "binary", "min": 0, "max": 1 },
-    "pump": { "supported": true, "type": "binary", "min": 0, "max": 1 },
+    "pump": { "supported": true, "type": "percent", "min": 0, "max": 100 },
     "grow_light": { "supported": false, "type": "binary", "min": 0, "max": 1 },
     "alarm": { "supported": true, "type": "binary", "min": 0, "max": 1 },
     "curtain": { "supported": false, "type": "percent", "min": 0, "max": 100 },
@@ -158,7 +160,8 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 {
   "schema_version": "1.0",
   "message_id": "4db84c21-6e68-460c-939b-e187f3061e51",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
+  "site_id": "greenhouse_001",
   "sequence": 381,
   "sampled_at": 1752220800000,
   "time_quality": "synced",
@@ -212,7 +215,8 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 {
   "schema_version": "1.0",
   "message_id": "1eaf30d4-9ccb-4f76-932a-dab6812511e6",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
+  "site_id": "greenhouse_001",
   "reported_at": 1752220800123,
   "online": true,
   "reason": "connected"
@@ -223,13 +227,14 @@ LWT 离线时发布相同结构，仅 `online=false`、`reason="unexpected_disco
 
 ### 3.6 命令和 ACK 消息
 
-后端只发布单个原子命令。一个 MQTT 命令不得包含多个执行器，也不得包含 AI 分析结果。
+普通执行器仍使用单个原子 `set` 命令。水枪是唯一允许的复合命令，使用 `operation=target_position` 同时描述目标、二维舵机、水泵、定时和动态会话；它不得携带 AI 分析正文。
 
 ```json
 {
   "schema_version": "1.0",
   "command_id": "c820003f-b6c4-4f6d-a3e3-2194c7c77989",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
+  "site_id": "greenhouse_001",
   "issued_at": 1752220800123,
   "expires_at": 1752220830123,
   "source": "web_manual",
@@ -242,7 +247,7 @@ LWT 离线时发布相同结构，仅 `online=false`、`reason="unexpected_disco
 }
 ```
 
-固定值域：`binary` 只能为 `0` 或 `1`；`percent` 必须为 0 至 100 的整数。允许的 `source` 只有 `web_manual`、`web_automation`、`ai`、`system`。`expires_at - issued_at` 必须在 5 至 300 秒之间，默认 30 秒。
+固定值域：`binary` 只能为 `0` 或 `1`；普通 `percent` 必须为 0 至 100 的整数。允许的 `source` 为 `web_manual`、`web_automation`、`ai`、`edge_voice`、`system`。`expires_at - issued_at` 必须在 5 至 300 秒之间，默认 30 秒。
 
 设备收到命令后必须在 5 秒内发布最终 ACK：
 
@@ -250,7 +255,8 @@ LWT 离线时发布相同结构，仅 `online=false`、`reason="unexpected_disco
 {
   "schema_version": "1.0",
   "command_id": "c820003f-b6c4-4f6d-a3e3-2194c7c77989",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
+  "site_id": "greenhouse_001",
   "acknowledged_at": 1752220800550,
   "state": "executed",
   "command": { "operation": "set", "target": "fan", "value": 1 },
@@ -271,7 +277,20 @@ REST accepted -> QUEUED -> PUBLISHED -> EXECUTED
 任何等待 ACK 超过 expires_at -> TIMED_OUT
 ```
 
-只有 `EXECUTED` 表示硬件已经确认执行。`QUEUED`、`PUBLISHED` 只表示后端接收或 Broker 已接受消息，前端不得显示“已执行”。
+只有 `EXECUTED` 表示设备已写入控制输出且状态机无错误。当前 SG90 和水泵没有位置/流量反馈，因此该状态不表示物理动作经过传感器验证；`feedback_verified=false`。`QUEUED`、`PUBLISHED` 只表示后端接收或 Broker 已接受消息，前端不得显示“已执行”。
+
+### 3.7 水枪复合命令扩展
+
+水枪命令结构、静态/动态模式、定时字段、安全顺序和临时标定以 [ESP32 与后端通信要求](ESP32与后端通信.md) 为准。固定要求如下：
+
+- `operation=target_position`、`target=position`。
+- `position` 包含 `ground_range_mm` 和 `bearing_deg`。
+- `water_gun` 包含 `mode`、`spray_enabled`、`simulation_only`、`pump_control_percent`、`session_id`、`sequence`、`spray_schedule`、`spray_duration_seconds`、`spray_ends_at`。
+- 目标变化时先停泵，舵机稳定后才能开泵。
+- `timed` 由 ESP32 本地单调时钟和后端停止命令双重保护。
+- `dynamic` 使用 `session_id` 和严格递增 `sequence`；设备可见保活中断 3 秒时停泵。
+- `simulation_only=true` 禁止物理输出。
+- 临时坐标和泵功率算法必须标记 `UN_CALIBRATED_PLACEHOLDER`。
 
 ## 4. REST API v1 契约
 
@@ -302,7 +321,7 @@ REST 的 `Telemetry` 与 MQTT 遥测消息使用完全相同的字段。服务�
 
 ```json
 {
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
   "online": true,
   "last_seen_at": 1752220800210,
   "last_telemetry_at": 1752220800000,
@@ -321,7 +340,7 @@ REST 的 `Telemetry` 与 MQTT 遥测消息使用完全相同的字段。服务�
 ```json
 {
   "command_id": "c820003f-b6c4-4f6d-a3e3-2194c7c77989",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
   "state": "PUBLISHED",
   "source": "web_manual",
   "reason": "用户手动开启风机",
@@ -352,7 +371,7 @@ REST 的 `Telemetry` 与 MQTT 遥测消息使用完全相同的字段。服务�
 ### 4.4 下发命令接口
 
 ```http
-POST /api/v1/devices/sensairshuttle_001/commands
+POST /api/v1/devices/greenhouse_001_s3/commands
 Authorization: Bearer <access-token>
 Idempotency-Key: c820003f-b6c4-4f6d-a3e3-2194c7c77989
 Content-Type: application/json
@@ -420,7 +439,7 @@ Authorization: Bearer <access-token>
 ```json
 {
   "analysis_id": "01JZK6WQVN13ZRY9DWE5YZQW5D",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
   "crop": "tomato",
   "risk_level": "low",
   "risk_score": 18,
@@ -443,7 +462,7 @@ Authorization: Bearer <access-token>
 ```json
 {
   "alarm_id": "01JZK6WQVN13ZRY9DWE5YZQW5D",
-  "device_id": "sensairshuttle_001",
+  "device_id": "greenhouse_001_s3",
   "severity": "warning",
   "source": "sensor",
   "code": "HUMIDITY_HIGH",
@@ -489,11 +508,15 @@ Authorization: Bearer <access-token>
 - `COMMAND_EXPIRED`：HTTP 409；MQTT 命令到达时已超过 `expires_at`。
 - `COMMAND_TIMED_OUT`：HTTP 504；后端在时限内未收到最终 ACK。
 - `COMMAND_QUEUE_FULL`：HTTP 503；设备命令队列已满。
+- `DEVICE_TIME_UNSYNCED`：HTTP 409；设备时间未同步，不能启动定时喷水。
+- `TIMED_SPRAY_EXPIRED`：HTTP 409；定时喷水截止时间已经到达。
+- `STALE_TARGET`：HTTP 409；动态会话序号未递增。
+- `TARGET_OUT_OF_RANGE`：HTTP 422；目标超出当前机械或临时标定范围。
 - `MQTT_UNAVAILABLE`：HTTP 503；后端无法连接 Broker。
 - `SENSOR_INVALID`：HTTP 422；传感器读数无效。
 - `INTERNAL_ERROR`：HTTP 500；未分类服务端错误。
 
-设备 ACK 只可使用：`CAPABILITY_UNSUPPORTED`、`ACTUATOR_INTERLOCK`、`COMMAND_EXPIRED`、`COMMAND_QUEUE_FULL`、`SENSOR_INVALID`、`INTERNAL_ERROR`。后端将它们映射为最终 `CommandResource.state=REJECTED`。
+设备 ACK 可使用：`CAPABILITY_UNSUPPORTED`、`ACTUATOR_INTERLOCK`、`COMMAND_EXPIRED`、`COMMAND_QUEUE_FULL`、`DEVICE_TIME_UNSYNCED`、`TIMED_SPRAY_EXPIRED`、`STALE_TARGET`、`TARGET_OUT_OF_RANGE`、`SENSOR_INVALID`、`INTERNAL_ERROR`。后端将它们映射为最终 `CommandResource.state=REJECTED`。
 
 ## 7. 数据库与保留标准
 
@@ -534,7 +557,7 @@ ESP-IDF 的 Wi-Fi、MQTT URI、用户、密码、CA、设备 ID 和执行器 GPI
 
 以下四项全部通过才算 v1 接通：
 
-1. ESP32 发布第 3.4 节遥测后，`GET /api/v1/devices/sensairshuttle_001/latest` 返回同一 `message_id`、相同 `sensors` 嵌套结构和服务端 `received_at`。
+1. ESP32 发布第 3.4 节遥测后，`GET /api/v1/devices/greenhouse_001_s3/latest` 返回同一 `message_id`、相同 `sensors` 嵌套结构和服务端 `received_at`。
 2. 前端用 `POST /commands` 创建 `fan=1` 命令后先收到 `202/PUBLISHED`；设备在 5 秒内发布匹配 `command_id` 的 `executed` ACK；`GET /commands/{command_id}` 最终为 `EXECUTED`。
 3. 对 `grow_light` 发送命令，而 capabilities 中为 `supported=false` 时，服务端返回 `422 CAPABILITY_UNSUPPORTED`，不向 MQTT 主题发布消息。
 4. 设备断网时，status retained 消息为 `online=false`；REST 命令接口返回 `409 DEVICE_OFFLINE`；前端不得更新执行器实际状态。

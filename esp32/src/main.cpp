@@ -1,224 +1,221 @@
 #include <Arduino.h>
-#include "config.h"       // 引入配置 (包含引脚、WiFi 账号、MQTT 信息等)
-#include "wifi_manager.h" 
-#include "mqtt_client.h"  
-#include "sensor_col.h"
-#include "serial_vofa.h"
-#include "LedController.h"
-#include "LightSensorTest.h"
-#include "LightSensor.h"
-#include "TempSensor.h"
-#include "SoilSensor.h"
+
 #include "JW01_CO2.h"
+#include "LedController.h"
+#include "LightSensor.h"
 #include "PanTilt.h"
-//#include "pump.h"
+#include "SoilSensor.h"
+#include "TempSensor.h"
+#include "WaterGunController.h"
+#include "config.h"
+#include "iot_mqtt_client.h"
+#include "wifi_manager.h"
 
-#define LAMP_PIN 14
-#define PUMP_PIN 26
-#define PAN_SERVO_PIN 27
-#define TILT_SERVO_PIN 13
-#define LAMP_PWM_CHANNEL 0
-#define PUMP_PWM_CHANNEL 1
-#define PAN_SERVO_PWM_CHANNEL 2
-#define TILT_SERVO_PWM_CHANNEL 3
+// GPIO 分配来自已确认硬件接线。两个舵机使用独立 5 V 电源并与 ESP32 共地。
+constexpr uint8_t LAMP_PIN = 14;
+constexpr uint8_t PUMP_PIN = 26;
+constexpr uint8_t PAN_SERVO_PIN = 27;
+constexpr uint8_t TILT_SERVO_PIN = 13;
 
-#define ACTUATOR_PWM_FREQ 1000
-#define ACTUATOR_PWM_RES 8
-#define LAMP_MAX_BRIGHTNESS_PERCENT 90
+// ESP32 LEDC 通道不能重复。灯和泵使用 8 位 PWM，SG90 在 PanTilt 内使用 16 位 50 Hz PWM。
+constexpr uint8_t LAMP_PWM_CHANNEL = 0;
+constexpr uint8_t PUMP_PWM_CHANNEL = 1;
+constexpr uint8_t PAN_SERVO_PWM_CHANNEL = 2;
+constexpr uint8_t TILT_SERVO_PWM_CHANNEL = 3;
+constexpr uint16_t LAMP_PWM_FREQUENCY_HZ = 1000;
+constexpr uint8_t ACTUATOR_PWM_RESOLUTION_BITS = 8;
 
-LightSensor lightSensor(34); 
-// 使用 GPIO 34 (支持ADC) 这是光传感器测试
-BH1750 bh1750(0x23);
-// 定义光传感器对象 (假设 ADDR 接 GND, 地址为 0x23)，如果 ADDR 接 VCC，请改为 0x5C
-JW01_CO2 co2Sensor;
-SoilSensor soilSensor(34, 3200, 1400);
-TempSensor tempSensor; //gpio4
+// 传感器对象的构造参数分别是硬件引脚、干燥 ADC 标定值和湿润 ADC 标定值。
+BH1750 bh1750(0x23);                         // I2C 地址 0x23：BH1750 ADDR 引脚接 GND。
+JW01_CO2 co2Sensor;                         // 驱动内部使用项目已配置的 CO2 串口。
+SoilSensor soilSensor(34, 3200, 1400);      // GPIO34；3200=临时干燥值，1400=临时湿润值。
+TempSensor tempSensor;                      // 驱动内部使用 GPIO4 的 DS18B20 总线。
+LedController ledController;                // GPIO12 WS2812 暂时保留，不响应补光灯 MQTT。
 
-//WaterPump myPump(26, 1);// 定义水泵对象，使用 GPIO 26，LEDC 通道 0
-LedController ledController2;// 定义 LED 控制器对象
 PanTilt panTilt(PAN_SERVO_PIN, TILT_SERVO_PIN, PAN_SERVO_PWM_CHANNEL, TILT_SERVO_PWM_CHANNEL);
+WaterGunController waterGunController;
 
-unsigned long previousMillis = 0;
-const long interval = 10000; // 间隔 1000ms
-unsigned long lastLedBlinkTime = 0;
+uint32_t previousTelemetryMs = 0;
+uint32_t lastLedBlinkMs = 0;
+bool statusLedState = false;
+int pumpPercent = 0;
+int growLightPercent = 0;
 
-bool ledState = false;
-
-void applySmartControl(const SmartControlCommand &command)
+/**
+ * 把水泵百分比转换为 ESP32 LEDC 占空比。
+ * @param percent 已限制在 0..100 的实际百分比；0 必须产生关闭电平。
+ * @return 8 位 LEDC duty，范围 0..255。当前驱动高电平有效；常量可支持反相驱动。
+ */
+uint32_t pumpPercentToDuty(int percent)
 {
-   if (command.hasWaterDemand)
-   {
-      ledcWrite(PUMP_PWM_CHANNEL, command.waterPwm);
-   }
+  const uint32_t maxDuty = (1UL << ACTUATOR_PWM_RESOLUTION_BITS) - 1UL;
+  const uint32_t activeDuty = (static_cast<uint32_t>(constrain(percent, 0, 100)) * maxDuty) / 100UL;
+  return SAB_PUMP_ACTIVE_HIGH ? activeDuty : maxDuty - activeDuty;
+}
 
-   if (command.hasLightDemand)
-   {
-      const int limitedBrightness = constrain(command.lightDemand, 0, LAMP_MAX_BRIGHTNESS_PERCENT);
-      const uint8_t lampDuty = static_cast<uint8_t>((limitedBrightness * 255) / LAMP_MAX_BRIGHTNESS_PERCENT);
-      ledcWrite(LAMP_PWM_CHANNEL, lampDuty);
-   }
+/**
+ * 普通水泵命令和水枪状态机唯一允许调用的 GPIO26 写入出口。
+ * @param requestedPercent 协议请求值，0 关闭，非零范围 1..100。
+ * @return 实际应用百分比。临时规则将 1..39 提升到 40，确保达到假定启动功率。
+ *
+ * SAB_PUMP_MIN_RUNNING_PERCENT=40 尚未经过真实水泵测量，日志始终标注 PLACEHOLDER。
+ */
+int applyPumpOutput(int requestedPercent)
+{
+  const int boundedPercent = constrain(requestedPercent, 0, SAB_PUMP_MAX_PERCENT);
+  const int actualPercent = boundedPercent == 0 ? 0 : max(boundedPercent, static_cast<int>(SAB_PUMP_MIN_RUNNING_PERCENT));
+  const uint32_t duty = pumpPercentToDuty(actualPercent);
+  ledcWrite(PUMP_PWM_CHANNEL, duty);
+  pumpPercent = actualPercent;
+  Serial.printf("[PUMP][GPIO_WRITE] pin=%u requested=%d actual=%d duty=%u min_running=%u calibration=PLACEHOLDER\n",
+                PUMP_PIN, requestedPercent, actualPercent, duty, SAB_PUMP_MIN_RUNNING_PERCENT);
+  return actualPercent;
+}
 
-   if (command.hasPanAngle)
-   {
-      panTilt.setPanAngle(command.panAngle);
-   }
+/** MQTT/WiFi 和非法水枪命令共同使用的安全回调；不能留下任何喷水定时器。 */
+void emergencyStopAllActuators()
+{
+  waterGunController.emergencyStop("network_or_command_fail_safe");
+}
 
-   if (command.hasTiltAngle)
-   {
-      panTilt.setTiltAngle(command.tiltAngle);
-   }
+/**
+ * 返回 MQTT telemetry 所需的统一硬件快照。
+ * 补光灯百分比来自 GPIO14 唯一状态；其余状态由 WaterGunController 统一维护。
+ */
+ActuatorState readActuatorState()
+{
+  return waterGunController.snapshot(growLightPercent);
+}
 
-   Serial.printf("[CONTROL] pump=%d lamp=%d pan=%d tilt=%d\n",
-                 command.hasWaterDemand ? command.waterPwm : -1,
-                 command.hasLightDemand ? constrain(command.lightDemand, 0, LAMP_MAX_BRIGHTNESS_PERCENT) : -1,
-                 panTilt.getPanAngle(), panTilt.getTiltAngle());
+/**
+ * MQTT 命令进入应用层后的唯一分发入口。
+ * @param command 已完成设备 ID、时间、来源、结构和值域校验的命令。
+ * @param actualValue 同步命令写入真实值；异步水枪命令完成时由状态机提供。
+ * @param errorCode 拒绝时返回稳定错误码；成功或 Pending 时设为 nullptr。
+ */
+IotCommandResult applyIotCommand(const IotCommand &command, int &actualValue, const char *&errorCode)
+{
+  errorCode = nullptr;
+
+  if (command.kind == IotCommandKind::SetActuator && command.target == IotCommandTarget::GrowLight)
+  {
+    growLightPercent = constrain(command.value, 0, SAB_GROW_LIGHT_MAX_PERCENT);
+    // grow_light 的单位是真实百分比，因此 90 映射到约 90% duty，而不是满占空比。
+    const uint8_t lampDuty = static_cast<uint8_t>((growLightPercent * 255UL) / 100UL);
+    ledcWrite(LAMP_PWM_CHANNEL, lampDuty);
+    actualValue = growLightPercent;
+    Serial.printf("[LAMP][GPIO_WRITE] pin=%u requested=%d actual=%d duty=%u\n",
+                  LAMP_PIN, command.value, growLightPercent, lampDuty);
+    return IotCommandResult::Executed;
+  }
+
+  // pump、pan、tilt 和 target_position 都交给同一控制器，保证停泵优先和状态一致。
+  return waterGunController.handleCommand(command, actualValue, errorCode);
+}
+
+/** 初始化执行器。顺序固定为配置 PWM、绑定 GPIO、写安全关闭值、再启动舵机。 */
+void initializeActuators()
+{
+  ledcSetup(LAMP_PWM_CHANNEL, LAMP_PWM_FREQUENCY_HZ, ACTUATOR_PWM_RESOLUTION_BITS);
+  ledcSetup(PUMP_PWM_CHANNEL, SAB_PUMP_PWM_FREQUENCY_HZ, ACTUATOR_PWM_RESOLUTION_BITS);
+  ledcAttachPin(LAMP_PIN, LAMP_PWM_CHANNEL);
+  ledcAttachPin(PUMP_PIN, PUMP_PWM_CHANNEL);
+
+  ledcWrite(LAMP_PWM_CHANNEL, 0);
+  growLightPercent = 0;
+  applyPumpOutput(0);
+
+  panTilt.begin(90, 90);
+  waterGunController.begin(panTilt, applyPumpOutput);
+  Serial.println("[ACTUATOR][INIT] lamp=0 pump=0 pan=90 tilt=90 calibration=UN_CALIBRATED_PLACEHOLDER");
+}
+
+/** 初始化传感器；失败只影响对应遥测，不允许绕过执行器的安全初始状态。 */
+void initializeSensors()
+{
+  if (bh1750.begin(CONTINUOUS_HIGH_RES))
+  {
+    Serial.println("[SENSOR][INIT_OK] name=BH1750 address=0x23 mode=continuous_high_res");
+  }
+  else
+  {
+    Serial.println("[SENSOR][INIT_FAIL] name=BH1750 address=0x23");
+  }
+
+  soilSensor.begin();
+  tempSensor.begin();
+  co2Sensor.begin();
+  ledController.begin();
+  Serial.println("[SENSOR][INIT_DONE] soil_gpio=34 temperature_gpio=4 co2=enabled ws2812=retained");
 }
 
 void setup()
 {
-   Serial.begin(115200);
-   delay(1000);
-   Serial.println("\n==========================================");
-   Serial.println("ESP32 模块化工程启动");
-   Serial.println("==========================================");
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n[BOOT][START] target=esp32 protocol_device_id=" SAB_DEVICE_ID " site_id=" SAB_SITE_ID);
+  Serial.println("[BOOT][NOTICE] protocol name contains _s3 but physical chip and PlatformIO target are ordinary ESP32");
 
-   pinMode(LED_PIN, OUTPUT); // 2. 硬件初始化
-   digitalWrite(LED_PIN, LOW);
-   Serial.println("[硬件] LED 引脚初始化完成");
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
-   //myPump.begin();
-   Serial.println("系统启动完成");
+  // 先建立硬件安全状态和回调，再启动网络，确保启动期间收到命令也不会越过控制器。
+  initializeActuators();
+  initializeSensors();
+  set_iot_command_handler(applyIotCommand);
+  set_actuator_state_provider(readActuatorState);
+  set_safety_stop_handler(emergencyStopAllActuators);
 
-   Serial.println("[系统] 正在连接 WiFi...");
-   init_wifi();
-   if (is_wifi_connected())
-   {
-      Serial.println("[系统] 正在初始化 MQTT...");
-      init_mqtt();
-      Serial.println("[系统]所有模块初始化完成，进入主循环...");
-      digitalWrite(LED_PIN, HIGH); // 初始化成功，LED 常亮表示就绪
-   }
-   else
-   {
-      Serial.println("[系统]WiFi 连接失败，将在主循环中重试...");
-   }
-
-
-
-   lightSensor.begin();//这是光敏传感器测试初始化
-   Serial.println("✅ 光敏测试传感器 初始化成功！");
-
-   //Serial.println("正在初始化 BH1750...");
-   // 调用 begin，传入模式，这里用连续测量，分辨率 1 Lux，测量时间约 120ms
-   if (bh1750.begin(CONTINUOUS_HIGH_RES))
-   {
-      Serial.println("✅ BH1750 初始化成功！");
-   }
-   else
-   {
-      Serial.println("❌ BH1750 初始化失败");
-   }
-
-   //Serial.println("✅ 土壤湿度传感器 初始化成功！");
-   soilSensor.begin();
-   tempSensor.begin();
-   Serial.println("[System] DS18B20 init done");
-   Serial.println("✅ 土壤湿度传感器 初始化成功！");
-   //Serial.println("--------------------------------");
-
-   co2Sensor.begin();
-   Serial.println("✅ JW01 CO2 传感器初始化成功！");
-
-   ledController2.begin();
-   Serial.println("✅ LED 灯初始化成功！");
-
-   // pinMode(26, OUTPUT);
-   // digitalWrite(26, HIGH);
-   // pinMode(14, OUTPUT);
-   // digitalWrite(14, HIGH);
-   ledcSetup(LAMP_PWM_CHANNEL, ACTUATOR_PWM_FREQ, ACTUATOR_PWM_RES);
-   ledcSetup(PUMP_PWM_CHANNEL, ACTUATOR_PWM_FREQ, ACTUATOR_PWM_RES);
-
-   ledcAttachPin(LAMP_PIN, LAMP_PWM_CHANNEL);
-   ledcAttachPin(PUMP_PIN, PUMP_PWM_CHANNEL);
-   
-
-   ledcWrite(LAMP_PWM_CHANNEL, 0);
-   ledcWrite(PUMP_PWM_CHANNEL, 0);
-   panTilt.begin(90, 90);
-   Serial.println("✅ 二维 SG90 云台初始化成功：pan=90°, tilt=90°");
-   set_smart_control_handler(applySmartControl);
+  Serial.println("[BOOT][WIFI] stage=connect_start");
+  init_wifi();
+  Serial.println("[BOOT][MQTT] stage=init_qos1_persistent_session");
+  init_mqtt();
+  Serial.println("[BOOT][READY] main_loop=network,mqtt,safety_state_machine,sensors,telemetry");
 }
 
- void loop() {
-    unsigned long currentMillis = millis();
+void loop()
+{
+  const uint32_t now = millis();
 
-    if (!is_wifi_connected())
+  // 阶段 1：网络安全。WiFi 断开先请求 MQTT/水枪安全停止，再进行重连。
+  if (!is_wifi_connected())
+  {
+    mqtt_notify_wifi_disconnected();
+    mqtt_loop(); // 立即在主循环执行停泵，不能等 WiFi 重连成功后才处理。
+
+    if (now - lastLedBlinkMs >= 200U)
     {
-       // 注意：如果 init_wifi 是阻塞的，这里会暂停其他逻辑。
-       Serial.print(".");
-       init_wifi();
-
-       if (millis() - previousMillis > 200)
-       { // 重连期间，快速闪烁 LED 表示正在重试
-          lastLedBlinkTime = millis();
-          ledState = !ledState;
-          digitalWrite(LED_PIN, ledState);
-       }
-       // 如果 WiFi 没连上，就不执行后面的 MQTT 逻辑，直接返回下一轮循环
-       return;
+      lastLedBlinkMs = now;
+      statusLedState = !statusLedState;
+      digitalWrite(LED_PIN, statusLedState);
     }
-    else
-    {
-       // WiFi 已连接，确保 LED 常亮 (如果没有其他任务在占用 LED)
-       if (digitalRead(LED_PIN) != HIGH && millis() - lastLedBlinkTime > 1000)
-       {
-          digitalWrite(LED_PIN, HIGH);
-       }
-    }
+    init_wifi();
+    return;
+  }
 
+  if (digitalRead(LED_PIN) != HIGH && now - lastLedBlinkMs > 1000U)
+  {
+    digitalWrite(LED_PIN, HIGH);
+    statusLedState = true;
+  }
 
-    mqtt_loop(); //维护 MQTT 连接与消息处理
+  // 阶段 2：MQTT。处理连接事件、QoS 1 收包、JSON 校验和命令分发，不直接 delay。
+  mqtt_loop();
 
+  // 阶段 3：执行器安全状态机。推进 800 ms 稳定等待、定时截止和动态 3 秒超时。
+  waterGunController.update();
 
-    lightSensor.update(); //这是光敏传感器测试更新数据
-    soilSensor.update();//更新土壤湿度传感器数据
-    co2Sensor.update();//更新 CO2 传感器数据
+  // 阶段 4：传感器采集。各驱动内部决定非阻塞采样周期，主循环只推进状态。
+  soilSensor.update();
+  co2Sensor.update();
+  tempSensor.update();
+  ledController.update();
 
-    //ledController2.update(); // 刷新 LED 显示，保持状态
-
-    tempSensor.update();
-
-    if (millis() - previousMillis >= SEND_INTERVAL_MS)
-    {                          // 发送传感器数据
-       previousMillis = millis(); // 更新计时器
-
-       // 双重检查：确保 MQTT 也连接正常再发送
-       // 虽然 mqtt_loop 会处理重连，但显式检查可以避免不必要的发布尝试
-       // 注意：这里不直接调用 mqttClient.connected() 以避免依赖全局变量细节，
-       // 依靠 send_sensor_data 内部的连接检查即可。
-       Serial.println("\n[定时任务] 这是传感器的数据");
-       send_sensor_data(&soilSensor, &bh1750, &tempSensor, &co2Sensor);
-    }
-
-
-    //这里是串口打印传感器数据测试
-    if (currentMillis - previousMillis >= interval)
-    {
-       //previousMillis = currentMillis;
-       //LightSensorTest_Print(&lightSensor);//这是光照传感器测试
-       //printBH1750Data(&bh1750); // 打印 BH1750 传感器数据
-       //readSoilMoisture(&soilSensor);//打印土壤湿度传感器数据
-       //printCO2Status(co2Sensor);
-    }
-
-    ledController2.update();
-    //callback_led(&bh1750, &ledController2, char *topic, byte *payload, unsigned int length);
-   //  if (strcmp(topic, TOPIC_CONTROL) == 0)
-   //  {
-   //     callback_led(&bh1750, &ledController2, topic, payload, length);
-   //  }
-    
-   // myPump.setSpeed(80);
- } 
-
+  // 阶段 5：遥测。使用独立计时基准，发送传感器与统一执行器状态的 QoS 1 快照。
+  if (now - previousTelemetryMs >= SEND_INTERVAL_MS)
+  {
+    previousTelemetryMs = now;
+    Serial.printf("[TELEMETRY][SCHEDULE] interval_ms=%u\n", SEND_INTERVAL_MS);
+    send_sensor_data(&soilSensor, &bh1750, &tempSensor, &co2Sensor);
+  }
+}

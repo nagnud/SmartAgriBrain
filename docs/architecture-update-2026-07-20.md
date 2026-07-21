@@ -43,7 +43,7 @@ SmartAgriBrain/
 
 ## 3. `esp32/` 工程已确认内容
 
-该目录是 Arduino 框架的 PlatformIO 工程，环境名为 `esp32dev`，串口监视器为 115200，使用 Wi-Fi、PubSubClient、OneWire、DallasTemperature、FastLED 和 ArduinoJson。
+该目录是 Arduino 框架的 PlatformIO 工程，环境名为 `esp32dev`，串口监视器为 115200，使用 Wi-Fi、ESP-IDF MQTT、OneWire、DallasTemperature、FastLED 和 ArduinoJson。MQTT 已使用 QoS 1 持久会话，不再依赖 PubSubClient。
 
 已接入并在主循环中更新的采集对象：
 

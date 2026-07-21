@@ -7,14 +7,24 @@
 #include <Arduino.h>
 #include "config.h"       // 1. 引入配置 (包含引脚、WiFi 账号、MQTT 信息等)
 #include "wifi_manager.h" // 2. 引入 WiFi 模块 (需包含 init_wifi, is_wifi_connected)
-#include "mqtt_client.h"  // 3. 引入 MQTT 模块 (需包含 init_mqtt, mqtt_loop, send_sensor_data)
+#include "iot_mqtt_client.h"  // MQTT 模块：初始化、循环维护和传感器上报接口。
 #include "sensor_col.h"
 #include "serial_vofa.h"
+#include "LightSensor.h"
+#include "SoilSensor.h"
+#include "TempSensor.h"
+#include "JW01_CO2.h"
 
 // --- 虚拟传感器相关 ---
 unsigned long lastMsgTime = 0;
 unsigned long lastLedBlinkTime = 0;
 bool ledState = false;
+
+// 本测试使用与正式程序相同的传感器构造参数，确保 send_sensor_data 的接口真实可编译。
+BH1750 testBh1750(0x23);
+SoilSensor testSoilSensor(34, 3200, 1400);
+TempSensor testTempSensor;
+JW01_CO2 testCo2Sensor;
 
 void setup_TestMqtt(){
 
@@ -29,6 +39,11 @@ void setup_TestMqtt(){
     Serial.println("[硬件] LED 引脚初始化完成");
 
     wave_init(); // 初始化波形(模拟数据)
+
+    testBh1750.begin(CONTINUOUS_HIGH_RES);
+    testSoilSensor.begin();
+    testTempSensor.begin();
+    testCo2Sensor.begin();
 
     Serial.println("[系统] 正在连接 WiFi...");
     init_wifi();
@@ -52,6 +67,8 @@ void loop_TestMqtt(){
     wave_loop();
     if (!is_wifi_connected())
     {
+        mqtt_notify_wifi_disconnected();
+        mqtt_loop(); // 在重连前执行网络安全事件，保持与正式主循环顺序一致。
         // 注意：如果 init_wifi 是阻塞的，这里会暂停其他逻辑。
         // 最佳实践是在 wifi_manager 中提供一个非阻塞的 wifi_loop() 或 reconnect_wifi()
         Serial.print(".");
@@ -86,6 +103,6 @@ void loop_TestMqtt(){
         // 注意：这里不直接调用 mqttClient.connected() 以避免依赖全局变量细节，
         // 依靠 send_sensor_data 内部的连接检查即可。
         Serial.println("\n[定时任务] 这是传感器的模拟数据");
-        send_sensor_data();
+        send_sensor_data(&testSoilSensor, &testBh1750, &testTempSensor, &testCo2Sensor);
     }
 }

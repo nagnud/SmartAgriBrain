@@ -24,6 +24,7 @@ ESP32 部分承担整个项目的边缘节点角色，是硬件层和云端/应�
 - `include/`：集中存放 WiFi、MQTT、主题、引脚、发送周期等配置。
 - `lib/wifi/`：WiFi 连接与状态检查模块。
 - `lib/mqtt/`：MQTT 安全连接、发布、订阅、回调和重连模块。
+- `lib/WaterGun/`：普通水泵与水枪共用的非阻塞状态机，负责转向、稳定等待、定时和动态安全停止。
 - `lib/BH1750/`：BH1750 光照传感器驱动。
 - `lib/SoilSensor/`：土壤湿度模拟量采集与滤波模块。
 - `lib/ds18b20/`：DS18B20 温度传感器模块。
@@ -55,7 +56,7 @@ ESP32 部分承担整个项目的边缘节点角色，是硬件层和云端/应�
 
 简述：本工程使用 PlatformIO 管理 ESP32 编译、依赖和工程结构。
 
-详细说明：PlatformIO 负责定义开发板型号、编译框架、依赖库、串口监视速率和上传参数。相比 Arduino IDE 的单文件开发方式，PlatformIO 更适合多人协作和工程化管理。本项目在 `platformio.ini` 中指定了 `esp32dev` 开发板、Arduino 框架以及 PubSubClient、OneWire、DallasTemperature、FastLED、ArduinoJson 等依赖库。这使得工程可以清晰复现构建环境，也方便后续迁移到其他电脑或交付给队友继续开发。Arduino 框架则降低了 ESP32 硬件操作门槛，让 WiFi、串口、GPIO、I2C、ADC 和 PWM 等功能可以用较直接的方式实现。
+详细说明：PlatformIO 负责定义开发板型号、编译框架、依赖库、串口监视速率和上传参数。本项目指定普通 `esp32dev` 开发板和 Arduino 框架，并复用框架内置 ESP-IDF MQTT 组件实现 QoS 1 发布、持久会话和 PUBACK；传感器与数据依赖包括 OneWire、DallasTemperature、FastLED、ArduinoJson 等。协议名称 `greenhouse_001_s3` 中的 `_s3` 不代表芯片型号，不能据此更改编译目标。
 
 ### 5.2 模块化代码组织
 
@@ -73,7 +74,7 @@ ESP32 部分承担整个项目的边缘节点角色，是硬件层和云端/应�
 
 简述：ESP32 使用 MQTT 将传感器数据上传到服务器，并接收控制指令。
 
-详细说明：MQTT 是本项目连接硬件端和上层平台的核心协议。ESP32 将采集到的数据发布到传感器数据主题，上层系统、dayu200 或调试客户端订阅该主题后即可获得实时环境数据。同时 ESP32 订阅控制主题，接收类似开灯、关灯、闪烁等控制指令。MQTT 的优势是轻量、适合物联网设备、主题结构清晰，并且可以让多个客户端同时订阅同一类数据。对整个项目而言，MQTT 主题就是软硬件之间的数据契约：ESP32 负责稳定发布，上层系统负责正确订阅和解析。
+详细说明：MQTT 是本项目连接硬件端和后端的核心协议。ESP32 订阅自身 `command`，发布 `command_ack`、`telemetry`、`status` 和 `capabilities`，全部使用 QoS 1。网络任务只负责收包入队，Arduino 主循环负责校验和分发；普通执行器使用原子 `set`，水枪使用复合 `target_position`。设备通过命令有效期、动态序号、内容指纹和 ACK 缓存抵御 QoS 1 重复投递。
 
 ### 5.5 MQTT over TLS 安全连接
 
