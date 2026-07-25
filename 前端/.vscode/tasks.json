@@ -1,0 +1,83 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SmartAgri: Check environment",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\check-environment.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Start full stack",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\start-full-stack.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Stop full stack",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\stop-full-stack.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Verify Web and API",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\build-all.ps1", "-SkipEsp32", "-SkipC5"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Build all available targets",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\build-all.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Build C5",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\build-c5.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Build ESP32",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\build-esp32.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Flash C5 (COM5)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\flash-c5.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Monitor C5 (COM5)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\monitor-c5.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Flash ESP32 (auto-detect)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\flash-esp32.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartAgri: Monitor ESP32 (auto-detect)",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\dev\\monitor-esp32.ps1"],
+      "problemMatcher": []
+    }
+  ]
+}
