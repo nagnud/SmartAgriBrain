@@ -3,10 +3,9 @@
 
 #include <Arduino.h>
 
+#include "Dht11Sensor.h"
 #include "JW01_CO2.h"
 #include "LightSensor.h"
-#include "SoilSensor.h"
-#include "TempSensor.h"
 #include "iot_contract.h"
 
 /** MQTT 命令的业务类型。普通执行器使用 SetActuator；水枪使用 TargetPosition。 */
@@ -19,10 +18,7 @@ enum class IotCommandKind : uint8_t
 /** 普通 set 命令的目标。Position 只用于复合水枪命令，不直接代表一个 GPIO。 */
 enum class IotCommandTarget : uint8_t
 {
-  Pump,
   GrowLight,
-  Pan,
-  Tilt,
   Position,
   Unknown,
 };
@@ -50,12 +46,7 @@ enum class SpraySchedule : uint8_t
 struct IotCommand
 {
   String commandId;                 // UUID v4 或仅含十进制数字的非空字符串，作为幂等键。
-  String deviceId;                  // 必须等于 SAB_DEVICE_ID，否则报文不能驱动硬件。
-  String siteId;                    // 可选站点字段；出现时必须等于 SAB_SITE_ID。
-  String source;                    // web_manual/web_automation/ai/edge_voice/system。
-  String reason;                    // 后端给出的可读原因，只用于日志和审计，不参与控制判断。
-  uint64_t issuedAt = 0;            // 命令创建时间，Unix Epoch 毫秒。
-  uint64_t expiresAt = 0;           // 命令失效时间，必须晚于 issuedAt 且 TTL 为 5..300 秒。
+  uint64_t expiresAt = 0;           // 命令绝对失效时间；接收时必须在未来 300 秒以内。
   uint32_t fingerprint = 0;         // 原始 JSON 的 FNV-1a 指纹，用于检测同 ID 不同内容。
 
   IotCommandKind kind = IotCommandKind::SetActuator;
@@ -63,10 +54,9 @@ struct IotCommand
   int value = 0;                    // 普通 set 值；水枪命令固定为 1，仅保留用于协议回显。
 
   float groundRangeMm = 0.0F;       // 水枪原点到目标地面点的水平距离，临时允许 300..1200 mm。
-  float bearingDeg = 0.0F;          // 目标方向角，临时允许 -45..45 deg，0 表示正前方。
+  float bearingDeg = 0.0F;          // 目标方向角，允许 -90..90 deg，0 表示正前方。
   WaterGunMode waterGunMode = WaterGunMode::Static;
   bool sprayEnabled = false;        // false 表示有效命令完成基础校验后必须优先停泵。
-  bool simulationOnly = true;       // true 时禁止写舵机和水泵，仅验证协议并返回 ACK。
   float pumpControlPercent = 0.0F;  // 后端临时目标百分比；设备四舍五入并应用最小 40%。
   String sessionId;                 // Dynamic 必填；Static 必须为空字符串。
   uint32_t sequence = 0;            // 同一动态会话严格递增，用于拒绝乱序和 QoS 1 重发。
@@ -83,7 +73,7 @@ struct ActuatorState
   int pumpPercent = 0;
   int growLightPercent = 0;
   int panAngleDeg = 90;
-  int tiltAngleDeg = 90;
+  int tiltAngleDeg = SAB_TILT_MECHANICAL_MIN_DEG;
   bool waterGunActive = false;
   bool waterGunTimed = false;
   bool waterGunDynamic = false;
@@ -131,7 +121,13 @@ void set_safety_stop_handler(SafetyStopHandler handler);
  */
 void mqtt_complete_command(const IotCommand &command, bool executed, int actualValue, const char *errorCode);
 
-/** 发布一次 QoS 1 遥测快照；传入的四个指针必须指向已初始化传感器实例。 */
-void send_sensor_data(SoilSensor *soilSensor, BH1750 *bh1750, TempSensor *tempSensor, JW01_CO2 *co2Sensor);
+/**
+ * Publish one QoS 1 telemetry snapshot.
+ *
+ * @param dht11Sensor Initialized GPIO4 DHT11 source for temperature_c and humidity_pct.
+ * @param bh1750 Initialized BH1750 source for illuminance_lux.
+ * @param co2Sensor Initialized JW01 source for co2_ppm.
+ */
+void send_sensor_data(Dht11Sensor *dht11Sensor, BH1750 *bh1750, JW01_CO2 *co2Sensor);
 
 #endif

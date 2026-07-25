@@ -11,8 +11,7 @@
 #include "sensor_col.h"
 #include "serial_vofa.h"
 #include "LightSensor.h"
-#include "SoilSensor.h"
-#include "TempSensor.h"
+#include "Dht11Sensor.h"
 #include "JW01_CO2.h"
 
 // --- 虚拟传感器相关 ---
@@ -22,8 +21,7 @@ bool ledState = false;
 
 // 本测试使用与正式程序相同的传感器构造参数，确保 send_sensor_data 的接口真实可编译。
 BH1750 testBh1750(0x23);
-SoilSensor testSoilSensor(34, 3200, 1400);
-TempSensor testTempSensor;
+Dht11Sensor mqttTestDht11Sensor(4);
 JW01_CO2 testCo2Sensor;
 
 void setup_TestMqtt(){
@@ -41,8 +39,7 @@ void setup_TestMqtt(){
     wave_init(); // 初始化波形(模拟数据)
 
     testBh1750.begin(CONTINUOUS_HIGH_RES);
-    testSoilSensor.begin();
-    testTempSensor.begin();
+    mqttTestDht11Sensor.begin();
     testCo2Sensor.begin();
 
     Serial.println("[系统] 正在连接 WiFi...");
@@ -93,6 +90,8 @@ void loop_TestMqtt(){
     }
 
     mqtt_loop(); // --- 2. 维护 MQTT 连接与消息处理 ---内部已包含非阻塞重连逻辑和 callback 处理
+    // update() 自行限制为至少 2 秒采样一次；每轮调用不会阻塞等待采样周期。
+    mqttTestDht11Sensor.update();
 
     if (millis() - lastMsgTime >= SEND_INTERVAL_MS)
     {                           // 发送传感器数据
@@ -103,6 +102,6 @@ void loop_TestMqtt(){
         // 注意：这里不直接调用 mqttClient.connected() 以避免依赖全局变量细节，
         // 依靠 send_sensor_data 内部的连接检查即可。
         Serial.println("\n[定时任务] 这是传感器的模拟数据");
-        send_sensor_data(&testSoilSensor, &testBh1750, &testTempSensor, &testCo2Sensor);
+        send_sensor_data(&mqttTestDht11Sensor, &testBh1750, &testCo2Sensor);
     }
 }

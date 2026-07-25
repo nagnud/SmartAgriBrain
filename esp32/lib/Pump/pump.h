@@ -3,7 +3,6 @@
 
 #include "Arduino.h"
 #include "driver/ledc.h"
-#include "SoilSensor.h"
 
 
 class WaterPump
@@ -31,6 +30,6 @@ public:
 
 };
 
-void callback_pump(SoilSensor *soilSensor, WaterPump *waterPump, char *topic, byte *payload, unsigned int length);
+void callback_pump(WaterPump *waterPump, char *topic, byte *payload, unsigned int length);
 
 #endif

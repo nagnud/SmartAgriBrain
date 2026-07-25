@@ -3,10 +3,7 @@
 
 #include <Arduino.h>
 #include <FastLED.h>
-#include "SoilSensor.h"
 #include "LightSensor.h"
-#include "TempSensor.h"
-#include "JW01_CO2.h"
 
 // 定义硬件引脚和灯珠数量
 #define LED_PIN12 12      // 连接 ESP32 的 GPIO 12

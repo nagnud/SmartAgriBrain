@@ -40,7 +40,8 @@ bool WaterGunController::deadlineReached(uint32_t nowMs, uint32_t deadlineMs)
 
 int WaterGunController::mapBearingToPan(float bearingDeg)
 {
-  // 虚拟保守标定：-45..45 deg 只使用 SG90 中间的 60..120 deg，避开机械端点。
+  // Web 方向角完整覆盖左 90 度到右 90 度，并线性使用 SG90 的 0..180 度命令范围。
+  // 脉宽仍由 PanTilt 的 500..2500 us 临时标定产生，实体安装方向和机械端点必须断泵验收。
   return static_cast<int>(lroundf(mapLinear(
       bearingDeg,
       SAB_PLACEHOLDER_BEARING_MIN_DEG,
@@ -51,22 +52,15 @@ int WaterGunController::mapBearingToPan(float bearingDeg)
 
 int WaterGunController::mapRangeToTilt(float rangeMm)
 {
-  // 虚拟分段标定点：300->110、750->90、1200->70。它只能验证流程，不能证明命中目标。
-  if (rangeMm <= SAB_PLACEHOLDER_RANGE_MID_MM)
-  {
-    return static_cast<int>(lroundf(mapLinear(
-        rangeMm,
-        static_cast<float>(SAB_PLACEHOLDER_RANGE_MIN_MM),
-        static_cast<float>(SAB_PLACEHOLDER_RANGE_MID_MM),
-        static_cast<float>(SAB_PLACEHOLDER_TILT_NEAR_DEG),
-        static_cast<float>(SAB_PLACEHOLDER_TILT_MID_DEG))));
-  }
+  // 实体垂直机构只允许 5..60 度：60 度竖直向上，用于最近目标；5 度平行向前，
+  // 用于最远目标。300..1200 mm 之间采用单段线性插值，每增加 100 mm，
+  // 垂直舵机命令约降低 6.11 度。该线性关系尚未包含水压、重力和喷嘴轨迹误差。
   return static_cast<int>(lroundf(mapLinear(
       rangeMm,
-      static_cast<float>(SAB_PLACEHOLDER_RANGE_MID_MM),
+      static_cast<float>(SAB_PLACEHOLDER_RANGE_MIN_MM),
       static_cast<float>(SAB_PLACEHOLDER_RANGE_MAX_MM),
-      static_cast<float>(SAB_PLACEHOLDER_TILT_MID_DEG),
-      static_cast<float>(SAB_PLACEHOLDER_TILT_FAR_DEG))));
+      static_cast<float>(SAB_TILT_NEAR_DEG),
+      static_cast<float>(SAB_TILT_FAR_DEG))));
 }
 
 bool WaterGunController::targetChanged(const IotCommand &command) const
@@ -175,7 +169,25 @@ IotCommandResult WaterGunController::applyAfterServoReady(
 
   if (!command.sprayEnabled)
   {
-    clearSprayProtection();
+    // 动态跟踪允许“只移动、不喷水”。此时必须保留 session_id 和最后序号，
+    // 否则延迟到达的旧 MQTT 目标会因序号状态被清零而重新通过校验，驱动舵机回跳。
+    timedDeadlineActive = false;
+    timedDeadlineMs = 0;
+    timedEndsAtEpochMs = 0;
+    if (command.waterGunMode == WaterGunMode::Dynamic)
+    {
+      dynamicSessionActive = true;
+      dynamicSessionId = command.sessionId;
+      lastDynamicSequence = command.sequence;
+      lastDynamicCommandMs = millis();
+    }
+    else
+    {
+      dynamicSessionActive = false;
+      dynamicSessionId = "";
+      lastDynamicSequence = 0;
+      lastDynamicCommandMs = 0;
+    }
     actualValue = writePump(0, "validated_stop_command");
     return IotCommandResult::Executed;
   }
@@ -223,38 +235,6 @@ IotCommandResult WaterGunController::handleCommand(
 
   if (command.kind == IotCommandKind::SetActuator)
   {
-    if (command.target == IotCommandTarget::Pump)
-    {
-      cancelPendingCommand("ACTUATOR_INTERLOCK");
-      clearSprayProtection();
-      actualValue = writePump(command.value, "direct_pump_command");
-      return IotCommandResult::Executed;
-    }
-    if (command.target == IotCommandTarget::Pan || command.target == IotCommandTarget::Tilt)
-    {
-      cancelPendingCommand("ACTUATOR_INTERLOCK");
-      clearSprayProtection();
-      writePump(0, "manual_servo_command");
-      if (panTilt == nullptr)
-      {
-        errorCode = "INTERNAL_ERROR";
-        return IotCommandResult::Rejected;
-      }
-      if (command.target == IotCommandTarget::Pan)
-      {
-        panTilt->setPanAngle(command.value);
-        actualValue = panTilt->getPanAngle();
-      }
-      else
-      {
-        panTilt->setTiltAngle(command.value);
-        actualValue = panTilt->getTiltAngle();
-      }
-      targetKnown = false; // 手动角度破坏了距离/方向映射状态，下一条水枪目标必须重新定位。
-      Serial.printf("[WATER_GUN][MANUAL_SERVO] target=%s requested=%d actual=%d pump=0\n",
-                    command.target == IotCommandTarget::Pan ? "pan" : "tilt", command.value, actualValue);
-      return IotCommandResult::Executed;
-    }
     errorCode = "CAPABILITY_UNSUPPORTED";
     return IotCommandResult::Rejected;
   }
@@ -269,18 +249,11 @@ IotCommandResult WaterGunController::handleCommand(
     return IotCommandResult::Rejected;
   }
 
-  // simulation_only 只验证协议，不写舵机或水泵；ACK actual_value 固定为当前真实泵输出。
-  if (command.simulationOnly)
-  {
-    Serial.printf("[WATER_GUN][SIMULATION] command_id=%s action=no_physical_output\n", command.commandId.c_str());
-    actualValue = currentPumpPercent;
-    return IotCommandResult::Executed;
-  }
-
   const bool changed = targetChanged(command);
-  // 即使新命令目标相同，只要上一条命令仍处于舵机稳定等待，就不能走“目标未变化”快路径。
-  // 重新开始完整等待可以防止 QoS 1 重排或前端快速更新绕过“稳定后开泵”的硬安全顺序。
+  // 记录原稳定截止时间。动态保活可能在前一命令的 800 ms 稳定等待期间到达；
+  // 相同目标只替换待完成命令，既不能提前开泵，也不能重复写两个舵机。
   const bool servoWasStillSettling = pendingCommandUsed && stage == Stage::WaitingForServo;
+  const uint32_t existingServoReadyAtMs = servoReadyAtMs;
   if (pendingCommandUsed)
   {
     cancelPendingCommand("ACTUATOR_INTERLOCK");
@@ -294,8 +267,22 @@ IotCommandResult WaterGunController::handleCommand(
     lastDynamicCommandMs = millis();
   }
 
-  if (!changed && !servoWasStillSettling)
+  if (!changed)
   {
+    if (servoWasStillSettling && command.sprayEnabled)
+    {
+      // 保留第一次目标变化建立的稳定截止时间。最新动态命令接管最终 ACK 和开泵决策，
+      // 但相同 pan/tilt 不再次调用 ledcWrite，避免舵机因保活或命令突发重复动作。
+      pendingCommand = command;
+      pendingCommandUsed = true;
+      servoReadyAtMs = existingServoReadyAtMs;
+      stage = Stage::WaitingForServo;
+      Serial.printf("[WATER_GUN][TARGET_UNCHANGED_PENDING] command_id=%s sequence=%u action=keep_servo_deadline no_pwm_rewrite=1\n",
+                    command.commandId.c_str(), command.sequence);
+      return IotCommandResult::Pending;
+    }
+
+    // 关闭喷水命令不需要等待；取消旧待执行命令后立即维持泵关闭。
     Serial.printf("[WATER_GUN][TARGET_UNCHANGED] command_id=%s sequence=%u action=skip_servo_wait\n",
                   command.commandId.c_str(), command.sequence);
     return applyAfterServoReady(command, actualValue, errorCode);
@@ -376,7 +363,7 @@ ActuatorState WaterGunController::snapshot(int growLightPercent) const
   state.pumpPercent = currentPumpPercent;
   state.growLightPercent = growLightPercent;
   state.panAngleDeg = panTilt == nullptr ? 90 : panTilt->getPanAngle();
-  state.tiltAngleDeg = panTilt == nullptr ? 90 : panTilt->getTiltAngle();
+  state.tiltAngleDeg = panTilt == nullptr ? SAB_TILT_MECHANICAL_MIN_DEG : panTilt->getTiltAngle();
   state.waterGunActive = currentPumpPercent > 0;
   state.waterGunTimed = timedDeadlineActive;
   state.waterGunDynamic = dynamicSessionActive;

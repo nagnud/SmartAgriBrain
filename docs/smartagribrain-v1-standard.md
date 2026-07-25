@@ -1,6 +1,8 @@
 # SmartAgriBrain v1 统一通信与数据标准
 
-本文件是 SmartAgriBrain 采集 ESP32、云端服务和 Web 前端的 MQTT/REST 契约。2026-07-20 起，ESP32-C5 改为语音与显示终端，不再承担本文件中的传感器 MQTT 发布和执行器控制职责；最新设备分工见 [当前架构与目录状态](architecture-update-2026-07-20.md)。除本文件明确保留为部署配置的主机地址、账号和密钥外，字段名、单位、主题、路径、状态、返回结构和错误码必须完全一致。
+本文件是 SmartAgriBrain 采集 ESP32、云端服务和 Web 前端的 MQTT/REST 目标契约，最后同步于 2026-07-23。2026-07-20 起，ESP32-C5 改为语音与显示终端，不再承担本文件中的传感器 MQTT 发布和执行器控制职责；最新设备分工见 [当前架构与目录状态](architecture-update-2026-07-20.md)。除本文件明确保留为部署配置的主机地址、账号和密钥外，字段名、单位、主题、路径、状态、返回结构和错误码必须完全一致。
+
+当前普通 ESP32 已实现正式主题、QoS 1、持久会话、原子命令、水枪复合命令、ACK、遥测、状态和能力发布。MQTT JSON 已按 Topic 可推导信息完成精简，遥测保持 5 秒周期。前端/FastAPI 只使用真实 REST、EMQX MQTT 和设备 ACK 路径。代码一致性不替代实体硬件联调验收。
 
 ## 1. 固定架构与责任边界
 
@@ -19,8 +21,8 @@
 - ESP32-C5 语音显示终端只通过 HTTPS 和 SSE 访问 `smartagribrain-api`；它不发布农业传感器 MQTT，也不控制二维云台。
 - 浏览器只调用 REST 和 SSE；不保存 MQTT 账号，不直接连接 Broker。
 - `smartagribrain-api` 是 MQTT 客户端、数据库写入者、命令发布者和唯一 REST 服务。
-- 当前 `backend_server/` 承担该服务的代码位置；`frontend_dashboard/backend_api/` 中的天气、知识库、图片、助手功能必须迁入此服务或作为它的内部模块运行，不得再单独向前端暴露 API。
-- 前端 `VITE_API_BASE_URL` 必须只指向 `smartagribrain-api`，真实联调环境固定 `VITE_USE_MOCK=false`。
+- 当前工作区中可核验的集成服务位于 `前端/backend_api/`。`frontend_dashboard/` 只作为历史原型参考；不得同时让两个后端对外宣称是 `smartagribrain-api`。
+- 前端 `VITE_API_BASE_URL` 必须只指向 `smartagribrain-api`。
 
 ## 2. 通用规则
 
@@ -28,27 +30,21 @@
 
 - 编码：全部 JSON、HTTP 与 MQTT 文本均为 UTF-8。
 - `device_id`：小写字母、数字、`_`、`-`；正则 `^[a-z][a-z0-9_-]{2,63}$`。现场普通 ESP32 的协议标识固定为 `greenhouse_001_s3`；后缀 `_s3` 只是兼容命名，不代表芯片型号。
-- `site_id`：现场设备固定为 `greenhouse_001`；命令中可省略以兼容现有水枪队列，上行消息必须携带。
-- `message_id`：UUID v4 小写字符串。`command_id` 接受 UUID v4 或 1 至 20 位十进制字符串；一个逻辑命令只能使用一个 ID，设备按完整字符串幂等。
+- `site_id`：现场设备固定为 `greenhouse_001`；MQTT 上行根据设备注册关系确定站点，不在每条设备消息中重复发送。
+- `message_id`：遥测使用 UUID v4 小写字符串完成 QoS 1 去重。`command_id` 接受 UUID v4 或 1 至 20 位十进制字符串；一个逻辑命令只能使用一个 ID，设备按完整字符串幂等。
 - 时间：所有 `*_at` 为 Unix Epoch 毫秒，UTC，JSON number，例 `1752220800123`。禁止秒级时间戳和本地化字符串。
-- 时间不可信：ESP32 未完成 SNTP 时，`sampled_at` 必须为 `0`，并将 `time_quality` 设为 `unsynced`。服务端写入 `received_at` 并按其排序。
+- 时间不可信：ESP32 未完成 SNTP 时，`sampled_at` 为 `0`；服务端改用 `received_at` 保存和排序。
 - 数值：JSON number；禁止 `NaN`、`Infinity`、字符串数字和隐式单位。
-- 空值：不支持、未接线或无有效读数一律使用 `null`，并在 `quality` 中说明原因。不得用 `0` 代替缺失值。
-- 版本：每个 MQTT 业务消息都必须包含 `schema_version: "1.0"`。不兼容修改必须升主版本。
+- 裸板联调：当前允许未接传感器时出现驱动默认值 `0`、DS18B20 的 `-127` 或浮空 ADC 值；这些数据仅用于验证链路，不能作为实体传感器验收结果。
+- 版本：MQTT 主版本由 Topic 前缀 `smartagribrain/v1` 确定，JSON 不再重复 `schema_version`。不兼容修改必须更换 Topic 主版本。
 
 ### 2.2 统一设备能力名
 
-- `fan`：现有 `fan`；类型为 `binary`。
-- `pump`：GPIO26 水泵；类型为 `percent`，范围 0 至 100。
-- `grow_light`：映射现有 `light`；类型为 `binary` 或 `percent`。
-- `alarm`：现有 `alarm`；类型为 `binary`。
-- `curtain`：新增；类型为 `percent`。
-- `heater`：新增；类型为 `binary` 或 `percent`。
-- `cooler`：新增；类型为 `binary` 或 `percent`。
-- `ventilation`：新增；类型为 `binary` 或 `percent`。
-- `co2_valve`：新增；类型为 `binary` 或 `percent`。
+现场普通 ESP32 当前只声明以下通用执行器：
 
-`light`、`heat`、`cool`、`vent`、`co2`、`smart_control_update` 等名称均不是设备协议命令。前端智能托管必须把计算结果转换为多个规范执行器命令；后端只向能力声明为 `supported=true` 的执行器发布命令。
+- `grow_light`：GPIO14 补光灯，类型 `percent`，范围 0 至 90。
+
+GPIO26 水泵、GPIO27 水平 SG90 和 GPIO13 俯仰 SG90 是水枪的内部部件，不得作为通用 `set` 命令或 `actuators` 能力单独声明；它们只能由 `target_position` 水枪复合命令驱动。`pump`、`pan`、`tilt`、`fan`、`alarm`、`curtain`、`heater`、`cooler`、`ventilation` 和 `co2_valve` 均不是当前可用的通用执行器。`light`、`heat`、`cool`、`vent`、`co2`、`waterDemand`、`lightDemand`、`panAngle`、`tiltAngle` 和 `smart_control_update` 均不是 v1 正式命令字段。后端只向能力声明为 `supported=true` 的执行器发布命令。
 
 ### 2.3 响应包装
 
@@ -91,7 +87,7 @@
 ### 3.1 连接和安全
 
 - 协议：MQTT 3.1.1，生产环境只允许 `mqtts://`，端口 `8883`。
-- 开发环境：仅本机 Broker 可使用 `mqtt://`，端口 `1883`；不得用于实际设备网络。
+- 所有环境：统一使用外部 EMQX Broker。优先使用 `mqtts://` 和 `8883`；若 EMQX 明确提供非 TLS 监听器，才可显式配置 `mqtt://`。不得回退到工作站本地 Broker。
 - Client ID：设备为 `sab-dev-{device_id}`；后端为 `sab-api-{instance_id}`。
 - 认证：每台设备独立用户名和密码，生产环境须使用设备证书或强随机密码。浏览器不得拥有 Broker 凭据。
 - ACL：设备只能发布自身 `telemetry`、`status`、`capabilities`、`command_ack`，只能订阅自身 `command`。后端可读写全部设备主题。
@@ -118,39 +114,29 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 
 ```json
 {
-  "schema_version": "1.0",
-  "message_id": "7c41943a-168f-4914-9303-8f89e7da4f02",
-  "device_id": "greenhouse_001_s3",
-  "site_id": "greenhouse_001",
   "reported_at": 1752220800123,
   "firmware": { "version": "0.3.0", "target": "esp32" },
   "sensors": {
     "temperature_c": true,
-    "humidity_pct": true,
-    "pressure_kpa": true,
-    "gas_resistance_ohm": true,
-    "illuminance_lux": false,
-    "co2_ppm": false,
-    "soil_moisture_pct": false,
-    "soil_ec_ms_cm": false,
-    "imu": true,
-    "magnetometer": true
+    "illuminance_lux": true,
+    "co2_ppm": true,
+    "soil_moisture_pct": true
   },
   "actuators": {
-    "fan": { "supported": true, "type": "binary", "min": 0, "max": 1 },
-    "pump": { "supported": true, "type": "percent", "min": 0, "max": 100 },
-    "grow_light": { "supported": false, "type": "binary", "min": 0, "max": 1 },
-    "alarm": { "supported": true, "type": "binary", "min": 0, "max": 1 },
-    "curtain": { "supported": false, "type": "percent", "min": 0, "max": 100 },
-    "heater": { "supported": false, "type": "binary", "min": 0, "max": 1 },
-    "cooler": { "supported": false, "type": "binary", "min": 0, "max": 1 },
-    "ventilation": { "supported": false, "type": "binary", "min": 0, "max": 1 },
-    "co2_valve": { "supported": false, "type": "binary", "min": 0, "max": 1 }
+    "grow_light": { "supported": true, "type": "percent", "min": 0, "max": 90 }
+  },
+  "positioning": {
+    "target_position_supported": true,
+    "water_gun_control_supported": true,
+    "water_gun_timed_spray_supported": true,
+    "water_gun_max_duration_seconds": 86399,
+    "dynamic_max_hz": 5,
+    "calibration": "UN_CALIBRATED_PLACEHOLDER"
   }
 }
 ```
 
-若 GPIO 为 `-1` 或驱动未初始化，对应执行器必须上报 `supported=false`。不得把 virtual actuator 声明成可控制硬件。
+`positioning.calibration` 明确表示当前坐标映射未实测，不得当作真实能力精度。设备身份从 capabilities Topic 推导；能力消息为 retained 快照，不需要消息级去重 ID。
 
 ### 3.4 遥测消息
 
@@ -158,54 +144,40 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 
 ```json
 {
-  "schema_version": "1.0",
   "message_id": "4db84c21-6e68-460c-939b-e187f3061e51",
-  "device_id": "greenhouse_001_s3",
-  "site_id": "greenhouse_001",
-  "sequence": 381,
   "sampled_at": 1752220800000,
-  "time_quality": "synced",
   "sensors": {
     "temperature_c": 26.5,
-    "humidity_pct": 62.3,
-    "pressure_kpa": 101.2,
-    "gas_resistance_ohm": 15800.0,
-    "illuminance_lux": null,
-    "co2_ppm": null,
-    "soil_moisture_pct": null,
-    "soil_ec_ms_cm": null,
-    "acceleration_g": { "x": 0.01, "y": -0.02, "z": 0.98 },
-    "gyroscope_dps": { "x": 0.1, "y": 0.0, "z": -0.1 },
-    "magnetic_field_ut": { "x": 12.3, "y": 8.6, "z": -35.1 }
+    "illuminance_lux": 1260.4,
+    "co2_ppm": 612,
+    "soil_moisture_pct": 54.2
   },
   "quality": {
     "temperature_c": "ok",
-    "humidity_pct": "ok",
-    "pressure_kpa": "ok",
-    "gas_resistance_ohm": "ok",
-    "illuminance_lux": "unsupported",
-    "co2_ppm": "unsupported",
-    "soil_moisture_pct": "unsupported",
-    "soil_ec_ms_cm": "unsupported",
-    "imu": "ok",
-    "magnetometer": "ok"
+    "illuminance_lux": "ok",
+    "co2_ppm": "ok",
+    "soil_moisture_pct": "ok"
   },
   "actuators": {
-    "fan": { "desired": 0, "actual": 0 },
-    "pump": { "desired": 0, "actual": 0 },
-    "grow_light": { "desired": null, "actual": null },
-    "alarm": { "desired": 0, "actual": 0 },
-    "curtain": { "desired": null, "actual": null },
-    "heater": { "desired": null, "actual": null },
-    "cooler": { "desired": null, "actual": null },
-    "ventilation": { "desired": null, "actual": null },
-    "co2_valve": { "desired": null, "actual": null }
+    "grow_light": 60
   },
-  "connectivity": { "wifi": "connected", "mqtt": "connected", "rssi_dbm": -56 }
+  "positioning": {
+    "pan_deg": 90,
+    "tilt_deg": 5,
+    "calibration": "UN_CALIBRATED_PLACEHOLDER",
+    "water_gun": {
+      "active": false,
+      "timed": false,
+      "dynamic": false,
+      "spray_ends_at": null,
+      "sequence": 0
+    }
+  },
+  "connectivity": { "rssi_dbm": -56 }
 }
 ```
 
-允许的 `quality` 值只有 `ok`、`stale`、`invalid`、`unsupported`。`time_quality` 只有 `synced`、`unsynced`。`wifi` 和 `mqtt` 只有 `connected`、`disconnected`。
+允许的 `quality` 值只有 `ok`、`stale`、`invalid`、`unsupported`。ESP32 当前对有限数值发布 `ok`，因此裸板默认值只表示链路数据，不能证明传感器存在。`message_id` 用于 QoS 1 去重；设备 ID 从 Topic 推导，站点从后端设备注册关系推导。能收到遥测已经说明发送时 Wi-Fi 和 MQTT 可用，因此连接对象只保留 RSSI。
 
 ### 3.5 在线状态消息
 
@@ -213,10 +185,6 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 
 ```json
 {
-  "schema_version": "1.0",
-  "message_id": "1eaf30d4-9ccb-4f76-932a-dab6812511e6",
-  "device_id": "greenhouse_001_s3",
-  "site_id": "greenhouse_001",
   "reported_at": 1752220800123,
   "online": true,
   "reason": "connected"
@@ -225,47 +193,40 @@ Broker 地址、用户名、密码、CA 证书是部署配置，不属于协议�
 
 LWT 离线时发布相同结构，仅 `online=false`、`reason="unexpected_disconnect"`。正常停止前发布 `reason="shutdown"`。
 
+状态为 retained 快照，设备身份从 Topic 推导，不使用 `message_id`。LWT 在连接建立时预先注册，因此 `reported_at` 可以为 `0`，后端以接收时间记录离线发生时间。
+
 ### 3.6 命令和 ACK 消息
 
-普通执行器仍使用单个原子 `set` 命令。水枪是唯一允许的复合命令，使用 `operation=target_position` 同时描述目标、二维舵机、水泵、定时和动态会话；它不得携带 AI 分析正文。
+补光灯使用单个原子 `set` 命令。水枪是唯一允许的复合命令，使用 `operation=target_position` 同时描述目标、二维舵机、水泵、定时和动态会话；它不得携带 AI 分析正文。
 
 ```json
 {
-  "schema_version": "1.0",
   "command_id": "c820003f-b6c4-4f6d-a3e3-2194c7c77989",
-  "device_id": "greenhouse_001_s3",
-  "site_id": "greenhouse_001",
-  "issued_at": 1752220800123,
   "expires_at": 1752220830123,
-  "source": "web_manual",
-  "reason": "用户手动开启风机",
   "command": {
     "operation": "set",
-    "target": "fan",
-    "value": 1
+    "target": "grow_light",
+    "value": 60
   }
 }
 ```
 
-固定值域：`binary` 只能为 `0` 或 `1`；普通 `percent` 必须为 0 至 100 的整数。允许的 `source` 为 `web_manual`、`web_automation`、`ai`、`edge_voice`、`system`。`expires_at - issued_at` 必须在 5 至 300 秒之间，默认 30 秒。
+命令 Topic 已确定版本和目标设备。后端数据库继续保存 `site_id`、`source`、`reason` 和创建时间，设备链路只发送执行所需字段。`grow_light` 值域为 0 至 90 整数。`expires_at` 默认是创建时间后 30 秒；设备只接受尚未过期且不超过未来 300 秒的命令。
 
 设备收到命令后必须在 5 秒内发布最终 ACK：
 
 ```json
 {
-  "schema_version": "1.0",
   "command_id": "c820003f-b6c4-4f6d-a3e3-2194c7c77989",
-  "device_id": "greenhouse_001_s3",
-  "site_id": "greenhouse_001",
   "acknowledged_at": 1752220800550,
   "state": "executed",
-  "command": { "operation": "set", "target": "fan", "value": 1 },
-  "actual_value": 1,
+  "actual_value": 60,
+  "feedback_verified": false,
   "error": null
 }
 ```
 
-设备 ACK 的 `state` 只能为 `executed` 或 `rejected`。`rejected` 时 `actual_value` 必须为 `null`，`error.code` 必须为本文件第 6 节定义的设备错误码。设备必须在 RAM 中缓存最近 50 个 `command_id` 至少 10 分钟；收到重复 ID 时不重复驱动硬件，直接重发首次 ACK。
+设备 ACK 的 `state` 只能为 `executed` 或 `rejected`。`rejected` 时 `actual_value` 必须为 `null`，`error.code` 必须为本文件第 6 节定义的设备错误码。后端已保存原命令，ACK 不再回显命令、位置或水枪参数。设备必须在 RAM 中缓存最近 50 个 `command_id`，并保证每项至少保留 10 分钟；收到重复 ID 时不重复驱动硬件，直接重发首次 ACK。当前固件具备 50 项容量和覆盖淘汰，但尚未实现独立的 10 分钟保留计时。
 
 命令状态机固定如下：
 
@@ -285,11 +246,14 @@ REST accepted -> QUEUED -> PUBLISHED -> EXECUTED
 
 - `operation=target_position`、`target=position`。
 - `position` 包含 `ground_range_mm` 和 `bearing_deg`。
-- `water_gun` 包含 `mode`、`spray_enabled`、`simulation_only`、`pump_control_percent`、`session_id`、`sequence`、`spray_schedule`、`spray_duration_seconds`、`spray_ends_at`。
+- `bearing_deg` 范围固定为 -90 至 90 度，并线性映射到水平 SG90 的 0 至 180 度命令角。
+- `ground_range_mm` 当前接受 300 至 1200 mm，并线性映射到垂直舵机 60 至 5 度；300 mm 对应竖直向上的 60 度，1200 mm 对应平行向前的 5 度。垂直轴所有写入强制限制在实体安全的 5 至 60 度。
+- `water_gun` 包含 `mode`、`spray_enabled`、`pump_control_percent`、`session_id`、`sequence`、`spray_schedule`、`spray_duration_seconds`、`spray_ends_at`。
 - 目标变化时先停泵，舵机稳定后才能开泵。
 - `timed` 由 ESP32 本地单调时钟和后端停止命令双重保护。
-- `dynamic` 使用 `session_id` 和严格递增 `sequence`；设备可见保活中断 3 秒时停泵。
-- `simulation_only=true` 禁止物理输出。
+- `dynamic` 使用 `session_id` 和严格递增 `sequence`；序号只能由后端为目标更新和 heartbeat 统一生成，Web 不得自行递增。设备可见保活中断 3 秒时停泵。
+- Web 动态目标请求必须串行化并只保留发送期间的最新目标；相同位置的 heartbeat 不得使 ESP32 重复写舵机 PWM。
+- 动态模式关闭喷水时 ESP32 仍须保留会话和最后序号，不能让延迟旧目标绕过乱序校验；只有退出动态模式才能清除该状态。
 - 临时坐标和泵功率算法必须标记 `UN_CALIBRATED_PLACEHOLDER`。
 
 ## 4. REST API v1 契约
@@ -327,10 +291,13 @@ REST 的 `Telemetry` 与 MQTT 遥测消息使用完全相同的字段。服务�
   "last_telemetry_at": 1752220800000,
   "connectivity": { "wifi": "connected", "mqtt": "connected", "rssi_dbm": -56 },
   "actuators": {
-    "fan": { "desired": 0, "actual": 0 },
     "pump": { "desired": 0, "actual": 0 },
-    "grow_light": { "desired": null, "actual": null },
-    "alarm": { "desired": 0, "actual": 0 }
+    "grow_light": { "desired": 60, "actual": 60 }
+  },
+  "positioning": {
+    "pan_deg": 90,
+    "tilt_deg": 5,
+    "water_gun": { "active": false, "timed": false, "dynamic": false }
   }
 }
 ```
@@ -343,8 +310,8 @@ REST 的 `Telemetry` 与 MQTT 遥测消息使用完全相同的字段。服务�
   "device_id": "greenhouse_001_s3",
   "state": "PUBLISHED",
   "source": "web_manual",
-  "reason": "用户手动开启风机",
-  "command": { "operation": "set", "target": "fan", "value": 1 },
+  "reason": "用户手动设置补光灯亮度",
+  "command": { "operation": "set", "target": "grow_light", "value": 60 },
   "created_at": 1752220800123,
   "published_at": 1752220800150,
   "completed_at": null,
@@ -380,8 +347,8 @@ Content-Type: application/json
 ```json
 {
   "source": "web_manual",
-  "reason": "用户手动开启风机",
-  "command": { "operation": "set", "target": "fan", "value": 1 },
+  "reason": "用户手动开启水泵",
+  "command": { "operation": "set", "target": "pump", "value": 60 },
   "ttl_seconds": 30
 }
 ```
@@ -393,10 +360,10 @@ Content-Type: application/json
 ```json
 {
   "source": "web_automation",
-  "reason": "自动通风与补光",
+  "reason": "自动灌溉与补光",
   "commands": [
-    { "operation": "set", "target": "fan", "value": 1 },
-    { "operation": "set", "target": "grow_light", "value": 1 }
+    { "operation": "set", "target": "pump", "value": 60 },
+    { "operation": "set", "target": "grow_light", "value": 50 }
   ],
   "ttl_seconds": 30
 }
@@ -499,6 +466,7 @@ Authorization: Bearer <access-token>
 ## 6. 统一错误码
 
 - `VALIDATION_ERROR`：HTTP 422；字段、类型、时间、单位或值域不符合本标准。
+- `INVALID_COMMAND`：HTTP 422；设备收到的命令公共字段、结构、类型、组合关系非法，或同一 `command_id` 被用于不同报文内容。
 - `UNAUTHORIZED`：HTTP 401；缺失或无效访问令牌。
 - `FORBIDDEN`：HTTP 403；用户无此设备或操作权限。
 - `DEVICE_NOT_FOUND`：HTTP 404；`device_id` 不存在。
@@ -516,14 +484,14 @@ Authorization: Bearer <access-token>
 - `SENSOR_INVALID`：HTTP 422；传感器读数无效。
 - `INTERNAL_ERROR`：HTTP 500；未分类服务端错误。
 
-设备 ACK 可使用：`CAPABILITY_UNSUPPORTED`、`ACTUATOR_INTERLOCK`、`COMMAND_EXPIRED`、`COMMAND_QUEUE_FULL`、`DEVICE_TIME_UNSYNCED`、`TIMED_SPRAY_EXPIRED`、`STALE_TARGET`、`TARGET_OUT_OF_RANGE`、`SENSOR_INVALID`、`INTERNAL_ERROR`。后端将它们映射为最终 `CommandResource.state=REJECTED`。
+设备 ACK 可使用：`INVALID_COMMAND`、`CAPABILITY_UNSUPPORTED`、`ACTUATOR_INTERLOCK`、`COMMAND_EXPIRED`、`COMMAND_QUEUE_FULL`、`DEVICE_TIME_UNSYNCED`、`TIMED_SPRAY_EXPIRED`、`STALE_TARGET`、`TARGET_OUT_OF_RANGE`、`SENSOR_INVALID`、`INTERNAL_ERROR`。后端将它们映射为最终 `CommandResource.state=REJECTED`。
 
 ## 7. 数据库与保留标准
 
 - 数据库逻辑实体固定为 `devices`、`device_capabilities`、`telemetry`、`device_status`、`commands`、`command_acks`、`analyses`、`alarms`、`knowledge_bases`、`knowledge_items`、`disease_photos`。
 - `telemetry` 必须保存完整 JSON 快照和可检索的规范字段列；不得仅保存温湿度后丢弃其他字段。
 - `commands` 与 `command_acks` 通过 `command_id` 一对一关联；`commands` 必须保存发布前、发布后和最终状态时间。
-- `(device_id, message_id)`、`command_id`、`(device_id, sampled_at, sequence)` 必须有唯一索引或幂等约束。
+- `(device_id, message_id)` 和 `command_id` 必须有唯一索引或幂等约束。
 - 生产数据库使用 PostgreSQL；本机演示可用 SQLite。SQLite 路径必须由 `DATABASE_URL` 明确指定到应用目录，禁止使用依赖当前工作目录的相对路径。
 - 禁止提交 `.db`、真实 `.env`、Wi-Fi 密码、MQTT 密码、AI Key、天气 Key、客户端证书私钥和上传图片到 Git。
 
@@ -548,16 +516,15 @@ CORS_ORIGINS=https://dashboard.example.com,http://localhost:5173
 
 ```dotenv
 VITE_API_BASE_URL=https://api.example.com
-VITE_USE_MOCK=false
 ```
 
-ESP-IDF 的 Wi-Fi、MQTT URI、用户、密码、CA、设备 ID 和执行器 GPIO 由 NVS 安全配置或受保护的构建配置提供；`sdkconfig.defaults` 只能包含非敏感默认值。每个实际设备都必须发布第 3.3 节能力消息。
+当前 Arduino/PlatformIO ESP32 的 Wi-Fi、MQTT 主机、用户和密码由被 Git 忽略的本机 `include/config.h` 提供，CA 由同样被忽略的 `include/emqx_ca_cert.h` 提供；设备 ID、主题和控制常量位于 `include/iot_contract.h`。仓库不再维护可能与真实配置漂移的 example 头文件，新环境统一通过 `scripts/setup/configure-emqx.ps1` 生成这两个本机文件。正式部署应迁移到 NVS 或受保护的构建注入方式。每个实际设备都必须发布第 3.3 节能力消息。
 
 ## 9. 联调验收样例
 
 以下四项全部通过才算 v1 接通：
 
 1. ESP32 发布第 3.4 节遥测后，`GET /api/v1/devices/greenhouse_001_s3/latest` 返回同一 `message_id`、相同 `sensors` 嵌套结构和服务端 `received_at`。
-2. 前端用 `POST /commands` 创建 `fan=1` 命令后先收到 `202/PUBLISHED`；设备在 5 秒内发布匹配 `command_id` 的 `executed` ACK；`GET /commands/{command_id}` 最终为 `EXECUTED`。
-3. 对 `grow_light` 发送命令，而 capabilities 中为 `supported=false` 时，服务端返回 `422 CAPABILITY_UNSUPPORTED`，不向 MQTT 主题发布消息。
+2. 前端用 `POST /commands` 创建 `pump=60` 命令后先收到 `202/PUBLISHED`；设备在 5 秒内发布匹配 `command_id` 的 `executed` ACK；`GET /commands/{command_id}` 最终为 `EXECUTED`，且 `actual_value` 是设备实际应用值。
+3. 对未声明支持的 `fan` 发送命令时，服务端返回 `422 CAPABILITY_UNSUPPORTED`，不向 MQTT 主题发布消息。
 4. 设备断网时，status retained 消息为 `online=false`；REST 命令接口返回 `409 DEVICE_OFFLINE`；前端不得更新执行器实际状态。

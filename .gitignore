@@ -8,8 +8,10 @@ dependencies.lock
 esp32/.pio/
 esp32/.vscode/
 esp32/.clangd/
+esp32/compile_commands.json
 esp32/include/config.h
 esp32/include/config.local.h
+esp32/include/emqx_ca_cert.h
 esp32/.env
 
 # Python
@@ -17,15 +19,46 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite
+*.sqlite3
+前端/backend_api/uploads/
+前端/backend_api/position_captures/
+前端/backend_api/logs/
+前端/backend_api/certs/
 .env
+.env.*
+!.env.example
+!**/.env.example
 
 # Node / Vue
 node_modules/
 dist/
+tsconfig.tsbuildinfo
+.npm-cache/
+
+# Frontend snapshot and historical checkout
+前端/.push-cache/
+前端/.push-tmp/
+前端/SmartAgriBrain/
+前端/scripts/git/push*.md
 
 # VS Code
-.vscode/
+/.vscode/*
 !.vscode/settings.example.json
+前端/.vscode/*
+!前端/.vscode/tasks.json
+
+# Local credentials
+*.pem
+*.key
+id_rsa*
+id_ed25519*
 
 # System
 .DS_Store
@@ -33,6 +66,7 @@ Thumbs.db
 
 # Logs
 *.log
+*.log.*
 
 # Binary large files
 *.zip

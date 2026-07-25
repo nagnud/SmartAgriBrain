@@ -1,11 +1,10 @@
 #include <Arduino.h>
 
+#include "Dht11Sensor.h"
 #include "JW01_CO2.h"
 #include "LedController.h"
 #include "LightSensor.h"
 #include "PanTilt.h"
-#include "SoilSensor.h"
-#include "TempSensor.h"
 #include "WaterGunController.h"
 #include "config.h"
 #include "iot_mqtt_client.h"
@@ -16,6 +15,7 @@ constexpr uint8_t LAMP_PIN = 14;
 constexpr uint8_t PUMP_PIN = 26;
 constexpr uint8_t PAN_SERVO_PIN = 27;
 constexpr uint8_t TILT_SERVO_PIN = 13;
+constexpr uint8_t DHT11_DATA_PIN = 4;
 
 // ESP32 LEDC 通道不能重复。灯和泵使用 8 位 PWM，SG90 在 PanTilt 内使用 16 位 50 Hz PWM。
 constexpr uint8_t LAMP_PWM_CHANNEL = 0;
@@ -24,12 +24,13 @@ constexpr uint8_t PAN_SERVO_PWM_CHANNEL = 2;
 constexpr uint8_t TILT_SERVO_PWM_CHANNEL = 3;
 constexpr uint16_t LAMP_PWM_FREQUENCY_HZ = 1000;
 constexpr uint8_t ACTUATOR_PWM_RESOLUTION_BITS = 8;
+constexpr int PAN_INITIAL_ANGLE_DEG = 90;                           // 水平轴上电保持正前方。
+constexpr int TILT_INITIAL_ANGLE_DEG = SAB_TILT_MECHANICAL_MIN_DEG; // 垂直轴上电保持 5 度平射姿态。
 
-// 传感器对象的构造参数分别是硬件引脚、干燥 ADC 标定值和湿润 ADC 标定值。
+// 每个传感器对象只接收其硬件所需参数；DHT11 的采样间隔由驱动统一限制为 2000 ms。
 BH1750 bh1750(0x23);                         // I2C 地址 0x23：BH1750 ADDR 引脚接 GND。
 JW01_CO2 co2Sensor;                         // 驱动内部使用项目已配置的 CO2 串口。
-SoilSensor soilSensor(34, 3200, 1400);      // GPIO34；3200=临时干燥值，1400=临时湿润值。
-TempSensor tempSensor;                      // 驱动内部使用 GPIO4 的 DS18B20 总线。
+Dht11Sensor dht11Sensor(DHT11_DATA_PIN);    // GPIO4 DATA；一次采样同时产生空气温度与相对湿度。
 LedController ledController;                // GPIO12 WS2812 暂时保留，不响应补光灯 MQTT。
 
 PanTilt panTilt(PAN_SERVO_PIN, TILT_SERVO_PIN, PAN_SERVO_PWM_CHANNEL, TILT_SERVO_PWM_CHANNEL);
@@ -109,7 +110,8 @@ IotCommandResult applyIotCommand(const IotCommand &command, int &actualValue, co
     return IotCommandResult::Executed;
   }
 
-  // pump、pan、tilt 和 target_position 都交给同一控制器，保证停泵优先和状态一致。
+  // Only target_position reaches the water-gun controller. GPIO26 and both
+  // servos are internal water-gun parts and have no independent MQTT command.
   return waterGunController.handleCommand(command, actualValue, errorCode);
 }
 
@@ -125,9 +127,14 @@ void initializeActuators()
   growLightPercent = 0;
   applyPumpOutput(0);
 
-  panTilt.begin(90, 90);
+  // 泵已在上方关闭后才移动舵机；垂直轴不能再使用超出实体 5..60 度范围的旧 90 度初值。
+  panTilt.begin(PAN_INITIAL_ANGLE_DEG, TILT_INITIAL_ANGLE_DEG);
   waterGunController.begin(panTilt, applyPumpOutput);
-  Serial.println("[ACTUATOR][INIT] lamp=0 pump=0 pan=90 tilt=90 calibration=UN_CALIBRATED_PLACEHOLDER");
+  Serial.printf("[ACTUATOR][INIT] lamp=0 pump=0 pan=%d tilt=%d tilt_allowed=%u..%u range_model=LINEAR_UNCALIBRATED\n",
+                PAN_INITIAL_ANGLE_DEG,
+                TILT_INITIAL_ANGLE_DEG,
+                SAB_TILT_MECHANICAL_MIN_DEG,
+                SAB_TILT_MECHANICAL_MAX_DEG);
 }
 
 /** 初始化传感器；失败只影响对应遥测，不允许绕过执行器的安全初始状态。 */
@@ -142,11 +149,10 @@ void initializeSensors()
     Serial.println("[SENSOR][INIT_FAIL] name=BH1750 address=0x23");
   }
 
-  soilSensor.begin();
-  tempSensor.begin();
+  dht11Sensor.begin();
   co2Sensor.begin();
   ledController.begin();
-  Serial.println("[SENSOR][INIT_DONE] soil_gpio=34 temperature_gpio=4 co2=enabled ws2812=retained");
+  Serial.println("[SENSOR][INIT_DONE] dht11_gpio=4 measures=temperature_c,humidity_pct co2=enabled ws2812=retained");
 }
 
 void setup()
@@ -206,9 +212,8 @@ void loop()
   waterGunController.update();
 
   // 阶段 4：传感器采集。各驱动内部决定非阻塞采样周期，主循环只推进状态。
-  soilSensor.update();
+  dht11Sensor.update();
   co2Sensor.update();
-  tempSensor.update();
   ledController.update();
 
   // 阶段 5：遥测。使用独立计时基准，发送传感器与统一执行器状态的 QoS 1 快照。
@@ -216,6 +221,6 @@ void loop()
   {
     previousTelemetryMs = now;
     Serial.printf("[TELEMETRY][SCHEDULE] interval_ms=%u\n", SEND_INTERVAL_MS);
-    send_sensor_data(&soilSensor, &bh1750, &tempSensor, &co2Sensor);
+    send_sensor_data(&dht11Sensor, &bh1750, &co2Sensor);
   }
 }

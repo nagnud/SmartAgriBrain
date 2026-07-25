@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "config.h"
+#include "emqx_ca_cert.h"
 
 namespace
 {
@@ -52,7 +53,6 @@ char clientId[80];
 volatile bool mqttConnected = false;
 volatile bool publishConnectSnapshotRequested = false;
 volatile bool safetyStopRequested = false;
-uint32_t telemetrySequence = 0;
 
 IotCommandHandler commandHandler = nullptr;
 ActuatorStateProvider actuatorStateProvider = nullptr;
@@ -72,7 +72,9 @@ bool assemblingCommandTopic = false;
 
 String mqttWillPayload;
 
-const char *rootCa =
+// Default public CA retained for the already configured EMQX endpoint. A
+// deployment-specific CA generated into emqx_ca_cert.h overrides it below.
+const char *legacyRootCa =
     "-----BEGIN CERTIFICATE-----\n"
     "MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh\n"
     "MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3\n"
@@ -95,6 +97,10 @@ const char *rootCa =
     "pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl\n"
     "MrY=\n"
     "-----END CERTIFICATE-----\n";
+// The EMQX server CA is local deployment data. It is generated into the
+// ignored emqx_ca_cert.h file so a cloud certificate change does not require
+// committing credentials or a vendor-specific CA to the repository.
+const char *rootCa = MQTT_ROOT_CA_CONFIGURED ? MQTT_ROOT_CA_PEM : legacyRootCa;
 
 /** 返回可信的 Unix Epoch 毫秒；SNTP 未完成时返回 0。 */
 uint64_t epochMilliseconds()
@@ -107,23 +113,12 @@ uint64_t epochMilliseconds()
   return static_cast<uint64_t>(now) * 1000ULL;
 }
 
-bool isTimeSynced()
-{
-  return epochMilliseconds() != 0;
-}
-
 const char *targetName(IotCommandTarget target)
 {
   switch (target)
   {
-  case IotCommandTarget::Pump:
-    return "pump";
   case IotCommandTarget::GrowLight:
     return "grow_light";
-  case IotCommandTarget::Pan:
-    return "pan";
-  case IotCommandTarget::Tilt:
-    return "tilt";
   case IotCommandTarget::Position:
     return "position";
   default:
@@ -131,33 +126,11 @@ const char *targetName(IotCommandTarget target)
   }
 }
 
-const char *waterGunModeName(WaterGunMode mode)
-{
-  return mode == WaterGunMode::Dynamic ? "dynamic" : "static";
-}
-
-const char *sprayScheduleName(SpraySchedule schedule)
-{
-  return schedule == SpraySchedule::Timed ? "timed" : "continuous";
-}
-
 bool parseSetTarget(const char *value, IotCommandTarget &target)
 {
-  if (strcmp(value, "pump") == 0)
-  {
-    target = IotCommandTarget::Pump;
-  }
-  else if (strcmp(value, "grow_light") == 0)
+  if (strcmp(value, "grow_light") == 0)
   {
     target = IotCommandTarget::GrowLight;
-  }
-  else if (strcmp(value, "pan") == 0)
-  {
-    target = IotCommandTarget::Pan;
-  }
-  else if (strcmp(value, "tilt") == 0)
-  {
-    target = IotCommandTarget::Tilt;
   }
   else
   {
@@ -165,15 +138,6 @@ bool parseSetTarget(const char *value, IotCommandTarget &target)
     return false;
   }
   return true;
-}
-
-bool isAllowedSource(const char *source)
-{
-  return strcmp(source, "web_manual") == 0 ||
-         strcmp(source, "web_automation") == 0 ||
-         strcmp(source, "ai") == 0 ||
-         strcmp(source, "edge_voice") == 0 ||
-         strcmp(source, "system") == 0;
 }
 
 /** 校验标准 UUID v4；统一使用小写十六进制，避免同一 ID 多种文本形式。 */
@@ -339,9 +303,7 @@ bool publishQos1(const char *topic, const String &payload, bool retain, const ch
 void publishStatus(bool online, const char *reason)
 {
   JsonDocument document;
-  document["schema_version"] = SAB_SCHEMA_VERSION;
-  document["device_id"] = SAB_DEVICE_ID;
-  document["site_id"] = SAB_SITE_ID;
+  // 协议版本和设备 ID 已包含在 Topic 中；状态消息只携带状态本身。
   document["reported_at"] = epochMilliseconds();
   document["online"] = online;
   document["reason"] = reason;
@@ -353,53 +315,28 @@ void publishStatus(bool online, const char *reason)
 void publishCapabilities()
 {
   JsonDocument document;
-  document["schema_version"] = SAB_SCHEMA_VERSION;
-  document["message_id"] = makeUuidV4();
-  document["device_id"] = SAB_DEVICE_ID;
-  document["site_id"] = SAB_SITE_ID;
+  // capabilities 为 retained 快照，只在连接时发送；不重复 Topic 已提供的版本和设备 ID。
   document["reported_at"] = epochMilliseconds();
   JsonObject firmware = document["firmware"].to<JsonObject>();
   firmware["version"] = SAB_FIRMWARE_VERSION;
   firmware["target"] = "esp32";
 
   JsonObject sensors = document["sensors"].to<JsonObject>();
-  sensors["soil_moisture_pct"] = true;
+  sensors["humidity_pct"] = true;
   sensors["illuminance_lux"] = true;
   sensors["temperature_c"] = true;
   sensors["co2_ppm"] = true;
 
   JsonObject actuators = document["actuators"].to<JsonObject>();
-  JsonObject pump = actuators["pump"].to<JsonObject>();
-  pump["supported"] = true;
-  pump["type"] = "percent";
-  pump["min"] = 0;
-  pump["max"] = SAB_PUMP_MAX_PERCENT;
-  pump["minimum_running_percent_placeholder"] = SAB_PUMP_MIN_RUNNING_PERCENT;
-
   JsonObject lamp = actuators["grow_light"].to<JsonObject>();
   lamp["supported"] = true;
   lamp["type"] = "percent";
   lamp["min"] = 0;
   lamp["max"] = SAB_GROW_LIGHT_MAX_PERCENT;
 
-  JsonObject pan = actuators["pan"].to<JsonObject>();
-  pan["supported"] = true;
-  pan["type"] = "angle";
-  pan["unit"] = "deg";
-  pan["min"] = SAB_SERVO_MIN_ANGLE_DEG;
-  pan["max"] = SAB_SERVO_MAX_ANGLE_DEG;
-
-  JsonObject tilt = actuators["tilt"].to<JsonObject>();
-  tilt["supported"] = true;
-  tilt["type"] = "angle";
-  tilt["unit"] = "deg";
-  tilt["min"] = SAB_SERVO_MIN_ANGLE_DEG;
-  tilt["max"] = SAB_SERVO_MAX_ANGLE_DEG;
-
   JsonObject positioning = document["positioning"].to<JsonObject>();
   positioning["target_position_supported"] = true;
   positioning["water_gun_control_supported"] = true;
-  positioning["water_gun_simulation_only"] = false;
   positioning["water_gun_timed_spray_supported"] = true;
   positioning["water_gun_max_duration_seconds"] = SAB_TIMED_SPRAY_MAX_SECONDS;
   positioning["dynamic_max_hz"] = 5;
@@ -413,10 +350,8 @@ void publishCapabilities()
 String buildAckPayload(const IotCommand &command, bool executed, int actualValue, const char *errorCode)
 {
   JsonDocument document;
-  document["schema_version"] = SAB_SCHEMA_VERSION;
+  // 后端已按 command_id 保存原命令，ACK 只返回最终结果，不回显整条命令。
   document["command_id"] = command.commandId;
-  document["device_id"] = SAB_DEVICE_ID;
-  document["site_id"] = SAB_SITE_ID;
   document["acknowledged_at"] = epochMilliseconds();
   document["state"] = executed ? "executed" : "rejected";
   if (executed)
@@ -429,55 +364,14 @@ String buildAckPayload(const IotCommand &command, bool executed, int actualValue
   }
   document["feedback_verified"] = false;
 
-  JsonObject commandObject = document["command"].to<JsonObject>();
-  commandObject["operation"] = command.kind == IotCommandKind::TargetPosition ? "target_position" : "set";
-  commandObject["target"] = targetName(command.target);
-  commandObject["value"] = command.value;
-
-  if (command.kind == IotCommandKind::TargetPosition)
-  {
-    JsonObject position = document["received_position"].to<JsonObject>();
-    position["ground_range_mm"] = command.groundRangeMm;
-    position["bearing_deg"] = command.bearingDeg;
-
-    JsonObject waterGun = document["received_water_gun"].to<JsonObject>();
-    waterGun["mode"] = waterGunModeName(command.waterGunMode);
-    waterGun["spray_enabled"] = command.sprayEnabled;
-    waterGun["simulation_only"] = command.simulationOnly;
-    waterGun["pump_control_percent"] = command.pumpControlPercent;
-    waterGun["session_id"] = command.sessionId.length() == 0 ? nullptr : command.sessionId.c_str();
-    waterGun["sequence"] = command.sequence;
-    waterGun["spray_schedule"] = sprayScheduleName(command.spraySchedule);
-    if (command.sprayDurationPresent)
-    {
-      waterGun["spray_duration_seconds"] = command.sprayDurationSeconds;
-    }
-    else
-    {
-      waterGun["spray_duration_seconds"] = nullptr;
-    }
-    if (command.sprayEndsAtPresent)
-    {
-      waterGun["spray_ends_at"] = command.sprayEndsAt;
-    }
-    else
-    {
-      waterGun["spray_ends_at"] = nullptr;
-    }
-    waterGun["calibration"] = "UN_CALIBRATED_PLACEHOLDER";
-  }
-
   if (executed)
   {
-    document["message"] = command.kind == IotCommandKind::TargetPosition ? "control_output_applied" : "actuator_output_applied";
     document["error"] = nullptr;
   }
   else
   {
-    document["message"] = errorCode;
     JsonObject error = document["error"].to<JsonObject>();
     error["code"] = errorCode;
-    error["message"] = errorCode;
   }
 
   String payload;
@@ -498,37 +392,17 @@ void publishAckAndCache(const IotCommand &command, bool executed, int actualValu
 }
 
 /**
- * 校验 MQTT 公共信封。identityValidated 只有在 schema/device/site 匹配后才为 true；
- * 上层仅在该标志为 true 时允许“非法水枪业务字段触发安全停泵”。
+ * 校验精简命令信封。
+ *
+ * 协议版本和设备身份由精确订阅 Topic
+ * smartagribrain/v1/devices/{device_id}/command 确定，因此 JSON 不再重复携带
+ * schema_version、device_id、site_id、issued_at、source 和 reason。
  */
 bool validateEnvelope(JsonDocument &document, IotCommand &command, bool &identityValidated, const char *&errorCode)
 {
   identityValidated = false;
-  if (!document["schema_version"].is<const char *>() ||
-      strcmp(document["schema_version"].as<const char *>(), SAB_SCHEMA_VERSION) != 0)
-  {
-    errorCode = "INVALID_COMMAND";
-    Serial.println("[CMD][ENVELOPE_FAIL] field=schema_version code=INVALID_COMMAND");
-    return false;
-  }
-  if (!document["device_id"].is<const char *>() ||
-      strcmp(document["device_id"].as<const char *>(), SAB_DEVICE_ID) != 0)
-  {
-    errorCode = "INVALID_COMMAND";
-    Serial.println("[CMD][ENVELOPE_FAIL] field=device_id code=INVALID_COMMAND");
-    return false;
-  }
-  if (!document["site_id"].isNull() &&
-      (!document["site_id"].is<const char *>() || strcmp(document["site_id"].as<const char *>(), SAB_SITE_ID) != 0))
-  {
-    errorCode = "INVALID_COMMAND";
-    Serial.println("[CMD][ENVELOPE_FAIL] field=site_id code=INVALID_COMMAND");
-    return false;
-  }
-  identityValidated = true;
-
-  if (!document["command_id"].is<const char *>() || !document["issued_at"].is<uint64_t>() ||
-      !document["expires_at"].is<uint64_t>() || !document["source"].is<const char *>() ||
+  if (!document["command_id"].is<const char *>() ||
+      !document["expires_at"].is<uint64_t>() ||
       !document["command"].is<JsonObject>())
   {
     errorCode = "INVALID_COMMAND";
@@ -537,39 +411,38 @@ bool validateEnvelope(JsonDocument &document, IotCommand &command, bool &identit
   }
 
   command.commandId = document["command_id"].as<String>();
-  command.deviceId = document["device_id"].as<String>();
-  command.siteId = document["site_id"].is<const char *>() ? document["site_id"].as<String>() : String(SAB_SITE_ID);
-  command.source = document["source"].as<String>();
-  command.reason = document["reason"].is<const char *>() ? document["reason"].as<String>() : String();
-  command.issuedAt = document["issued_at"].as<uint64_t>();
   command.expiresAt = document["expires_at"].as<uint64_t>();
 
-  if (!isValidCommandId(command.commandId) || !isAllowedSource(command.source.c_str()))
+  if (!isValidCommandId(command.commandId))
   {
     errorCode = "INVALID_COMMAND";
-    Serial.printf("[CMD][ENVELOPE_FAIL] command_id=%s field=id_or_source code=INVALID_COMMAND\n", command.commandId.c_str());
+    Serial.printf("[CMD][ENVELOPE_FAIL] command_id=%s field=command_id code=INVALID_COMMAND\n", command.commandId.c_str());
     return false;
   }
 
-  if (command.expiresAt <= command.issuedAt || command.expiresAt - command.issuedAt < 5000ULL ||
-      command.expiresAt - command.issuedAt > 300000ULL)
-  {
-    errorCode = "INVALID_COMMAND";
-    Serial.printf("[CMD][ENVELOPE_FAIL] command_id=%s field=ttl code=INVALID_COMMAND\n", command.commandId.c_str());
-    return false;
-  }
-  if (!isTimeSynced())
+  const uint64_t now = epochMilliseconds();
+  if (now == 0)
   {
     errorCode = "DEVICE_TIME_UNSYNCED";
     Serial.printf("[CMD][ENVELOPE_FAIL] command_id=%s field=device_time code=%s\n", command.commandId.c_str(), errorCode);
     return false;
   }
-  if (epochMilliseconds() > command.expiresAt)
+  if (now > command.expiresAt)
   {
     errorCode = "COMMAND_EXPIRED";
     Serial.printf("[CMD][ENVELOPE_FAIL] command_id=%s field=expires_at code=%s\n", command.commandId.c_str(), errorCode);
     return false;
   }
+  if (command.expiresAt - now > 300000ULL)
+  {
+    errorCode = "INVALID_COMMAND";
+    Serial.printf("[CMD][ENVELOPE_FAIL] command_id=%s field=expires_at_too_far code=INVALID_COMMAND\n",
+                  command.commandId.c_str());
+    return false;
+  }
+
+  // 消息已由 MQTT 客户端在本设备的精确 command Topic 上接收，可触发非法水枪命令的安全停泵。
+  identityValidated = true;
   return true;
 }
 
@@ -588,15 +461,10 @@ bool parseSetCommand(JsonObject commandObject, IotCommand &command, const char *
 
   command.kind = IotCommandKind::SetActuator;
   command.value = commandObject["value"].as<int>();
-  const bool pumpValid = command.target == IotCommandTarget::Pump && command.value >= 0 && command.value <= SAB_PUMP_MAX_PERCENT;
   const bool lampValid = command.target == IotCommandTarget::GrowLight && command.value >= 0 && command.value <= SAB_GROW_LIGHT_MAX_PERCENT;
-  const bool servoValid = (command.target == IotCommandTarget::Pan || command.target == IotCommandTarget::Tilt) &&
-                          command.value >= SAB_SERVO_MIN_ANGLE_DEG && command.value <= SAB_SERVO_MAX_ANGLE_DEG;
-  if (!pumpValid && !lampValid && !servoValid)
+  if (!lampValid)
   {
-    errorCode = (command.target == IotCommandTarget::Pan || command.target == IotCommandTarget::Tilt)
-                    ? "TARGET_OUT_OF_RANGE"
-                    : "INVALID_COMMAND";
+    errorCode = "INVALID_COMMAND";
     return false;
   }
   return true;
@@ -620,7 +488,7 @@ bool parseWaterGunCommand(JsonObject commandObject, IotCommand &command, const c
 
   if (!position["ground_range_mm"].is<float>() || !position["bearing_deg"].is<float>() ||
       !waterGun["mode"].is<const char *>() || !waterGun["spray_enabled"].is<bool>() ||
-      !waterGun["simulation_only"].is<bool>() || !waterGun["pump_control_percent"].is<float>() ||
+      !waterGun["pump_control_percent"].is<float>() ||
       !waterGun["sequence"].is<uint32_t>() || !waterGun["spray_schedule"].is<const char *>())
   {
     errorCode = "INVALID_COMMAND";
@@ -630,7 +498,6 @@ bool parseWaterGunCommand(JsonObject commandObject, IotCommand &command, const c
   command.groundRangeMm = position["ground_range_mm"].as<float>();
   command.bearingDeg = position["bearing_deg"].as<float>();
   command.sprayEnabled = waterGun["spray_enabled"].as<bool>();
-  command.simulationOnly = waterGun["simulation_only"].as<bool>();
   command.pumpControlPercent = waterGun["pump_control_percent"].as<float>();
   command.sequence = waterGun["sequence"].as<uint32_t>();
 
@@ -899,8 +766,8 @@ void processRawCommand(const RawCommandMessage &raw)
     return;
   }
 
-  Serial.printf("[CMD][VALIDATED] command_id=%s source=%s ttl_remaining_ms=%llu\n",
-                command.commandId.c_str(), command.source.c_str(), command.expiresAt - epochMilliseconds());
+  Serial.printf("[CMD][VALIDATED] command_id=%s ttl_remaining_ms=%llu\n",
+                command.commandId.c_str(), command.expiresAt - epochMilliseconds());
   dispatchCommand(command);
 }
 
@@ -1021,9 +888,7 @@ void init_mqtt()
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
   JsonDocument willDocument;
-  willDocument["schema_version"] = SAB_SCHEMA_VERSION;
-  willDocument["device_id"] = SAB_DEVICE_ID;
-  willDocument["site_id"] = SAB_SITE_ID;
+  // LWT 的设备身份来自 lwt_topic；只保留后端判断离线所需的最小状态。
   willDocument["reported_at"] = 0;
   willDocument["online"] = false;
   willDocument["reason"] = "unexpected_disconnect";
@@ -1135,7 +1000,7 @@ void mqtt_complete_command(const IotCommand &command, bool executed, int actualV
   }
 }
 
-void send_sensor_data(SoilSensor *soilSensor, BH1750 *bh1750, TempSensor *tempSensor, JW01_CO2 *co2Sensor)
+void send_sensor_data(Dht11Sensor *dht11Sensor, BH1750 *bh1750, JW01_CO2 *co2Sensor)
 {
   if (!mqttConnected)
   {
@@ -1145,27 +1010,35 @@ void send_sensor_data(SoilSensor *soilSensor, BH1750 *bh1750, TempSensor *tempSe
 
   const ActuatorState state = currentActuatorState();
   JsonDocument document;
-  document["schema_version"] = SAB_SCHEMA_VERSION;
+  // message_id 用于 QoS 1 去重；设备 ID 和协议版本已由 Topic 唯一确定。
   document["message_id"] = makeUuidV4();
-  document["device_id"] = SAB_DEVICE_ID;
-  document["site_id"] = SAB_SITE_ID;
-  document["sequence"] = ++telemetrySequence;
   document["sampled_at"] = epochMilliseconds();
-  document["time_quality"] = isTimeSynced() ? "synced" : "unsynced";
 
   JsonObject sensors = document["sensors"].to<JsonObject>();
-  sensors["soil_moisture_pct"] = soilSensor->getHumidityPercent();
-  sensors["illuminance_lux"] = bh1750->readLight();
-  sensors["temperature_c"] = tempSensor->getTemperature();
-  sensors["co2_ppm"] = co2Sensor->getCO2();
+  JsonObject quality = document["quality"].to<JsonObject>();
+  // Keep sensor value and quality inseparable. A non-finite driver result is
+  // published as JSON null so the backend never treats an invalid ADC/I2C
+  // reading as a real environmental measurement.
+  const auto publishSensor = [&sensors, &quality](const char *name, float value) {
+    if (isfinite(value))
+    {
+      sensors[name] = value;
+      quality[name] = "ok";
+    }
+    else
+    {
+      sensors[name] = nullptr;
+      quality[name] = "invalid";
+    }
+  };
+  publishSensor("humidity_pct", dht11Sensor->getHumidityPercent());
+  publishSensor("illuminance_lux", bh1750->readLight());
+  publishSensor("temperature_c", dht11Sensor->getTemperatureC());
+  publishSensor("co2_ppm", co2Sensor->getCO2());
 
   JsonObject actuators = document["actuators"].to<JsonObject>();
-  JsonObject pump = actuators["pump"].to<JsonObject>();
-  pump["desired"] = state.pumpPercent;
-  pump["actual"] = state.pumpPercent;
-  JsonObject lamp = actuators["grow_light"].to<JsonObject>();
-  lamp["desired"] = state.growLightPercent;
-  lamp["actual"] = state.growLightPercent;
+  // 补光灯没有反馈线，单个百分比表示 ESP32 当前写入 GPIO14 的 PWM 目标值。
+  actuators["grow_light"] = state.growLightPercent;
 
   JsonObject positioning = document["positioning"].to<JsonObject>();
   positioning["pan_deg"] = state.panAngleDeg;
@@ -1186,8 +1059,7 @@ void send_sensor_data(SoilSensor *soilSensor, BH1750 *bh1750, TempSensor *tempSe
   waterGun["sequence"] = state.waterGunSequence;
 
   JsonObject connectivity = document["connectivity"].to<JsonObject>();
-  connectivity["wifi"] = WiFi.status() == WL_CONNECTED ? "connected" : "disconnected";
-  connectivity["mqtt"] = mqttConnected ? "connected" : "disconnected";
+  // 能收到本消息已能证明发送时 Wi-Fi/MQTT 可用，只保留无法从 Topic 推导的 RSSI。
   connectivity["rssi_dbm"] = WiFi.RSSI();
 
   String payload;

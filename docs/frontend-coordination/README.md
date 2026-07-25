@@ -1,140 +1,65 @@
-# 前端与后端协同问题
+# 前端与后端协同状态
 
-本文件用于把 ESP32 联调问题准确交给 Web、C5 和后端开发者。问题状态与最终结论仍以 [问题汇总](../open-questions.md) 为唯一依据；对方回复后，必须把答案同步到对应 Q 编号的“外部反馈”。
+最后同步日期：2026-07-23。
 
-回复不能只写“支持”“可以”或“按现有逻辑”。每项必须填写要求的字段；涉及 MQTT 时必须附一份设备实际会收到的完整 JSON。
+本文件汇总 Web、FastAPI、Broker、ESP32-C5 与普通 ESP32 的联调边界。问题结论以 [问题与答复汇总](../open-questions.md) 为唯一依据，正式字段以 [SmartAgriBrain v1 统一标准](../smartagribrain-v1-standard.md) 为准。
 
-## Q-017 动态模式保活
+## 1. 设备侧基线
 
-### 背景
+- 实际芯片是普通 ESP32，PlatformIO 环境为 `esp32dev`。
+- 兼容协议 ID 暂保留 `greenhouse_001_s3`；`_s3` 不表示真实芯片型号。
+- Topic 前缀为 `smartagribrain/v1/devices/greenhouse_001_s3`。
+- MQTT 使用 3.1.1、QoS 1 和设备持久会话。
+- 原子执行器目标为 `pump`、`grow_light`、`pan`、`tilt`。
+- 水枪复合命令为 `operation=target_position`、`target=position`。
+- 动态模式要求同一 `session_id` 的 `sequence` 严格递增；3 s 没有合法新序号时设备本地停泵。
+- `executed` 仅表示控制输出已应用，不表示已检测真实水流、角度或命中结果。
 
-Web 当前约每秒向后端发送 heartbeat，但 ESP32 只能看见 MQTT。设备为防止动态页面或网络失联后持续喷水，会在超过 3 秒没有收到有效动态消息时停泵。
+## 2. 已核实的前端与后端状态
 
-### 请前端/后端明确回答
+### 2.1 真实 MQTT
 
-1. Web heartbeat 当前是否会生成 MQTT 消息？请回答“会”或“不会”，并指出对应后端代码入口。
-2. 如果会，消息发布到哪个 Topic，`operation`、`session_id`、`sequence` 分别是什么？
-3. heartbeat 周期和后端判定会话失效的时间分别是多少毫秒？
-4. heartbeat 是否会递增 `sequence`？如果不会，ESP32 应如何区分新保活和 QoS 1 重发？
-5. Web 正常退出、浏览器崩溃和后端重启时，后端分别会向 ESP32 发布什么停止消息？
+当前部署配置通过忽略的 `backend_api/.env.mqtt.local` 启用 `MQTT_ENABLED=true` 与 `DEVICE_COMMAND_TRANSPORT=mqtt`，并已完成 EMQX TLS 连接订阅验证。水枪控制不再具有本地模拟分支，确认后的请求会进入真实设备命令队列并等待 ESP32 ACK。
 
-### 建议方案
+本项目不再使用本地 Mosquitto。`scripts/setup/configure-emqx.ps1` 会生成忽略的 `backend_api/.env.mqtt.local`；`database.py` 在加载 `backend_api/.env` 后会加载该文件并覆盖同名 MQTT 配置。该脚本只接受 EMQX TLS `mqtts://...:8883` 和本机 CA 证书。
 
-动态喷水期间，后端每 1000 ms 发布一次当前 `target_position`，保持同一 `session_id` 并递增 `sequence`。ESP32 每次收到合法新序号后刷新 3000 ms 超时；超时后本地停泵。
+### 2.2 动态水枪保活
 
-### 回复模板
+Web 每 1000 ms 刷新后端动态会话。后端会为每次有效 heartbeat 递增服务端 `sequence`，并在 1 秒节拍向 MQTT 命令队列重发当前 `target_position`；ESP32 只在收到新序号后刷新 3 s 本地安全超时。后端重启时仍不恢复旧会话，因此设备端超时停泵仍是必要安全边界。
 
-```text
-Q-017 回复
-是否生成 MQTT：
-后端代码位置：
-Topic：
-heartbeat 周期 ms：
-后端会话超时 ms：
-sequence 规则：
-正常退出停止方式：
-异常退出停止方式：
-后端重启恢复方式：
-完整 MQTT JSON：
-```
+### 2.3 ACK 展示
 
-## Q-019 ACK 与前端文案
+Web 当前把 `executed` 映射为 `succeeded`，显示“状态已同步”；没有独立 ACK 超时状态。C5 当前不订阅 `command_ack`，只能显示“正在执行确认的操作…”，不能显示最终设备回执。
 
-### 背景
+## 3. 真实联调必须完成的工作
 
-SG90 是开环舵机，现场也没有水流传感器。ESP32 能确认控制值已经写入 PWM 和状态机没有报错，但不能测得真实舵机角度、水流量或是否命中目标。
-
-### 请前端/后端明确回答
-
-1. 是否接受 `state=executed` 表示“设备已应用控制输出”，而不是“物理动作已经由传感器验证”？
-2. Web 和 C5 收到 `executed` 后显示的准确中文文案是什么？
-3. ACK 超时、`rejected`、设备离线时分别显示什么文案和状态？
-4. 后端是否要求 ACK 增加 `feedback_verified=false` 或等价字段？若需要，请给出字段名、类型和示例。
-
-### 设备侧要求
-
-界面不得显示“已检测到水流”“已到达真实角度”或“已命中目标”，除非未来增加对应反馈传感器。
-
-### 回复模板
+1. 让后端实际加载 MQTT 配置，并在私有 `backend_api/.env.mqtt.local` 中设置：
 
 ```text
-Q-019 回复
-是否接受输出已应用语义：
-executed 显示文案：
-rejected 显示文案：
-ACK 超时显示文案：
-设备离线显示文案：
-是否新增反馈标志：
-字段定义及完整 ACK JSON：
+MQTT_ENABLED=true
+DEVICE_COMMAND_TRANSPORT=mqtt
 ```
 
-## Q-020 MQTT QoS 1 与会话配置
+2. 已实现：后端每 1000 ms 向设备发布当前 `target_position`，保持同一 `session_id` 并统一递增 `sequence`；Web 不再与 heartbeat 竞争序号。
+3. Web 和 C5 只在收到对应 `command_id` 的 ACK 后显示设备已应用输出。
+4. Web 对 `executed`、`rejected`、ACK 超时和设备离线使用不同状态，并展示稳定错误码。
+5. C5 通过后端事件获得最终 ACK，不得在确认对话结束时直接宣称硬件已执行。
+6. 后端发布前生成唯一 `command_id`，保存命令状态，并按 `command_id` 幂等处理 QoS 1 重复 ACK。
 
-### 已确定的设备行为
+## 4. 联调验收证据
 
-ESP32 的 `command` 订阅以及 `command_ack`、`telemetry`、`status`、`capabilities` 和 LWT 全部使用 QoS 1。设备使用持久会话，并通过命令有效期、动态序号和 `command_id` 幂等处理重复投递。
+真实联调完成需同时保存以下证据：
 
-### 请后端明确回答
+- 后端启动日志或进程连接显示 MQTT 已连接至 EMQX TLS `8883`。
+- Broker 可见完整 `command`、`command_ack`、`telemetry`、`status` 和 `capabilities` 消息。
+- ESP32 串口日志能关联 `command_id`，并显示校验、舵机等待、开泵/停泵和 ACK 阶段。
+- Web 与 C5 的状态转换与实际 ACK 一致，断网、关页、后端重启和过期命令均不会使水泵继续运行。
 
-1. Broker 的产品名称、版本和部署方式是什么？
-2. 后端发布 `command` 时是否使用 QoS 1、retain=false？
-3. 后端订阅四类设备上行主题时分别使用什么 QoS？
-4. 设备离线时 Broker 最多缓存多少条或多少字节消息，缓存多久？
-5. Broker 是否支持 MQTT 5 Message Expiry？若只支持 MQTT 3.1.1，如何清理过期命令？
-6. 后端重启后是否使用持久会话，如何避免重复处理旧 ACK 和遥测？
+## 5. 待改动文案
 
-### 回复模板
+- `executed`：“设备已应用控制输出，未验证真实水流、舵机角度或命中结果”。
+- `rejected`：“设备未应用控制输出：{error_code}”。
+- ACK 超时：“等待设备回执超时，无法确认设备是否已应用控制输出”。
+- 离线：“设备离线，未确认命令是否已执行”。
 
-```text
-Q-020 回复
-Broker 产品与版本：
-MQTT 协议版本：
-command 发布 QoS/retain：
-command_ack 订阅 QoS：
-telemetry 订阅 QoS：
-status 订阅 QoS：
-capabilities 订阅 QoS：
-设备会话是否持久：
-后端会话是否持久：
-离线队列上限：
-消息过期/清理策略：
-后端幂等存储位置：
-相关配置或代码位置：
-```
-
-## Q-021 真实硬件与模拟模式
-
-### 背景
-
-ESP32 收到 `simulation_only=true` 时只允许解析和回报，绝不能物理开泵。真实联调必须由后端明确发送 `simulation_only=false`，不能依赖未说明的默认值。
-
-### 请前端/后端明确回答
-
-1. 开发、演示和正式环境中的 `WATER_GUN_SIMULATION_ONLY` 分别是什么值？
-2. 配置由哪个环境文件、启动参数或配置中心提供？请给出配置名称和代码读取位置，不要提供密码。
-3. 后端启动日志是否会明确打印当前模拟模式？
-4. 前端是否显示当前为模拟控制，避免用户误认为水泵已真实启动？
-5. `simulation_only=true` 时，后端期望 ESP32 返回 `executed` 还是 `rejected`？请给出完整 ACK 示例。
-
-### 回复模板
-
-```text
-Q-021 回复
-开发环境值：
-演示环境值：
-正式环境值：
-配置注入方式：
-后端读取代码位置：
-启动日志是否显示：
-前端模拟模式文案：
-模拟命令期望 ACK 状态：
-完整命令 JSON：
-完整 ACK JSON：
-```
-
-## 回复提交要求
-
-1. 将每项回复填写到 `docs/open-questions.md` 对应 Q 编号的“外部反馈”。
-2. 同时附上实际 MQTT JSON 和相关后端代码路径。
-3. 如果当前尚未实现，明确写“未实现”，并说明负责人、计划方案和预计完成条件。
-4. 不要修改 ESP32 已确认的 GPIO、PWM 和安全停止结论；若必须变更，新增问题说明原因和影响范围。
+新的未确认问题必须先写入 `docs/open-questions.md`，不在本文件另起问题编号。

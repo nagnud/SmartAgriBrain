@@ -1,4 +1,3 @@
-#include "SoilSensor.h"
 #include "pump.h"
 #include <ArduinoJson.h>
 
@@ -66,7 +65,7 @@ int WaterPump::getCurrentSpeed()
     }
      */
 
-void callback_pump(SoilSensor *soilSensor, WaterPump *waterPump, char *topic, byte *payload, unsigned int length)
+void callback_pump(WaterPump *waterPump, char *topic, byte *payload, unsigned int length)
 {
     int target_value = 0;
     // 1. 创建 JSON 文档对象,这里的 128字节 是内存容量，根据JSON 大小调整
