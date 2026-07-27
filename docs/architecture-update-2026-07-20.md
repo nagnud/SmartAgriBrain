@@ -12,12 +12,12 @@
 固定数据流如下：
 
 ```text
-传感器/执行器 <-> 普通 ESP32 <-> MQTT Broker <-> smartagribrain-api <-> 数据库
-                                                        ^
-                                                        |
-                                                   REST + SSE
-                                                        |
-                                             Web 前端 / ESP32-C5
+传感器/执行器 <-> 普通 ESP32 <-> EMQX MQTT <-> smartagribrain-api <-> 数据库
+                                              ^             ^
+                                              |             |
+                                  C5 状态/助手 MQTT      REST/SSE/语音接口
+                                              |             |
+                                          ESP32-C5       Web 前端
 ```
 
 ## 2. 当前工作区
@@ -36,10 +36,11 @@ SmartAgriBrain/
     platformio.ini
   frontend_dashboard/      Web 管理端和现有本地服务原型
   前端/                  新增 Web/FastAPI/MQTT 集成工作区及联调说明
+  改/c5/                  独立 ESP-IDF C5 语音显示工程及 EMQX 通信组件
   README.md
 ```
 
-当前工作区没有 C5 源码。C5 工程归位时固定使用 `esp32c5_voice_display/`，不得放入 `esp32/` 或与普通 ESP32 的 PlatformIO 工程混合。
+当前 C5 源码位于独立 Git 工作区 `改/c5/`，没有混入普通 ESP32 的 PlatformIO 工程。其显示和语音业务保持原实现，`common_components/sensair_iot` 已按当前 FastAPI/EMQX Topic 适配。
 
 ## 3. 普通 ESP32 硬件定义
 
@@ -61,11 +62,11 @@ SmartAgriBrain/
 
 - 已接入 DS18B20 温度、BH1750 光照、土壤湿度和 JW01 CO2 更新流程。
 - 已实现 GPIO14 补光灯百分比控制。
-- 已实现 GPIO26 水泵百分比控制，非零 1 至 39% 暂时提升到 40%。
+- 已实现 GPIO26 水泵百分比控制；后端按实测两段距离功率模型计算，设备端非零有效下限为 24%。
 - 已实现 `PanTilt` 双 SG90 驱动和 0 至 180 度本机调试命令。
 - 已实现 `WaterGunController` 非阻塞状态机，包括停泵、转向、等待 800 ms、开泵、定时停止和动态 3 秒超时。
 
-40% 水泵启动值、800 ms 舵机稳定时间、目标坐标映射和距离功率关系均未实测，代码和消息必须标记 `UN_CALIBRATED_PLACEHOLDER`。
+水泵距离功率关系已采用实测分段模型。800 ms 舵机稳定时间和目标坐标到舵机角度的关系仍未完成落点实测，相关代码和消息继续标记 `UN_CALIBRATED_PLACEHOLDER`。
 
 ### 4.2 MQTT
 

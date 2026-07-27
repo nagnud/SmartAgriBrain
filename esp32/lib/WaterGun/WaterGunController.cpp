@@ -222,7 +222,8 @@ IotCommandResult WaterGunController::applyAfterServoReady(
     lastDynamicCommandMs = 0;
   }
 
-  // 后端百分比是临时算法。lroundf 按用户确认四舍五入；硬件写入函数再应用 40% 最小值。
+  // 后端百分比来自实测分段拟合。lroundf 转为设备 PWM 整数百分比；
+  // 硬件写入函数只补充 24% 非零下限保护，不改变标定有效范围内的值。
   const int roundedPercent = static_cast<int>(lroundf(command.pumpControlPercent));
   actualValue = writePump(roundedPercent, "water_gun_start_after_servo_settle");
   return IotCommandResult::Executed;

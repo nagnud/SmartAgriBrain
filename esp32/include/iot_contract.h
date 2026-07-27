@@ -24,7 +24,8 @@
 
 constexpr uint8_t SAB_MQTT_QOS = 1;
 constexpr uint8_t SAB_PUMP_MAX_PERCENT = 100;
-constexpr uint8_t SAB_PUMP_MIN_RUNNING_PERCENT = 40;
+// 与后端实测分段模型使用同一有效下限。0 表示停泵，非零输出不得低于 24%。
+constexpr uint8_t SAB_PUMP_MIN_RUNNING_PERCENT = 24;
 constexpr uint16_t SAB_PUMP_PWM_FREQUENCY_HZ = 1000;
 constexpr bool SAB_PUMP_ACTIVE_HIGH = true;
 constexpr uint8_t SAB_GROW_LIGHT_MAX_PERCENT = 90;

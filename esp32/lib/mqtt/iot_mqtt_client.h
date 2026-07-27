@@ -57,7 +57,7 @@ struct IotCommand
   float bearingDeg = 0.0F;          // 目标方向角，允许 -90..90 deg，0 表示正前方。
   WaterGunMode waterGunMode = WaterGunMode::Static;
   bool sprayEnabled = false;        // false 表示有效命令完成基础校验后必须优先停泵。
-  float pumpControlPercent = 0.0F;  // 后端临时目标百分比；设备四舍五入并应用最小 40%。
+  float pumpControlPercent = 0.0F;  // 后端按实测分段模型计算；设备四舍五入并应用 24% 非零下限。
   String sessionId;                 // Dynamic 必填；Static 必须为空字符串。
   uint32_t sequence = 0;            // 同一动态会话严格递增，用于拒绝乱序和 QoS 1 重发。
   SpraySchedule spraySchedule = SpraySchedule::Continuous;

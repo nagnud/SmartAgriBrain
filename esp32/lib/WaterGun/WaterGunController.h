@@ -9,7 +9,7 @@
 /**
  * 水泵硬件写入函数。
  * @param requestedPercent 协议请求百分比，0 表示关闭，非零范围为 1..100。
- * @return 实际写入 GPIO26 的百分比；临时最小启动规则可能把 1..39 提升到 40。
+ * @return 实际写入 GPIO26 的百分比；标定边界保护会把 1..23 提升到 24。
  */
 using PumpOutputWriter = int (*)(int requestedPercent);
 

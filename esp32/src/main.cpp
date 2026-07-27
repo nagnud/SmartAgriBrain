@@ -57,9 +57,10 @@ uint32_t pumpPercentToDuty(int percent)
 /**
  * 普通水泵命令和水枪状态机唯一允许调用的 GPIO26 写入出口。
  * @param requestedPercent 协议请求值，0 关闭，非零范围 1..100。
- * @return 实际应用百分比。临时规则将 1..39 提升到 40，确保达到假定启动功率。
+ * @return 实际应用百分比。1..23 提升到实测模型的 24% 有效下限，24..100 原样应用。
  *
- * SAB_PUMP_MIN_RUNNING_PERCENT=40 尚未经过真实水泵测量，日志始终标注 PLACEHOLDER。
+ * 后端负责根据目标距离执行实测分段拟合；设备端仅执行最终安全限幅，
+ * 防止其他调用方绕过后端后写入低于标定有效范围的非零 PWM。
  */
 int applyPumpOutput(int requestedPercent)
 {
@@ -68,7 +69,7 @@ int applyPumpOutput(int requestedPercent)
   const uint32_t duty = pumpPercentToDuty(actualPercent);
   ledcWrite(PUMP_PWM_CHANNEL, duty);
   pumpPercent = actualPercent;
-  Serial.printf("[PUMP][GPIO_WRITE] pin=%u requested=%d actual=%d duty=%u min_running=%u calibration=PLACEHOLDER\n",
+  Serial.printf("[PUMP][GPIO_WRITE] pin=%u requested=%d actual=%d duty=%u min_running=%u calibration=MEASURED_PIECEWISE\n",
                 PUMP_PIN, requestedPercent, actualPercent, duty, SAB_PUMP_MIN_RUNNING_PERCENT);
   return actualPercent;
 }

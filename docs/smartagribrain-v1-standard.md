@@ -9,16 +9,16 @@
 从本标准生效起，系统只有一个对外后端服务，逻辑名称为 `smartagribrain-api`：
 
 ```text
-采集 ESP32 <-> MQTT Broker <-> smartagribrain-api <-> PostgreSQL/SQLite
-                                      ^                  ^
-                                      |                  |
-                                REST + SSE          HTTPS + SSE
-                                      |                  |
-                                  Vue Dashboard   ESP32-C5 语音显示终端
+采集 ESP32 <-> EMQX MQTT <-> smartagribrain-api <-> PostgreSQL/SQLite
+                    ^                 ^       ^
+                    |                 |       |
+          C5 状态/助手事件 MQTT    REST/SSE  HTTP/WebSocket 语音
+                    |                 |       |
+            ESP32-C5 语音显示终端   Vue Dashboard
 ```
 
 - 采集 ESP32 只通过 MQTT 上报遥测、状态、能力和命令 ACK；不直接调用 HTTP API。
-- ESP32-C5 语音显示终端只通过 HTTPS 和 SSE 访问 `smartagribrain-api`；它不发布农业传感器 MQTT，也不控制二维云台。
+- ESP32-C5 使用 FastAPI HTTP/WebSocket 传输语音音频，并通过 EMQX MQTT 接收 `view_state`、助手回复及发布状态、能力、助手请求和确认决定；它不发布农业传感器遥测，不订阅普通 ESP32 的 `command`，也不直接控制二维云台。
 - 浏览器只调用 REST 和 SSE；不保存 MQTT 账号，不直接连接 Broker。
 - `smartagribrain-api` 是 MQTT 客户端、数据库写入者、命令发布者和唯一 REST 服务。
 - 当前工作区中可核验的集成服务位于 `前端/backend_api/`。`frontend_dashboard/` 只作为历史原型参考；不得同时让两个后端对外宣称是 `smartagribrain-api`。
@@ -249,12 +249,13 @@ REST accepted -> QUEUED -> PUBLISHED -> EXECUTED
 - `bearing_deg` 范围固定为 -90 至 90 度，并线性映射到水平 SG90 的 0 至 180 度命令角。
 - `ground_range_mm` 当前接受 300 至 1200 mm，并线性映射到垂直舵机 60 至 5 度；300 mm 对应竖直向上的 60 度，1200 mm 对应平行向前的 5 度。垂直轴所有写入强制限制在实体安全的 5 至 60 度。
 - `water_gun` 包含 `mode`、`spray_enabled`、`pump_control_percent`、`session_id`、`sequence`、`spray_schedule`、`spray_duration_seconds`、`spray_ends_at`。
+- `pump_control_percent` 由后端按实测两段距离功率模型计算，非零有效范围为 24% 至 100%；ESP32 只执行相同边界的最终限幅。
 - 目标变化时先停泵，舵机稳定后才能开泵。
 - `timed` 由 ESP32 本地单调时钟和后端停止命令双重保护。
 - `dynamic` 使用 `session_id` 和严格递增 `sequence`；序号只能由后端为目标更新和 heartbeat 统一生成，Web 不得自行递增。设备可见保活中断 3 秒时停泵。
 - Web 动态目标请求必须串行化并只保留发送期间的最新目标；相同位置的 heartbeat 不得使 ESP32 重复写舵机 PWM。
 - 动态模式关闭喷水时 ESP32 仍须保留会话和最后序号，不能让延迟旧目标绕过乱序校验；只有退出动态模式才能清除该状态。
-- 临时坐标和泵功率算法必须标记 `UN_CALIBRATED_PLACEHOLDER`。
+- 坐标到舵机角度及稳定等待仍须标记 `UN_CALIBRATED_PLACEHOLDER`；水泵功率已采用实测分段模型，不再使用该标记。
 
 ## 4. REST API v1 契约
 
