@@ -250,7 +250,7 @@ const historyMetricDefinitions: HistoryMetricDefinition[] = [
   { key: 'temperature', name: '温度', unit: '摄氏度', color: '#D68C1F', value: (point) => point.temperature },
   { key: 'light', name: '光照', unit: 'lux', color: '#E6B325', value: (point) => point.light },
   { key: 'co2', name: '二氧化碳', unit: 'ppm', color: '#7A5CFA', value: (point) => point.co2 },
-  { key: 'soil_moisture', name: '土壤湿度', unit: '%', color: '#2F8F4E', value: (point) => point.soil_moisture },
+  { key: 'humidity', name: '空气湿度', unit: '%RH', color: '#2F8F8F', value: (point) => point.humidity },
 ];
 
 const historySampleIntervalMs = 10_000;
@@ -582,12 +582,8 @@ const waterGunManualForwardMaxMm = 1200;
 const waterGunManualHalfWidthMm = 1200;
 const waterGunMinRangeMm = 300;
 const waterGunMaxRangeMm = 1200;
-const waterGunFullScaleRangeMm = 1700;
-const waterGunMappedPumpPercent = computed(() => (
-  Math.min(100, Math.max(0, (waterGunState.value?.ground_range_mm ?? waterGunRangeMm.value) / waterGunFullScaleRangeMm * 100))
-));
 const waterGunPumpPercent = computed(() => (
-  waterGunSpraying.value ? waterGunMappedPumpPercent.value : 0
+  waterGunSpraying.value ? (waterGunState.value?.pump_control_percent ?? 0) : 0
 ));
 const waterGunTargetCartesian = computed(() => {
   const radians = waterGunBearingDeg.value * Math.PI / 180;
@@ -1799,8 +1795,16 @@ async function loadPersistentDashboardState(): Promise<void> {
       weatherPanelOpen.value = state.weatherPanelOpen;
     }
     if (Array.isArray(state.selectedHistoryMetricKeys)) {
-      const historyKeys = state.selectedHistoryMetricKeys.filter((key): key is HistoryMetricKey => (
-        typeof key === 'string' && historyMetricDefinitions.some((definition) => definition.key === key)
+      // Older dashboards used the removed soil-moisture channel for the card
+      // labelled "空气湿度". Migrate that persisted selection to the real
+      // DHT11 humidity channel so an existing browser does not hide it.
+      const migratedKeys = state.selectedHistoryMetricKeys.map((key) => (
+        key === 'soil_moisture' ? 'humidity' : key
+      ));
+      const historyKeys = migratedKeys.filter((key, index): key is HistoryMetricKey => (
+        typeof key === 'string'
+        && migratedKeys.indexOf(key) === index
+        && historyMetricDefinitions.some((definition) => definition.key === key)
       ));
       if (historyKeys.length > 0) {
         selectedHistoryMetricKeys.value = historyKeys;
@@ -1904,7 +1908,7 @@ function metricDisplayTitle(key: HistoryMetricKey): string {
     return '棚内温度';
   }
   if (key === 'humidity') {
-    return '环境湿度';
+    return '空气湿度';
   }
   if (key === 'light') {
     return '光照强度';
@@ -1913,7 +1917,7 @@ function metricDisplayTitle(key: HistoryMetricKey): string {
     return '二氧化碳浓度';
   }
   if (key === 'soil_moisture') {
-    return '空气湿度';
+    return '土壤湿度';
   }
   if (key === 'soil_ec') {
     return '土壤肥力';
@@ -5500,7 +5504,7 @@ onBeforeUnmount(() => {
                 <span>{{ historyValueText(point.temperature, '摄氏度') }}</span>
                 <span>{{ historyValueText(point.light, 'lux') }}</span>
                 <span>{{ historyValueText(point.co2, 'ppm') }}</span>
-                <span>{{ historyValueText(point.soil_moisture, '%') }}</span>
+                <span>{{ historyValueText(point.humidity, '%RH') }}</span>
               </div>
             </div>
           </section>

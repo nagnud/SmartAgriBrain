@@ -13,6 +13,7 @@ from app_state_service import read_app_state_value, save_app_state_value
 from monitoring_models import AlarmRecord
 from schemas import AssistantAction
 from site_models import EdgeAssistantMessage, EdgeDeviceRecord
+from site_schemas import GROW_LIGHT_MAX_PERCENT, GROW_LIGHT_MIN_PERCENT
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,8 @@ class C5Capability:
     markers: tuple[str, ...]
     smart_key: str | None = None
     accepts_percentage: bool = True
+    minimum_percent: int = GROW_LIGHT_MIN_PERCENT
+    maximum_percent: int = GROW_LIGHT_MAX_PERCENT
 
 
 @dataclass(frozen=True)
@@ -129,7 +132,21 @@ def _chinese_integer(text: str) -> int | None:
     return None
 
 
-def parse_c5_percentage(text: str, *, allow_bare: bool = False) -> int | None:
+def parse_c5_percentage(
+    text: str,
+    *,
+    allow_bare: bool = False,
+    minimum: int = GROW_LIGHT_MIN_PERCENT,
+    maximum: int = GROW_LIGHT_MAX_PERCENT,
+) -> int | None:
+    """Parse one spoken brightness value within the physical output range.
+
+    ``text`` is the ASR result. ``allow_bare`` is enabled only while answering
+    an active parameter question, so an unrelated number is not interpreted as
+    brightness. ``minimum`` and ``maximum`` must match the selected device
+    capability and the ordinary ESP32 firmware.
+    """
+
     compact = _compact(text)
     patterns = (
         r"百分之(\d{1,3})",
@@ -140,18 +157,18 @@ def parse_c5_percentage(text: str, *, allow_bare: bool = False) -> int | None:
         match = re.search(pattern, compact)
         if match:
             value = int(match.group(1))
-            return value if 0 <= value <= 100 else None
+            return value if minimum <= value <= maximum else None
     chinese = re.search(r"百分之([零〇一二两三四五六七八九十百]+)", compact)
     if chinese:
         value = _chinese_integer(chinese.group(1))
-        return value if value is not None and 0 <= value <= 100 else None
+        return value if value is not None and minimum <= value <= maximum else None
     if allow_bare:
         bare = re.fullmatch(r"(\d{1,3})(?:档)?", compact)
         if bare:
             value = int(bare.group(1))
-            return value if 0 <= value <= 100 else None
+            return value if minimum <= value <= maximum else None
         value = _chinese_integer(compact)
-        return value if value is not None and 0 <= value <= 100 else None
+        return value if value is not None and minimum <= value <= maximum else None
     return None
 
 
@@ -230,8 +247,8 @@ def _parameter_context(capability: C5Capability, now: int, request_id: str | Non
         "label": capability.label,
         "command_prefix": capability.command_prefix,
         "smart_key": capability.smart_key,
-        "minimum": 0,
-        "maximum": 100,
+        "minimum": capability.minimum_percent,
+        "maximum": capability.maximum_percent,
         "candidates": ["百分比"],
         "expires_at": now + C5_PARAMETER_TTL_MS,
     }
@@ -255,12 +272,20 @@ def _pending_parameter(messages: Iterable[EdgeAssistantMessage], now: int) -> di
     return None
 
 
-def _device_action(capability: C5Capability, value: int, mode: str = "manual") -> AssistantAction:
+def _device_action(
+    capability: C5Capability,
+    value: int,
+    operation: str,
+    mode: str = "manual",
+) -> AssistantAction:
+    """Create the pending control action shown and spoken by the C5.
+
+    ``value`` has already passed capability-range validation. ``operation`` is
+    the exact action repeated to the user before confirmation. ``mode`` stays
+    manual because automatic grow-light control is not implemented.
+    """
+
     command = f"{capability.command_prefix}_{'on' if value > 0 else 'off'}"
-    if value in {0, 100}:
-        operation = ("打开" if value > 0 else "关闭") + capability.label
-    else:
-        operation = f"把{capability.label}调到 {value}%"
     return AssistantAction(
         id=f"assistant-action-c5-{uuid.uuid4().hex}",
         type="device_command",
@@ -330,18 +355,30 @@ def c5_control_reply(
             )
         if any(marker in compact for marker in _AUTO_MARKERS):
             return C5ControlReply(
-                "当前未配置补光灯自动控制策略，请直接提供 0 到 100 的亮度百分比。",
+                f"当前未配置补光灯自动控制策略，请直接提供 "
+                f"{capability.minimum_percent} 到 {capability.maximum_percent} 的亮度百分比。",
                 {"c5_parameter_resolved_ids": [request_id], "c5_stage": "unsupported_auto_mode"},
                 [],
             )
-        value = parse_c5_percentage(compact, allow_bare=True)
+        value = parse_c5_percentage(
+            compact,
+            allow_bare=True,
+            minimum=capability.minimum_percent,
+            maximum=capability.maximum_percent,
+        )
         if value is not None:
             operation = f"把{capability.label}调到 {value}%"
-            return _confirmation_reply(capability, _device_action(capability, value), operation, request_id)
+            return _confirmation_reply(
+                capability,
+                _device_action(capability, value, operation),
+                operation,
+                request_id,
+            )
         logger.info("C5 assistant stage=parameter_invalid capability=%s", capability.key)
         renewed = {**pending, "expires_at": now + C5_PARAMETER_TTL_MS}
         return C5ControlReply(
-            f"请说{capability.label}百分比，例如百分之八十。",
+            f"请说{capability.label}百分比，范围是"
+            f"{capability.minimum_percent}到{capability.maximum_percent}，例如百分之八十。",
             {"c5_parameter_request": renewed, "c5_stage": "awaiting_parameter"},
             [],
         )
@@ -350,7 +387,11 @@ def c5_control_reply(
     if capability is None:
         return None
     has_control_intent = any(marker in compact for marker in _ON_MARKERS + _OFF_MARKERS + _ADJUST_MARKERS + _AUTO_MARKERS)
-    percentage = parse_c5_percentage(compact)
+    percentage = parse_c5_percentage(
+        compact,
+        minimum=capability.minimum_percent,
+        maximum=capability.maximum_percent,
+    )
     if not has_control_intent and percentage is None:
         return None
     block_reason = c5_capability_block_reason(db, site_id, capability)
@@ -359,24 +400,38 @@ def c5_control_reply(
         return C5ControlReply(block_reason, {"c5_stage": "blocked", "c5_capability": capability.key}, [])
     if any(marker in compact for marker in _AUTO_MARKERS):
         return C5ControlReply(
-            "当前未配置补光灯自动控制策略，请直接提供 0 到 100 的亮度百分比。",
+            f"当前未配置补光灯自动控制策略，请直接提供 "
+            f"{capability.minimum_percent} 到 {capability.maximum_percent} 的亮度百分比。",
             {"c5_stage": "unsupported_auto_mode", "c5_capability": capability.key},
             [],
         )
     if percentage is not None and capability.accepts_percentage:
         operation = f"把{capability.label}调到 {percentage}%"
-        return _confirmation_reply(capability, _device_action(capability, percentage), operation)
+        return _confirmation_reply(
+            capability,
+            _device_action(capability, percentage, operation),
+            operation,
+        )
     if any(marker in compact for marker in _OFF_MARKERS):
         operation = f"关闭{capability.label}"
-        return _confirmation_reply(capability, _device_action(capability, 0), operation)
+        return _confirmation_reply(
+            capability,
+            _device_action(capability, capability.minimum_percent, operation),
+            operation,
+        )
     if any(marker in compact for marker in _ON_MARKERS):
         operation = f"打开{capability.label}"
-        return _confirmation_reply(capability, _device_action(capability, 100), operation)
+        return _confirmation_reply(
+            capability,
+            _device_action(capability, capability.maximum_percent, operation),
+            operation,
+        )
     if capability.accepts_percentage:
         pending_context = _parameter_context(capability, now)
         logger.info("C5 assistant stage=awaiting_parameter capability=%s", capability.key)
         return C5ControlReply(
-            f"{capability.label}要调到百分之几？",
+            f"{capability.label}要调到百分之几？可设置范围是"
+            f"{capability.minimum_percent}到{capability.maximum_percent}。",
             {"c5_parameter_request": pending_context, "c5_stage": "awaiting_parameter"},
             [],
         )

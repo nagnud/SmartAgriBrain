@@ -74,7 +74,12 @@ from assistant_orchestrator import (  # noqa: E402
 )
 from schemas import AssistantTurnRequest, PositionCandidate  # noqa: E402
 from position_service import _remember  # noqa: E402
-from water_gun_service import WaterGunStaticRequest, water_gun_runtime  # noqa: E402
+from water_gun_service import (  # noqa: E402
+    WaterGunStaticRequest,
+    distanceToPwm,
+    pwmToDistance,
+    water_gun_runtime,
+)
 
 
 def telemetry(device_id: str, timestamp: int, temperature: float = 26.5) -> dict:
@@ -287,6 +292,12 @@ class DeviceApiTests(unittest.TestCase):
             self.assertNotIn("camera_range_mm", command.payload["position"])
 
     def test_water_gun_static_dynamic_and_stop_protocol(self) -> None:
+        # These representative values come from the measured piecewise model
+        # in 改/前端 and guard against accidentally restoring the old linear map.
+        self.assertAlmostEqual(pwmToDistance(30), 24.26, places=1)
+        self.assertAlmostEqual(pwmToDistance(80), 92.55, places=1)
+        self.assertAlmostEqual(distanceToPwm(93.5), 80.7, places=1)
+        self.assertEqual(distanceToPwm(150), 100.0)
         with SessionLocal() as db:
             command_count = db.query(DeviceCommandRecord).count()
         preview = self.client.post(
@@ -299,7 +310,7 @@ class DeviceApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(preview.status_code, 200)
-        self.assertEqual(preview.json()["pump_control_percent"], 50.0)
+        self.assertAlmostEqual(preview.json()["pump_control_percent"], 74.5, places=1)
         self.assertNotIn("simulation_only", preview.json())
         beyond_pan_range = self.client.post(
             "/api/v1/sites/greenhouse_001/water-gun/preview",
@@ -325,7 +336,7 @@ class DeviceApiTests(unittest.TestCase):
             json={"ground_range_mm": 1200, "bearing_deg": 0, "source": "vision", "spray_enabled": True},
         )
         self.assertEqual(supported_range_edge.status_code, 200)
-        self.assertAlmostEqual(supported_range_edge.json()["pump_control_percent"], 70.6, places=1)
+        self.assertAlmostEqual(supported_range_edge.json()["pump_control_percent"], 100.0, places=1)
 
         rejected_start = self.client.post(
             "/api/v1/sites/greenhouse_001/water-gun/dynamic/start",
@@ -1276,6 +1287,37 @@ class DeviceApiTests(unittest.TestCase):
             self.assertEqual(confirmed.state, "confirmed")
             command = db.query(SiteCommandRecord).one()
             self.assertEqual((command.target, command.value, command.source), ("grow_light", 80, "edge_voice"))
+
+    def test_c5_open_and_close_grow_light_use_gpio14_contract_limits(self) -> None:
+        with SessionLocal() as db:
+            opened = create_edge_assistant_reply(
+                db, "greenhouse_001", "打开补光灯", None, "edge_text"
+            )
+            self.assertEqual(opened.next_input, "confirmation")
+            self.assertEqual(opened.actions[0].payload["value"], 90)
+
+            confirmed_open = decide_edge_assistant_action(
+                db, "greenhouse_001", opened.actions[0].id, "confirm"
+            )
+            self.assertEqual(confirmed_open.state, "confirmed")
+            open_command = db.query(SiteCommandRecord).one()
+            self.assertEqual((open_command.target, open_command.value), ("grow_light", 90))
+
+            closed = create_edge_assistant_reply(
+                db, "greenhouse_001", "关闭补光灯", opened.session_id, "edge_text"
+            )
+            self.assertEqual(closed.next_input, "confirmation")
+            self.assertEqual(closed.actions[0].payload["value"], 0)
+
+    def test_c5_rejects_grow_light_percentage_above_firmware_limit(self) -> None:
+        with SessionLocal() as db:
+            reply = create_edge_assistant_reply(
+                db, "greenhouse_001", "补光灯调到百分之九十五", None, "edge_text"
+            )
+            self.assertEqual(reply.next_input, "parameter")
+            self.assertEqual(reply.actions, [])
+            self.assertIn("0到90", reply.content)
+            self.assertEqual(db.query(SiteCommandRecord).count(), 0)
 
     def test_c5_invalid_or_canceled_parameter_never_generates_command(self) -> None:
         with SessionLocal() as db:

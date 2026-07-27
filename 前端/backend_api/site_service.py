@@ -32,6 +32,8 @@ from site_schemas import (
     EdgeAssistantConversationResponse,
     EdgeAssistantMessageResponse,
     EdgeDeviceState,
+    GROW_LIGHT_MAX_PERCENT,
+    GROW_LIGHT_MIN_PERCENT,
     SiteCommandRequest,
     SiteCommandResponse,
     SiteHistoryPoint,
@@ -62,9 +64,9 @@ HISTORY_SAMPLE_INTERVAL_MS = 10_000
 HISTORY_RETENTION_MS = 24 * 60 * 60 * 1000
 VISIBLE_HISTORY_SENSOR_KEYS = (
     "temperature_c",
+    "humidity_pct",
     "illuminance_lux",
     "co2_ppm",
-    "soil_moisture_pct",
 )
 DISPLAY_SENSOR_RANGES = {
     "temperature_c": "temperature",
@@ -846,17 +848,27 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
                 action.resolved_at = current
                 action.payload = {**action.payload, "error": block_reason}
             else:
-                on = not command.endswith(("_off", "_close"))
                 try:
                     requested_value = int(action.payload.get("value"))
                 except (TypeError, ValueError):
-                    requested_value = 100 if on else 0
+                    requested_value = (
+                        GROW_LIGHT_MIN_PERCENT
+                        if command.endswith(("_off", "_close"))
+                        else GROW_LIGHT_MAX_PERCENT
+                    )
+                # Old sessions and model-generated actions can still contain
+                # 100. Enforce the GPIO14 capability again at confirmation so
+                # no value rejected by the ESP32 reaches the MQTT queue.
+                safe_value = max(
+                    GROW_LIGHT_MIN_PERCENT,
+                    min(GROW_LIGHT_MAX_PERCENT, requested_value),
+                )
                 queued = queue_site_command(
                     db,
                     site_id,
                     SiteCommandRequest(
                         target=target,
-                        value=max(0, min(100, requested_value)),
+                        value=safe_value,
                         reason=str(action.payload.get("reason") or "C5 device-control confirmation"),
                         source="edge_voice",
                     ),
@@ -878,7 +890,13 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
             except (TypeError, ValueError):
                 action.state = "failed"
                 action.resolved_at = current
-                action.payload = {**action.payload, "error": "A grow-light brightness value from 0 to 100 is required."}
+                action.payload = {
+                    **action.payload,
+                    "error": (
+                        f"A grow-light brightness value from {GROW_LIGHT_MIN_PERCENT} "
+                        f"to {GROW_LIGHT_MAX_PERCENT} is required."
+                    ),
+                }
             else:
                 assistant_session = db.get(EdgeAssistantSession, action.session_id)
                 source = "edge_voice" if assistant_session is None or assistant_session.channel == "edge_text" else "web_manual"
@@ -887,7 +905,10 @@ def decide_edge_assistant_action(db: Session, site_id: str, action_id: str, deci
                     site_id,
                     SiteCommandRequest(
                         target="grow_light",
-                        value=max(0, min(100, requested_value)),
+                        value=max(
+                            GROW_LIGHT_MIN_PERCENT,
+                            min(GROW_LIGHT_MAX_PERCENT, requested_value),
+                        ),
                         reason=str(action.payload.get("reason") or "assistant grow-light confirmation"),
                         source=source,
                     ),

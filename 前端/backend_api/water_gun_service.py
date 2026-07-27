@@ -32,7 +32,18 @@ DYNAMIC_INTERVAL_MS = 1_000
 DYNAMIC_TIMEOUT_MS = 3_000
 MANUAL_FORWARD_MAX_MM = 1_200.0
 MANUAL_HALF_WIDTH_MM = 1_200.0
-PUMP_FULL_SCALE_RANGE_MM = 1_700.0
+
+# Pump calibration copied from 改/前端. The measured result uses two linear
+# sections because the low-duty response differs from the normal working range.
+# Percent values are the PWM duty sent to the ESP32; distances are centimetres.
+PUMP_MIN_PERCENT = 24.0
+PUMP_MAX_PERCENT = 100.0
+PUMP_LOW_SECTION_MAX_PERCENT = 30.0
+PUMP_LOW_SECTION_MAX_DISTANCE_CM = 24.26
+PUMP_LOW_DISTANCE_SLOPE = 3.9937
+PUMP_LOW_DISTANCE_INTERCEPT = -95.5466
+PUMP_HIGH_DISTANCE_SLOPE = 1.3657
+PUMP_HIGH_DISTANCE_INTERCEPT = -16.7069
 logger = logging.getLogger(__name__)
 
 
@@ -151,10 +162,36 @@ def _default_device_id() -> str:
     return os.getenv("S3_DEVICE_ID", "greenhouse_001_s3").strip() or "greenhouse_001_s3"
 
 
+def pwmToDistance(pwmPercent: float) -> float:
+    """Convert pump PWM duty percent to the calibrated spray distance in cm."""
+    # Clamp the input to the measured operating interval. A duty below 24%
+    # cannot be represented reliably by this calibration; a duty above 100%
+    # is not a valid PWM command.
+    pwm = max(PUMP_MIN_PERCENT, min(PUMP_MAX_PERCENT, float(pwmPercent)))
+    if pwm <= PUMP_LOW_SECTION_MAX_PERCENT:
+        return PUMP_LOW_DISTANCE_SLOPE * pwm + PUMP_LOW_DISTANCE_INTERCEPT
+    return PUMP_HIGH_DISTANCE_SLOPE * pwm + PUMP_HIGH_DISTANCE_INTERCEPT
+
+
+def distanceToPwm(distanceCm: float) -> float:
+    """Convert requested spray distance in cm to calibrated pump PWM duty."""
+    # REST and MQTT continue to use millimetres. This helper deliberately uses
+    # centimetres so its parameters remain identical to the measured model in
+    # 改/前端 and can be checked directly against the original calibration.
+    distance = max(0.0, float(distanceCm))
+    if distance <= PUMP_LOW_SECTION_MAX_DISTANCE_CM:
+        pwm = (distance - PUMP_LOW_DISTANCE_INTERCEPT) / PUMP_LOW_DISTANCE_SLOPE
+    else:
+        pwm = (distance - PUMP_HIGH_DISTANCE_INTERCEPT) / PUMP_HIGH_DISTANCE_SLOPE
+    return max(PUMP_MIN_PERCENT, min(PUMP_MAX_PERCENT, pwm))
+
+
 def _pump_control_percent(state: _WaterGunState) -> float:
     if not state.spray_enabled:
         return 0.0
-    return max(0.0, min(100.0, state.ground_range_mm / PUMP_FULL_SCALE_RANGE_MM * 100.0))
+    # Convert the existing millimetre target to centimetres only for the local
+    # calibration calculation. The externally visible target value is unchanged.
+    return distanceToPwm(state.ground_range_mm / 10.0)
 
 
 def _manual_target_in_bounds(target: WaterGunTarget) -> bool:

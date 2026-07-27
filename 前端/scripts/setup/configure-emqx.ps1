@@ -14,7 +14,8 @@ param(
     [string]$WifiPassword = "",
     [string]$CaCertPath = "",
     [string]$C5Username = "",
-    [string]$C5Password = ""
+    [string]$C5Password = "",
+    [string]$C5BackendBaseUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,19 @@ function Escape-CString([string]$Value) {
 function Escape-EnvValue([string]$Value) {
     if ($Value -match "[\r\n]") { throw "Environment values must not contain newlines." }
     return $Value
+}
+
+function Set-SdkconfigString([string]$Content, [string]$Name, [string]$Value) {
+    if ($Value -match "[\r\n]") { throw "sdkconfig values must not contain newlines." }
+    $escapedValue = $Value.Replace('\', '\\').Replace('"', '\"')
+    $replacement = ("CONFIG_$Name=`"$escapedValue`"").Replace('$', '$$')
+    $pattern = '(?m)^\s*CONFIG_' + [regex]::Escape($Name) + '=.*$'
+    $configRegex = [regex]::new($pattern)
+    if ($configRegex.IsMatch($Content)) {
+        return $configRegex.Replace($Content, $replacement, 1)
+    }
+    if ($Content -and !$Content.EndsWith("`n")) { $Content += "`r`n" }
+    return $Content + $replacement + "`r`n"
 }
 
 function Read-CDefine([string]$Content, [string]$Name) {
@@ -77,6 +91,18 @@ $uriPort = if ($uri.IsDefaultPort) { 8883 } else { $uri.Port }
 if ($uriPort -ne 8883) {
     throw "MqttUri must use the EMQX TLS port 8883."
 }
+if ($C5BackendBaseUrl) {
+    try {
+        $c5BackendUri = [Uri]$C5BackendBaseUrl
+    } catch {
+        throw "C5BackendBaseUrl must be an http:// or https:// origin reachable from the C5."
+    }
+    if ($c5BackendUri.Scheme -notin @("http", "https") -or !$c5BackendUri.Host -or
+            $c5BackendUri.AbsolutePath -notin @("", "/") -or $c5BackendUri.Query) {
+        throw "C5BackendBaseUrl must contain only the http/https scheme, host and optional port."
+    }
+    $C5BackendBaseUrl = "$($c5BackendUri.Scheme)://$($c5BackendUri.Authority)"
+}
 if (!$CaCertPath) {
     throw "CaCertPath is required. Export the EMQX server CA certificate to a local PEM file first."
 }
@@ -91,6 +117,14 @@ $backendCaPath = Join-Path $env:LOCALAPPDATA "SmartAgriBrain\certs\emqx-ca.crt"
 $esp32Include = Join-Path $repositoryRoot "esp32\include"
 $esp32ConfigPath = Join-Path $esp32Include "config.h"
 $esp32CaPath = Join-Path $esp32Include "emqx_ca_cert.h"
+$c5Candidates = @(
+    (Join-Path $repositoryRoot "esp32c5_voice_display"),
+    (Join-Path $repositoryRoot "c5"),
+    (Join-Path $repositoryRoot "改\c5")
+)
+$c5ProjectPath = $c5Candidates |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_ "CMakeLists.txt") -PathType Leaf } |
+    Select-Object -First 1
 
 # MQTT deployment changes must not erase a working local Wi-Fi configuration.
 # Explicit parameters still take precedence when the network itself is changing.
@@ -168,9 +202,37 @@ if ($CaCertPath) {
     Write-Utf8NoBom $esp32CaPath $esp32Ca
 }
 
-if ($C5Username -or $C5Password) {
-    if (!$C5Username -or !$C5Password) { throw "Provide both C5Username and C5Password, or omit both." }
-    Write-Warning "C5 configuration was not written because the C5 source is optional in this checkout. Apply these EMQX values when its source is available."
+if ($C5Username -or $C5Password -or $C5BackendBaseUrl) {
+    if (($C5Username -and !$C5Password) -or ($C5Password -and !$C5Username)) {
+        throw "Provide both C5Username and C5Password, or omit both."
+    }
+    if (!$c5ProjectPath) {
+        throw "C5 credentials were supplied, but no C5 ESP-IDF project was found."
+    }
+    $c5ConfigPath = Join-Path $c5ProjectPath "sdkconfig.local"
+    $c5Config = if (Test-Path -LiteralPath $c5ConfigPath) {
+        [System.IO.File]::ReadAllText($c5ConfigPath)
+    } else {
+        ""
+    }
+    $c5Config = Set-SdkconfigString $c5Config "SENSAIR_SITE_ID" "greenhouse_001"
+    $c5Config = Set-SdkconfigString $c5Config "SENSAIR_DEVICE_ID" "greenhouse_001_c5"
+    $c5Config = Set-SdkconfigString $c5Config "SENSAIR_S3_DEVICE_ID" "greenhouse_001_s3"
+    $c5Config = Set-SdkconfigString $c5Config "SENSAIR_MQTT_URI" $MqttUri
+    $c5Config = Set-SdkconfigString $c5Config "SENSAIR_MQTT_TOPIC_PREFIX" "smartagribrain/v1"
+    if ($C5Username) {
+        $c5Config = Set-SdkconfigString $c5Config "SENSAIR_MQTT_USERNAME" $C5Username
+        $c5Config = Set-SdkconfigString $c5Config "SENSAIR_MQTT_PASSWORD" $C5Password
+    }
+    if ($C5BackendBaseUrl) {
+        $voiceWsScheme = if ($c5BackendUri.Scheme -eq "https") { "wss" } else { "ws" }
+        $c5Config = Set-SdkconfigString $c5Config "SENSAIR_VOICE_API_URL" "$C5BackendBaseUrl/api/v1/assistant/voice?site_id=greenhouse_001"
+        $c5Config = Set-SdkconfigString $c5Config "SENSAIR_VOICE_LIVE_WS_URL" "${voiceWsScheme}://$($c5BackendUri.Authority)/api/v1/assistant/voice/live"
+    }
+    if ($WifiSsid) { $c5Config = Set-SdkconfigString $c5Config "SENSAIR_WIFI_SSID" $WifiSsid }
+    if ($WifiPassword) { $c5Config = Set-SdkconfigString $c5Config "SENSAIR_WIFI_PASSWORD" $WifiPassword }
+    Write-Utf8NoBom $c5ConfigPath $c5Config
+    Write-Host "C5 EMQX configuration: $c5ConfigPath"
 }
 
 Write-Host "EMQX configuration was written to ignored local files."

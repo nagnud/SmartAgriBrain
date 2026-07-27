@@ -49,6 +49,10 @@ smartagribrain/v1/devices/{device_id}/capabilities
 
 命令、ACK、遥测、状态、能力和 LWT 当前统一使用 QoS 1。命令发布 `retain=false`。QoS 1 允许重复投递，所以后端和 ESP32 都必须按完整 ID 幂等处理。
 
+C5 使用设备 ID `greenhouse_001_c5`。除状态和能力外，它发布 `assistant/request`、`assistant/decision`、`assistant/recover`，订阅后端发布的 `view_state` 和 `assistant/response`。C5 不订阅普通 ESP32 的 `command`；确认操作由 FastAPI 转换为 `greenhouse_001_s3/command`。
+
+C5 MQTT 必须连接 `mqtts://c004e950.ala.cn-hangzhou.emqxsl.cn:8883`，使用 QoS 1、持久会话和证书校验。语音音频走电脑 FastAPI 的 HTTP/WebSocket；当前 C5 可达基础地址为 `http://192.168.3.15:8000`，本轮没有修改语音业务协议。
+
 ## 4. EMQX 配置
 
 项目不再使用本地 Mosquitto。Broker 统一为外部 EMQX，地址、凭据和 CA 证书均是部署机本地配置，不得提交到仓库。
@@ -118,7 +122,7 @@ ESP32 非阻塞环路为：
 8. 开泵并发布 ACK。
 9. 主循环持续推进定时器和动态超时，到期立即停泵。
 
-坐标到舵机角度、800 ms 稳定时间、水泵 40% 最小启动值和距离功率关系均为 `UN_CALIBRATED_PLACEHOLDER`，只能验证程序流程，不能宣称已经精确瞄准。
+水泵距离功率已采用实测两段拟合，非零有效范围为 24% 至 100%。坐标到舵机角度和 800 ms 稳定时间仍为 `UN_CALIBRATED_PLACEHOLDER`，只能验证瞄准流程，不能宣称已经精确命中目标。
 
 Web 当前每 1000 ms 调用后端 heartbeat，后端约 3000 ms 判定会话超时，但 heartbeat 只刷新内存，不发 MQTT、不递增 `sequence`。真实联调前，后端必须向 ESP32 发布设备可见的 1 s 保活；ESP32 继续保留 3 s 无合法新序号即停泵。
 

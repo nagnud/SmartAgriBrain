@@ -9,6 +9,12 @@ SiteCommandTarget = Literal[
     "grow_light",
 ]
 
+# The ordinary ESP32 advertises the GPIO14 grow-light output as 0..90 percent.
+# Keep this limit in the API schema so Web, C5 voice, and direct REST requests
+# cannot enqueue a value that the firmware must reject.
+GROW_LIGHT_MIN_PERCENT = 0
+GROW_LIGHT_MAX_PERCENT = 90
+
 
 class ActuatorState(BaseModel):
     supported: bool = False
@@ -53,7 +59,7 @@ class SiteHistoryPoint(BaseModel):
 
 class SiteCommandRequest(BaseModel):
     target: SiteCommandTarget
-    value: int = Field(..., ge=0, le=100)
+    value: int = Field(..., ge=GROW_LIGHT_MIN_PERCENT, le=GROW_LIGHT_MAX_PERCENT)
     reason: str = Field(default="", max_length=500)
     source: Literal["web_manual", "edge_voice", "smart_control"] = "web_manual"
 

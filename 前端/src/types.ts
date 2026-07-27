@@ -74,8 +74,8 @@ export interface HistoryPoint {
   light: number | null;
   co2: number | null;
   soil_moisture: number | null;
-  // Reserved for sensors that are not currently rendered in the Web UI.
   humidity: number | null;
+  // Reserved for sensors that are not currently rendered in the Web UI.
   gas_resistance: number | null;
   soil_ec: number | null;
 }

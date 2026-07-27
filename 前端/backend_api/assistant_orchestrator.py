@@ -33,6 +33,7 @@ from schemas import (
     KnowledgeReference,
 )
 from site_models import EdgeAssistantAction, EdgeAssistantMessage, EdgeAssistantSession
+from site_schemas import GROW_LIGHT_MAX_PERCENT, GROW_LIGHT_MIN_PERCENT
 from vision_service import call_ark_vision
 
 
@@ -496,13 +497,12 @@ def _system_prompt(channel: str) -> str:
     )
     device_rule = (
         "你当前服务的是 C5 现场终端，不操控网页视图。可以查询实时环境、天气、趋势、报警、执行回执、农事建议、"
-        "摄像头健康和目标位置，并可控制当前可用的水泵、补光、加热、降温、风机、通风、卷帘、"
-        "二氧化碳阀、报警器、水枪及智能托管参数。现场控制必须完整复述后只生成一个待确认 action；缺少百分比、"
+        "摄像头健康和目标位置。当前普通 ESP32 的通用执行器只有补光灯，另有独立的复合水枪控制；"
+        "不存在加热器、风机、卷帘或其他执行器。现场控制必须完整复述后只生成一个待确认 action；缺少百分比、"
         "模式、目标或时长时只追问所缺参数，不猜测、不执行，也不要用笼统的‘请重试’代替具体追问。"
         if channel == "edge_text"
         else (
-            "设备控制类型为 device_command，payload 使用 command、value、reason；value 为 0 到 100 的百分比，"
-            "开启设备使用 100、关闭使用 0；仅允许风扇、水泵、窗帘和报警器的控制命令。"
+            "补光灯命令的 value 范围为 0 到 90；开启使用 90、关闭使用 0。"
             "本页面没有独立补光灯开关：用户说补光时必须调整智能托管的 light 参数，禁止生成 light_on 或 light_off。"
             "用户未指定补光百分比时，应提供 30%、60%、90% 三个 smart_control update_manual action 供其点击选择；"
             "用户指定百分比后只生成对应的一个待确认 action。"
@@ -607,7 +607,7 @@ def _fast_edge_device_action(text: str) -> _FastEdgeReply | None:
     verb = "打开" if action_word == "on" else "关闭"
     command = ("curtain_open" if action_word == "on" else "curtain_close") \
         if target == "curtain" else f"{target}_{action_word}"
-    value = 100 if action_word == "on" else 0
+    value = GROW_LIGHT_MAX_PERCENT if action_word == "on" else GROW_LIGHT_MIN_PERCENT
     action = AssistantAction(
         id=f"assistant-action-fast-{uuid.uuid4().hex}",
         type="device_command",
@@ -651,7 +651,7 @@ def _web_light_control_value(text: str) -> int | None:
     if match is None:
         return None
     value = int(match.group(1))
-    return value if 0 <= value <= 100 else -1
+    return value if GROW_LIGHT_MIN_PERCENT <= value <= GROW_LIGHT_MAX_PERCENT else -1
 
 
 _WEB_SELECTION_CUE = re.compile(
@@ -747,7 +747,10 @@ def _fast_web_smart_light_reply(db: Session, text: str) -> _FastEdgeReply | None
     parameter_states = dashboard.get("smartControlParamStates")
     light_state = parameter_states.get("light") if isinstance(parameter_states, dict) else None
     try:
-        current_value = max(0, min(100, int((light_state or {}).get("value") or 0)))
+        current_value = max(
+            GROW_LIGHT_MIN_PERCENT,
+            min(GROW_LIGHT_MAX_PERCENT, int((light_state or {}).get("value") or 0)),
+        )
     except (AttributeError, TypeError, ValueError):
         current_value = 0
 
@@ -771,7 +774,8 @@ def _fast_web_smart_light_reply(db: Session, text: str) -> _FastEdgeReply | None
     if requested_value == -1:
         choice_group = f"light-{uuid.uuid4().hex}"
         return _FastEdgeReply(
-            "补光托管参数只能设置为 0% 到 100%。请选择下面的常用档位。",
+            f"补光托管参数只能设置为 {GROW_LIGHT_MIN_PERCENT}% 到 "
+            f"{GROW_LIGHT_MAX_PERCENT}%。请选择下面的常用档位。",
             {"web_smart_light": True, "current_light_value": current_value},
             [
                 _web_light_smart_action(value, current_value, choice_group=choice_group)
@@ -807,8 +811,13 @@ def _web_light_device_action_as_smart_control(action: AssistantAction) -> Assist
     try:
         requested_value = int(action.payload.get("value"))
     except (TypeError, ValueError):
-        requested_value = 100 if command == "light_on" else 0
-    requested_value = max(0, min(100, requested_value))
+        requested_value = (
+            GROW_LIGHT_MAX_PERCENT if command == "light_on" else GROW_LIGHT_MIN_PERCENT
+        )
+    requested_value = max(
+        GROW_LIGHT_MIN_PERCENT,
+        min(GROW_LIGHT_MAX_PERCENT, requested_value),
+    )
     return action.model_copy(update={
         "type": "smart_control",
         "title": f"补光托管调到 {requested_value}%",
